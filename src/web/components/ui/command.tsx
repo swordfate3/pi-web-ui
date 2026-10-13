@@ -3,6 +3,7 @@ import { SearchIcon } from "lucide-react";
 import type * as React from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { t, useLanguage } from "../../src/core/i18n";
 
 function Command({ className, ...props }: React.ComponentProps<typeof CommandPrimitive>) {
   return (
@@ -18,8 +19,8 @@ function Command({ className, ...props }: React.ComponentProps<typeof CommandPri
 }
 
 function CommandDialog({
-  title = "Command Palette",
-  description = "Search for a command to run...",
+  title = t("Command Palette"),
+  description = t("Search for a command to run..."),
   children,
   className,
   showCloseButton = true,
@@ -30,6 +31,7 @@ function CommandDialog({
   className?: string;
   showCloseButton?: boolean;
 }) {
+  useLanguage();
   return (
     <Dialog {...props}>
       <DialogHeader className="sr-only">

@@ -10,11 +10,18 @@
  * - Sends full state snapshot on client connect (messages, model, etc.)
  */
 
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import { WebSocket, WebSocketServer } from "ws";
 
 type SettingsData = {
@@ -69,12 +76,55 @@ type SessionEntry = {
   };
 };
 
-type SessionTreeNode = {
-  entry: SessionEntry;
-  children: SessionTreeNode[];
+type BrowserTreeNode = {
+  entry: SessionEntry & { id: string };
+  parentNodeId: string | null;
   label?: string;
   labelTimestamp?: string;
 };
+
+// Tree depth must never become JSON depth. Preserve getTree()'s root/child order
+// using iterative preorder traversal, including orphan roots and resolved labels.
+function flattenSessionTree(tree: unknown): BrowserTreeNode[] {
+  if (!Array.isArray(tree)) throw new Error("Invalid session tree: expected roots array");
+  const nodes: BrowserTreeNode[] = [];
+  const seenNodes = new WeakSet<object>();
+  const seenIds = new Set<string>();
+  const stack: { node: unknown; parentNodeId: string | null }[] = [];
+  for (let i = tree.length - 1; i >= 0; i--) {
+    stack.push({ node: tree[i], parentNodeId: null });
+  }
+  while (stack.length > 0) {
+    const next = stack.pop();
+    if (!next) break;
+    const { node, parentNodeId } = next;
+    if (!node || typeof node !== "object" || Array.isArray(node)) {
+      throw new Error("Invalid session tree: expected node object");
+    }
+    if (seenNodes.has(node)) throw new Error("Invalid session tree: repeated or cyclic node");
+    seenNodes.add(node);
+    const { entry, children, label, labelTimestamp } = node as Record<string, unknown>;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("Invalid session tree: expected entry object");
+    }
+    const id = (entry as SessionEntry).id;
+    if (typeof id !== "string" || !id || seenIds.has(id)) {
+      throw new Error("Invalid session tree: missing or duplicate entry id");
+    }
+    if (!Array.isArray(children)) throw new Error("Invalid session tree: expected children array");
+    if (label !== undefined && typeof label !== "string") throw new Error("Invalid session tree: invalid label");
+    if (labelTimestamp !== undefined && typeof labelTimestamp !== "string") {
+      throw new Error("Invalid session tree: invalid label timestamp");
+    }
+    seenIds.add(id);
+    nodes.push({ entry: entry as BrowserTreeNode["entry"], parentNodeId, label, labelTimestamp });
+    // Use the actual nested parent, not entry.parentId (which can be stale or orphaned).
+    for (let i = children.length - 1; i >= 0; i--) {
+      stack.push({ node: children[i], parentNodeId: id });
+    }
+  }
+  return nodes;
+}
 
 type FileListItem = {
   name: string;
@@ -110,6 +160,25 @@ type ModelCandidate = {
   provider?: string;
   id?: string;
 };
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type BrowserThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+function isThinkingLevel(value: unknown): value is BrowserThinkingLevel {
+  return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
+}
+
+function getAvailableThinkingLevels(ctx: ExtensionContext | null): BrowserThinkingLevel[] {
+  const model = ctx?.model;
+  if (!model) return [...THINKING_LEVELS];
+  if (!model.reasoning) return ["off"];
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
 
 type ExtensionAPIWithEvents = ExtensionAPI & {
   events?: {
@@ -172,6 +241,71 @@ const ARTIFACT_TOOL_NAMES = new Set(["edit", "write"]);
 const MARKDOWN_EXTENSIONS = [".md", ".mdx", ".markdown"];
 // @ts-expect-error — __dirname is provided by jiti at runtime
 const STATIC_DIR = process.env.PI_WEB_UI_STATIC_DIR || findStaticDir();
+const MAX_BROWSER_SERIALIZATION_DEPTH = 256;
+
+function toBrowserJsonValue(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "undefined") return undefined;
+  if (typeof value === "function" || typeof value === "symbol") return String(value);
+  if (depth >= MAX_BROWSER_SERIALIZATION_DEPTH) return "[Truncated]";
+
+  const objectValue = value as object;
+  if (seen.has(objectValue)) return "[Circular]";
+  seen.add(objectValue);
+  try {
+    if (value instanceof Date) return value.toISOString();
+    if (Array.isArray(value)) {
+      return value.map((item) => toBrowserJsonValue(item, depth + 1, seen));
+    }
+
+    const output: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      try {
+        output[key] = toBrowserJsonValue(child, depth + 1, seen);
+      } catch {
+        output[key] = "[Unserializable]";
+      }
+    }
+    return output;
+  } finally {
+    seen.delete(objectValue);
+  }
+}
+
+function toBrowserSessionEntry(entry: SessionEntry): SessionEntry {
+  // Keep persisted entry metadata intact; only message/tool payloads need the
+  // bounded serializer. Do not silently replace custom entry data or topology.
+  return entry.message === undefined
+    ? entry
+    : { ...entry, message: toBrowserJsonValue(entry.message) as SessionEntry["message"] };
+}
+
+function stringifyForBrowser(data: unknown): string {
+  if (data && typeof data === "object") {
+    const envelope = data as Record<string, unknown>;
+    const field = envelope.type === "event" && envelope.event === "state_sync" ? "payload" : "result";
+    const payload = envelope[field];
+    if (payload && typeof payload === "object" && Array.isArray((payload as Record<string, unknown>).treeNodes)) {
+      const { treeNodes, entries, ...rest } = payload as {
+        treeNodes: BrowserTreeNode[];
+        entries?: SessionEntry[];
+      };
+      // Sanitize other fields, but never run the generic depth limiter over
+      // treeNodes or entry metadata. Flat topology has constant JSON depth.
+      const safeEnvelope = toBrowserJsonValue({ ...envelope, [field]: rest }) as Record<string, unknown>;
+      safeEnvelope[field] = {
+        ...(safeEnvelope[field] as Record<string, unknown>),
+        ...(entries === undefined ? {} : { entries: entries.map(toBrowserSessionEntry) }),
+        treeNodes: treeNodes.map((node) => ({ ...node, entry: toBrowserSessionEntry(node.entry) })),
+      };
+      return JSON.stringify(safeEnvelope);
+    }
+  }
+  return JSON.stringify(toBrowserJsonValue(data)) ?? "null";
+}
 
 function findStaticDir(): string {
   const candidates: string[] = [];
@@ -242,13 +376,444 @@ export default function (pi: ExtensionAPI) {
   let advancedFeaturesEnabled = false;
   let latestExecuteCtx: ExtensionCommandContext | null = null;
   const liveArtifactPaths = new Set<string>();
+  let sessionReplacementPending = false;
+  // Protocol: replacement acknowledgements mean accepted, never completed.
+  // Resume completes on state_sync.sessionId === targetSessionId; reload keeps
+  // that ID and completes only on a different state_sync.runtimeId. Both clear
+  // advancedFeatures and require /webui again. Never replay either on reconnect.
+  const runtimeId = randomUUID();
+  let lifecycleEpoch = 0;
+  let runtimeActive = false;
+  let exportGeneration = 0;
+  let dispatchTimer: NodeJS.Timeout | null = null;
+  let pendingSessionCommand: string | null = null;
+  let pendingDispatchId: string | null = null;
+  let pendingResume: Readonly<SavedSelection> | null = null;
+  const CAPABILITY_TTL_MS = 10 * 60 * 1000;
+  const MAX_SAVED_SELECTIONS = 1024;
+  const MAX_RETAINED_EXPORTS = 8;
+  const internalCommands = new Set(["webui-new-session", "webui-fork-session", "webui-resume-session", "webui-reload"]);
+  type SavedSelection = {
+    path: string;
+    targetSessionId: string;
+    sessionId: string;
+    cwd: string;
+    sessionDir: string;
+    epoch: number;
+    expiresAt: number;
+  };
+  // Capabilities are bounded and expire on TTL/lifecycle, not another browser's
+  // listing. Paths never come from the browser; downloads serve only owned HTML.
+  const savedSelections = new Map<string, Readonly<SavedSelection>>();
+  const exports = new Map<string, { path: string; directory: string; filename: string; expiresAt: number }>();
+  let activeExport: { controller: AbortController; done: Promise<unknown> } | null = null;
+
+  function clearSessionAction() {
+    if (dispatchTimer) clearTimeout(dispatchTimer);
+    dispatchTimer = null;
+    sessionReplacementPending = false;
+    pendingSessionCommand = null;
+    pendingDispatchId = null;
+    pendingResume = null;
+  }
+
+  function pruneSavedSelections() {
+    const now = Date.now();
+    for (const [id, selection] of savedSelections) {
+      if (selection.expiresAt <= now || !scopeIsCurrent(selection)) savedSelections.delete(id);
+    }
+  }
+
+  function removeExport(token: string) {
+    const exported = exports.get(token);
+    if (!exported) return;
+    exports.delete(token);
+    try {
+      fs.rmSync(exported.directory, { recursive: true, force: true });
+    } catch {}
+  }
+
+  function pruneExports() {
+    const now = Date.now();
+    for (const [token, exported] of exports) {
+      if (exported.expiresAt <= now) removeExport(token);
+    }
+  }
+
+  function sessionScope(ctx: ExtensionContext) {
+    return {
+      sessionId: ctx.sessionManager.getSessionId(),
+      cwd: path.resolve(ctx.cwd),
+      sessionDir: path.resolve(ctx.sessionManager.getSessionDir()),
+      epoch: lifecycleEpoch,
+    };
+  }
+
+  function scopeIsCurrent(scope: ReturnType<typeof sessionScope>) {
+    return (
+      runtimeActive &&
+      !!latestCtx &&
+      scope.epoch === lifecycleEpoch &&
+      scope.sessionId === latestCtx.sessionManager.getSessionId() &&
+      scope.cwd === path.resolve(latestCtx.cwd) &&
+      scope.sessionDir === path.resolve(latestCtx.sessionManager.getSessionDir())
+    );
+  }
+
+  function allowedSessionPath(filePath: string, sessionDir: string) {
+    // Direct regular files only: no symlinks or paths outside the configured store.
+    try {
+      const resolved = path.resolve(filePath);
+      return (
+        path.dirname(resolved) === sessionDir &&
+        path.extname(resolved) === ".jsonl" &&
+        fs.lstatSync(resolved).isFile() &&
+        path.dirname(fs.realpathSync(resolved)) === fs.realpathSync(sessionDir)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  async function listSavedSessions() {
+    if (!latestCtx) throw new Error("No context available");
+    if (sessionReplacementPending) throw new Error("A session action is already in progress");
+    const scope = sessionScope(latestCtx);
+    // Pass the actual public manager's sessionDir, including CLI --session-dir.
+    // Never use listAll: custom stores can contain multiple projects.
+    const sessions = await SessionManager.list(scope.cwd, scope.sessionDir);
+    if (!scopeIsCurrent(scope) || sessionReplacementPending)
+      throw new Error("Session changed. Reopen the session picker.");
+    pruneSavedSelections();
+    return {
+      sessionId: scope.sessionId,
+      cwd: scope.cwd,
+      sessions: sessions
+        .filter(
+          (session) =>
+            session.cwd &&
+            path.resolve(session.cwd) === scope.cwd &&
+            allowedSessionPath(session.path, scope.sessionDir),
+        )
+        .slice(0, MAX_SAVED_SELECTIONS)
+        .map((session) => {
+          const existing = [...savedSelections].find(
+            ([, selection]) => selection.path === session.path && selection.targetSessionId === session.id,
+          );
+          const id = existing?.[0] ?? randomUUID();
+          if (!existing && savedSelections.size >= MAX_SAVED_SELECTIONS) {
+            const oldest = savedSelections.keys().next().value;
+            if (oldest) savedSelections.delete(oldest);
+          }
+          savedSelections.set(
+            id,
+            Object.freeze({
+              ...scope,
+              path: session.path,
+              targetSessionId: session.id,
+              expiresAt: Date.now() + CAPABILITY_TTL_MS,
+            }),
+          );
+          return {
+            id,
+            sessionId: session.id,
+            name: session.name ?? null,
+            created: session.created.toISOString(),
+            modified: session.modified.toISOString(),
+            messageCount: session.messageCount,
+            firstMessage: session.firstMessage,
+            isCurrent: session.id === scope.sessionId,
+          };
+        }),
+    };
+  }
+
+  function requireSessionAction(action: string, advanced = true) {
+    if (sessionReplacementPending) throw new Error("A session action is already in progress");
+    if (!latestCtx) throw new Error("No context available");
+    if (advanced && (!advancedFeaturesEnabled || !latestExecuteCtx))
+      throw new Error(`Run /webui first to enable ${action}`);
+    if (!latestCtx.isIdle() || latestCtx.hasPendingMessages())
+      throw new Error("Wait for the current Pi turn and queued messages to finish");
+  }
+
+  function acceptSessionAction(command: string) {
+    sessionReplacementPending = true;
+    const [invocation, ...args] = command.trim().split(/\s+/);
+    pendingSessionCommand = invocation.slice(1);
+    pendingDispatchId = randomUUID();
+    const dispatchId = pendingDispatchId;
+    const epoch = lifecycleEpoch;
+    // sendUserMessage is void. Pi reports asynchronous dispatch failures as RPC
+    // extension_error, NOT a public pi.on event. Bound the pre-handler lock even
+    // when dispatch fails before a command context can be supplied.
+    dispatchTimer = setTimeout(() => {
+      if (runtimeActive && lifecycleEpoch === epoch && pendingDispatchId === dispatchId && sessionReplacementPending)
+        reportSessionCommandError("Pi could not dispatch the session action. Try again.");
+    }, 10_000);
+    dispatchTimer.unref();
+    try {
+      // Fence a delayed dispatch too: an expired command cannot execute under
+      // the lock of a later request for the same operation.
+      pi.sendUserMessage(`${invocation} ${dispatchId} ${args.join(" ")}`.trimEnd(), { expandPromptTemplates: true });
+    } catch {
+      clearSessionAction();
+      throw new Error("Pi could not dispatch the session action. Try again.");
+    }
+  }
+
+  function requestResume(id: unknown, sessionId: unknown) {
+    requireSessionAction("session resume commands");
+    pruneSavedSelections();
+    const selection = typeof id === "string" ? savedSelections.get(id) : undefined;
+    if (!selection || sessionId !== selection.sessionId || !scopeIsCurrent(selection)) {
+      throw new Error("Session selection expired. Reopen the session picker.");
+    }
+    if (selection.targetSessionId === selection.sessionId) throw new Error("That session is already active");
+    // Pin plain immutable data before dispatch; eviction/re-listing cannot change
+    // the target while Pi is preparing the command handler.
+    pendingResume = Object.freeze({ ...selection });
+    acceptSessionAction(`/webui-resume-session ${id}`);
+    return {
+      action: "resume",
+      accepted: true,
+      sessionId: selection.sessionId,
+      targetSessionId: selection.targetSessionId,
+    };
+  }
+
+  function requestReload(sessionId?: unknown) {
+    requireSessionAction("runtime reload");
+    if (!latestCtx) throw new Error("No context available");
+    const currentSessionId = latestCtx.sessionManager.getSessionId();
+    if (sessionId !== undefined && sessionId !== currentSessionId)
+      throw new Error("Session changed. Try reload again.");
+    const result = { action: "reload", accepted: true, sessionId: currentSessionId, runtimeId };
+    acceptSessionAction("/webui-reload");
+    return result;
+  }
+
+  function buildSessionDetails(ctx: ExtensionContext) {
+    const entries = ctx.sessionManager.getEntries();
+    let userMessages = 0;
+    let assistantMessages = 0;
+    let toolCalls = 0;
+    let toolResults = 0;
+    let totalMessages = 0;
+    const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+    const costs = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+    const addUsage = (
+      usage:
+        | { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: Partial<typeof costs> }
+        | undefined,
+    ) => {
+      if (!usage) return;
+      for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) tokens[key] += usage[key] ?? 0;
+      for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const)
+        costs[key] += usage.cost?.[key] ?? 0;
+    };
+    for (const entry of entries) {
+      if (entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary")
+        addUsage(entry.usage);
+      if (entry.type !== "message") continue;
+      totalMessages++;
+      const message = entry.message;
+      if (message.role === "user") userMessages++;
+      if (message.role === "assistant") {
+        assistantMessages++;
+        toolCalls += message.content.filter((block) => block.type === "toolCall").length;
+        addUsage(message.usage);
+      }
+      if (message.role === "toolResult") {
+        toolResults++;
+        addUsage(message.usage);
+      }
+    }
+    tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+    return {
+      sessionFile: ctx.sessionManager.getSessionFile() ?? null,
+      sessionId: ctx.sessionManager.getSessionId(),
+      sessionName: pi.getSessionName() ?? null,
+      cwd: ctx.cwd,
+      sessionDir: ctx.sessionManager.getSessionDir(),
+      header: ctx.sessionManager.getHeader(),
+      leafId: ctx.sessionManager.getLeafId(),
+      entryCount: entries.length,
+      branchEntryCount: ctx.sessionManager.getBranch().length,
+      userMessages,
+      assistantMessages,
+      toolCalls,
+      toolResults,
+      totalMessages,
+      tokens,
+      cost: costs.total,
+      costs,
+      contextUsage: ctx.getContextUsage() ?? null,
+      model: ctx.model ?? null,
+      thinkingLevel: pi.getThinkingLevel(),
+      isStreaming: !ctx.isIdle(),
+      hasPendingMessages: ctx.hasPendingMessages(),
+      // Public effective settings, not a private AgentSession/settings manager.
+      autoCompactionEnabled: pi.getSettings().compaction?.enabled !== false,
+      runtimeId,
+      statisticsScope: "all_entries",
+    };
+  }
+
+  function exportCli(): { file: string; args: string[] } {
+    // An explicit host configuration may select a CLI executable or JS entry.
+    // Never fall back to an arbitrary `pi` on PATH (or copy credential CLI args).
+    const configured = process.env.PI_WEB_UI_PI_BIN || process.env.PI_E2E_BIN;
+    if (configured) {
+      if (!path.isAbsolute(configured) && !configured.includes(path.sep))
+        throw new Error("HTML export requires an explicit Pi CLI path");
+      try {
+        const entry = fs.realpathSync(path.resolve(configured));
+        if (!fs.statSync(entry).isFile()) throw new Error("Not a CLI file");
+        return /\.[cm]?js$/.test(entry) ? { file: process.execPath, args: [entry] } : { file: entry, args: [] };
+      } catch {
+        throw new Error("Configured Pi CLI is unavailable for HTML export");
+      }
+    }
+    // Node retains the invoked CLI in argv[1], including symlink invocations.
+    // Verify it against its owning Pi package's public bin metadata, rather than
+    // require.resolve (which could select a different installed SDK/CLI version).
+    try {
+      const entry = fs.realpathSync(process.argv[1]);
+      let directory = path.dirname(entry);
+      for (;;) {
+        const manifestPath = path.join(directory, "package.json");
+        if (fs.existsSync(manifestPath)) {
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+            name?: string;
+            bin?: string | Record<string, string>;
+          };
+          const bins = typeof manifest.bin === "string" ? [manifest.bin] : Object.values(manifest.bin ?? {});
+          if (
+            ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"].includes(manifest.name ?? "") &&
+            bins.some((bin) => fs.realpathSync(path.resolve(directory, bin)) === entry)
+          )
+            return { file: process.execPath, args: [entry] };
+        }
+        const parent = path.dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+      }
+    } catch {}
+    throw new Error("Cannot locate the current Pi CLI. Set PI_WEB_UI_PI_BIN to an explicit CLI path.");
+  }
+
+  function exportHtml(ctx: ExtensionContext, outputPath?: unknown) {
+    if (outputPath !== undefined) throw new Error("Browser exports do not accept host output paths");
+    if (!runtimeActive || !server) throw new Error("Pi Web UI is not running");
+    if (sessionReplacementPending) throw new Error("A session action is already in progress");
+    if (!ctx.isIdle() || ctx.hasPendingMessages()) throw new Error("Wait for Pi to become idle before exporting");
+    if (activeExport) throw new Error("An HTML export is already in progress");
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    if (!sessionFile || !fs.existsSync(sessionFile)) throw new Error("No saved session file to export");
+    const scope = sessionScope(ctx);
+    const generation = exportGeneration;
+    const cli = exportCli();
+    const controller = new AbortController();
+    // Everything from ctx is copied synchronously. No captured ctx is accessed
+    // after the child awaits, including validation and failure/shutdown cleanup.
+    const done = generateExport(sessionFile, scope, generation, cli, controller);
+    const job = { controller, done };
+    activeExport = job;
+    void done
+      .finally(() => {
+        if (activeExport === job) activeExport = null;
+      })
+      .catch(() => {});
+    return done;
+  }
+
+  async function generateExport(
+    sessionFile: string,
+    scope: ReturnType<typeof sessionScope>,
+    generation: number,
+    cli: ReturnType<typeof exportCli>,
+    controller: AbortController,
+  ) {
+    let directory: string | undefined;
+    let retained = false;
+    try {
+      directory = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "pi-web-ui-export-")));
+      const input = path.join(directory, "input.jsonl");
+      // CLI export may auto-migrate legacy JSONL. Only its private copy is opened.
+      fs.copyFileSync(sessionFile, input, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(input, 0o600);
+      const filename = `session-${randomUUID()}.html`;
+      const output = path.join(directory, filename);
+      await new Promise<void>((resolve, reject) => {
+        let failed = false;
+        const child = execFile(
+          cli.file,
+          [...cli.args, "--export", input, output],
+          {
+            cwd: scope.cwd,
+            timeout: 30_000,
+            killSignal: "SIGKILL",
+            signal: controller.signal,
+            maxBuffer: 64 * 1024,
+            encoding: "utf8",
+          },
+          (err) => {
+            // Never propagate execFile's error.message/stdout/stderr/argv: any of
+            // them can contain transcript contents or host credentials.
+            failed = !!err;
+          },
+        );
+        child.once("error", () => {
+          failed = true;
+        });
+        // Abort's callback may fire before the child exits. Wait for close before
+        // removing its directory or releasing the single-export concurrency slot.
+        child.once("close", (code, signal) => {
+          if (failed || code !== 0 || signal) reject(new Error("HTML export failed or timed out"));
+          else resolve();
+        });
+        child.stdin?.end();
+      });
+      // Shutdown/stop can overlap the await. Fence before accessing fresh context
+      // or committing a token; a completed old job can never repopulate the map.
+      if (
+        !runtimeActive ||
+        generation !== exportGeneration ||
+        scope.epoch !== lifecycleEpoch ||
+        sessionReplacementPending
+      )
+        throw new Error("HTML export cancelled because the Pi runtime changed");
+      if (!fs.lstatSync(output).isFile() || fs.realpathSync(output) !== output)
+        throw new Error("HTML export was not generated");
+      fs.chmodSync(output, 0o600);
+      fs.rmSync(input, { force: true });
+      pruneExports();
+      while (exports.size >= MAX_RETAINED_EXPORTS) {
+        const oldest = exports.keys().next().value;
+        if (oldest) removeExport(oldest);
+      }
+      const token = randomUUID();
+      exports.set(token, { path: output, directory, filename, expiresAt: Date.now() + CAPABILITY_TTL_MS });
+      retained = true;
+      return { token, filename, downloadUrl: `/api/exports/${token}` };
+    } catch {
+      throw new Error("HTML export failed, timed out, or was cancelled. Try again while Pi is idle.");
+    } finally {
+      if (directory && !retained) {
+        try {
+          fs.rmSync(directory, { recursive: true, force: true });
+        } catch {}
+      }
+    }
+  }
 
   // ═══════════════════════════════════════
   // Helper: send to one client
   // ═══════════════════════════════════════
   function sendTo(ws: WritableSocket, data: unknown) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(data));
+      ws.send(stringifyForBrowser(data));
     }
   }
 
@@ -256,9 +821,11 @@ export default function (pi: ExtensionAPI) {
   // Helper: broadcast to all clients
   // ═══════════════════════════════════════
   function broadcast(data: unknown) {
-    const json = JSON.stringify(data);
+    let json: string | undefined;
     for (const client of clients) {
       if (client.readyState === WebSocket.OPEN) {
+        // No open clients means no serialization; otherwise serialize only once.
+        json ??= stringifyForBrowser(data);
         client.send(json);
       }
     }
@@ -280,14 +847,19 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   // Helper: stop the server
   // ═══════════════════════════════════════
-  function stopServer() {
+  async function stopServer() {
+    // Fence synchronously, before any server-close or child-process await.
+    exportGeneration++;
+    const closingExport = activeExport;
+    closingExport?.controller.abort();
+    for (const token of exports.keys()) removeExport(token);
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
     }
     if (wss) {
       for (const client of clients) {
-        client.close();
+        client.terminate();
       }
       clients.clear();
       try {
@@ -295,14 +867,18 @@ export default function (pi: ExtensionAPI) {
       } catch {}
       wss = null;
     }
-    if (server) {
-      try {
-        server.close();
-      } catch {}
-      server = null;
-    }
+    const closingServer = server;
+    server = null;
     mirrorUrl = "";
     mirrorStatusBase = "";
+    if (closingServer) {
+      // Finish releasing the listening port before Pi creates the new runtime.
+      await new Promise<void>((resolve) => {
+        closingServer.close(() => resolve());
+        closingServer.closeAllConnections();
+      });
+    }
+    if (closingExport) await closingExport.done.catch(() => {});
   }
 
   // ═══════════════════════════════════════
@@ -315,9 +891,10 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("pi-web-ui is not running", "warning");
         return;
       }
-      stopServer();
-      ctx.ui.setStatus("webui", "");
-      ctx.ui.notify("pi-web-ui server stopped", "info");
+      latestCtx = ctx;
+      await stopServer();
+      latestCtx?.ui.setStatus("webui", "");
+      latestCtx?.ui.notify("pi-web-ui server stopped", "info");
     },
   });
 
@@ -355,6 +932,202 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  function reportSessionCommandError(message: string) {
+    clearSessionAction();
+    if (runtimeActive) broadcast({ type: "event", event: "webui_command_error", payload: { message } });
+  }
+
+  function registerSessionCommand(name: string, command: Parameters<ExtensionAPI["registerCommand"]>[1]) {
+    pi.registerCommand(name, {
+      ...command,
+      handler: async (args, commandCtx) => {
+        const [dispatchId, ...commandArgs] = args.trim().split(/\s+/);
+        if (
+          !runtimeActive ||
+          pendingSessionCommand !== name ||
+          pendingDispatchId !== dispatchId ||
+          !sessionReplacementPending
+        )
+          return;
+        if (dispatchTimer) clearTimeout(dispatchTimer);
+        dispatchTimer = null;
+        const epoch = lifecycleEpoch;
+        try {
+          await command.handler(commandArgs.join(" "), commandCtx);
+        } catch {
+          // Includes errors from the initial idle/stale-context checks, which Pi
+          // would otherwise report only via extension_error on the RPC transport.
+          if (runtimeActive && epoch === lifecycleEpoch && pendingDispatchId === dispatchId)
+            reportSessionCommandError("Pi could not complete the session action. Try again.");
+        } finally {
+          // Success replaces/disposes this runtime. Do not consult commandCtx/pi.
+          if (
+            runtimeActive &&
+            epoch === lifecycleEpoch &&
+            pendingDispatchId === dispatchId &&
+            sessionReplacementPending
+          )
+            reportSessionCommandError("Pi did not replace the session. Try again.");
+        }
+      },
+    });
+  }
+
+  // Browser-triggered session replacement runs through a command context supplied
+  // by Pi, so no long-lived command context is retained between WebSocket requests.
+  registerSessionCommand("webui-new-session", {
+    description: "Internal Pi Web UI new-session action",
+    handler: async (_args, commandCtx) => {
+      if (!sessionReplacementPending || !commandCtx.isIdle() || commandCtx.hasPendingMessages()) {
+        reportSessionCommandError("Request a new session from Web UI while Pi is idle.");
+        return;
+      }
+      try {
+        const result = await commandCtx.newSession();
+        if (result.cancelled) {
+          reportSessionCommandError("Starting a new session was cancelled.");
+        }
+      } catch (commandError) {
+        reportSessionCommandError(commandError instanceof Error ? commandError.message : String(commandError));
+      }
+    },
+  });
+
+  // Session-fork actions use command contexts, never the event context held by a
+  // WebSocket callback. Pi invalidates both contexts during session replacement.
+  registerSessionCommand("webui-fork-session", {
+    description: "Internal Pi Web UI fork action",
+    handler: async (args, commandCtx) => {
+      const match = args.match(/^(fork)(?:\s+(\S+))?$|^(clone)$/);
+      if (!match) {
+        reportSessionCommandError("Invalid session fork request.");
+        return;
+      }
+      if (!sessionReplacementPending || !commandCtx.isIdle() || commandCtx.hasPendingMessages()) {
+        reportSessionCommandError("Request a fork from Web UI while Pi is idle.");
+        return;
+      }
+      if (!advancedFeaturesEnabled) {
+        reportSessionCommandError("Run /webui first to enable session fork commands.");
+        return;
+      }
+      try {
+        const action = match[1] ? "fork" : "clone";
+        const requestedEntryId = match[2];
+        const entryId = action === "clone" ? commandCtx.sessionManager.getLeafId() : requestedEntryId;
+        if (!entryId) {
+          reportSessionCommandError(
+            action === "clone" ? "Nothing to clone yet." : "Select a user message to fork from.",
+          );
+          return;
+        }
+        const result = await commandCtx.fork(entryId, action === "clone" ? { position: "at" } : undefined);
+        // On success the old runtime and sockets are gone. The browser waits for
+        // the replacement session's state_sync; never use commandCtx here.
+        if (result.cancelled) {
+          reportSessionCommandError(`${action === "clone" ? "Cloning" : "Forking"} the session was cancelled.`);
+        }
+      } catch (commandError) {
+        reportSessionCommandError(commandError instanceof Error ? commandError.message : String(commandError));
+      }
+    },
+  });
+
+  registerSessionCommand("webui-resume-session", {
+    description: "Internal Pi Web UI resume action",
+    handler: async (id, commandCtx) => {
+      const selection = pendingResume;
+      // The map remains only a picker cache; the accepted target is pinned.
+      if (!id.trim()) {
+        reportSessionCommandError("Invalid session resume request.");
+        return;
+      }
+      if (
+        !sessionReplacementPending ||
+        !selection ||
+        !scopeIsCurrent(selection) ||
+        !advancedFeaturesEnabled ||
+        !commandCtx.isIdle() ||
+        commandCtx.hasPendingMessages()
+      ) {
+        reportSessionCommandError("Session selection expired or Pi is busy. Reopen the session picker.");
+        return;
+      }
+      try {
+        // Re-list through the public API at execution time: a selection is not
+        // authority to switch to a file that has since moved or changed project.
+        const sessions = await SessionManager.list(selection.cwd, selection.sessionDir);
+        if (!scopeIsCurrent(selection)) throw new Error("Session changed. Reopen the session picker.");
+        // The asynchronous disk scan can overlap terminal input or another client.
+        if (!commandCtx.isIdle() || commandCtx.hasPendingMessages())
+          throw new Error("Wait for the current Pi turn and queued messages to finish");
+        const target = sessions.find(
+          (session) =>
+            session.path === selection.path &&
+            session.id === selection.targetSessionId &&
+            session.cwd &&
+            path.resolve(session.cwd) === selection.cwd,
+        );
+        if (!target || !allowedSessionPath(target.path, selection.sessionDir))
+          throw new Error("Saved session is no longer available");
+        // Parsing is read-only (SessionManager.open can migrate/rewrite a file).
+        // Recheck the pinned path after listing; validate only the bounded first JSONL line.
+        if (!allowedSessionPath(target.path, selection.sessionDir))
+          throw new Error("Saved session is no longer available");
+        const fd = fs.openSync(target.path, "r");
+        let headerLine = "";
+        try {
+          const buffer = Buffer.alloc(64 * 1024);
+          const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+          const newline = buffer.subarray(0, bytesRead).indexOf(0x0a);
+          headerLine = buffer.subarray(0, newline < 0 ? bytesRead : newline).toString("utf8");
+        } finally {
+          fs.closeSync(fd);
+        }
+        let header: SessionEntry | undefined;
+        try {
+          header = JSON.parse(headerLine) as SessionEntry;
+        } catch {
+          throw new Error("Saved session project changed");
+        }
+        if (
+          header?.type !== "session" ||
+          header.id !== selection.targetSessionId ||
+          !header.cwd ||
+          path.resolve(header.cwd) !== selection.cwd
+        )
+          throw new Error("Saved session project changed");
+        const result = await commandCtx.switchSession(target.path);
+        if (result.cancelled) reportSessionCommandError("Resuming the session was cancelled.");
+        // Success is confirmed by the new runtime's state_sync, not this ctx.
+      } catch (err) {
+        reportSessionCommandError(err instanceof Error ? err.message : String(err));
+      }
+    },
+  });
+
+  registerSessionCommand("webui-reload", {
+    description: "Internal Pi Web UI reload action",
+    handler: async (_args, commandCtx) => {
+      if (
+        !sessionReplacementPending ||
+        !advancedFeaturesEnabled ||
+        !commandCtx.isIdle() ||
+        commandCtx.hasPendingMessages()
+      ) {
+        reportSessionCommandError("Run /webui first and wait for Pi to be idle before reloading.");
+        return;
+      }
+      try {
+        await commandCtx.reload();
+        // The command ctx, pi, sockets and maps now belong to the old runtime.
+        // Do not access them: reconnect/state_sync with a new runtimeId completes reload.
+      } catch (err) {
+        reportSessionCommandError(err instanceof Error ? err.message : String(err));
+      }
+    },
+  });
+
   // ═══════════════════════════════════════
   // Event forwarding — subscribe to all Pi events
   // ═══════════════════════════════════════
@@ -374,6 +1147,8 @@ export default function (pi: ExtensionAPI) {
     "auto_retry_start",
     "auto_retry_end",
     "model_select",
+    "thinking_level_select",
+    "session_info_changed",
   ] as const;
 
   for (const eventType of eventTypes) {
@@ -414,7 +1189,6 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Forward event to all connected browser clients
       broadcast({
         type: "event",
         event: eventType,
@@ -452,8 +1226,13 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
+    runtimeActive = true;
+    lifecycleEpoch++;
+    savedSelections.clear();
     advancedFeaturesEnabled = false;
     latestExecuteCtx = null;
+    clearSessionAction();
+    broadcast({ type: "event", event: "state_sync", payload: (await buildStateSnapshot(ctx)).payload });
     liveArtifactPaths.clear();
     broadcast({ type: "event", event: "webui_state", payload: { advancedFeatures: false } });
     turnCount = 0;
@@ -563,7 +1342,7 @@ export default function (pi: ExtensionAPI) {
   async function buildStateSnapshot(ctx: ExtensionContext) {
     // Get session entries for message history
     const entries = ctx.sessionManager.getBranch();
-    const tree = ctx.sessionManager.getTree() as SessionTreeNode[];
+    const treeNodes = flattenSessionTree(ctx.sessionManager.getTree());
     const leafId = ctx.sessionManager.getLeafId();
 
     // Get model info
@@ -580,12 +1359,15 @@ export default function (pi: ExtensionAPI) {
       event: "state_sync",
       payload: {
         entries,
-        tree,
+        treeNodes,
         leafId,
         model,
         thinkingLevel,
+        availableThinkingLevels: getAvailableThinkingLevels(ctx),
         sessionName,
         sessionFile,
+        sessionId: ctx.sessionManager.getSessionId(),
+        runtimeId,
         isStreaming: !ctx.isIdle(),
         contextUsage,
       },
@@ -615,12 +1397,154 @@ export default function (pi: ExtensionAPI) {
     try {
       switch (request.method) {
         case "prompt": {
+          if (sessionReplacementPending) {
+            sendTo(ws, error("A session action is already in progress"));
+            break;
+          }
           const message = typeof params.message === "string" ? params.message : "";
-          if (ctx && !ctx.isIdle()) {
+          const images = Array.isArray(params.images) ? (params.images as BrowserImage[]) : [];
+          const slashCommand = message.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
+          const commandName = slashCommand?.[1];
+          const normalizedCommandName = commandName?.toLowerCase();
+          const commandArgs = slashCommand?.[2]?.trim() ?? "";
+          if (normalizedCommandName && internalCommands.has(normalizedCommandName)) {
+            sendTo(ws, error("Internal Web UI commands cannot be invoked directly"));
+            break;
+          }
+          if (slashCommand && params.executePiCommand === true && images.length === 0) {
+            const registeredCommand = pi.getCommands().some((command) => command.name === commandName);
+            if (!registeredCommand) {
+              sendTo(ws, error(`Unknown Pi command: /${commandName}`));
+              break;
+            }
+            pi.sendUserMessage(message, { expandPromptTemplates: true });
+            sendTo(ws, success({ command: commandName, source: "pi" }));
+            break;
+          }
+          if (slashCommand && normalizedCommandName === "new" && images.length === 0) {
+            if (commandArgs) {
+              sendTo(ws, error("Usage: /new"));
+              break;
+            }
+            requireSessionAction("new session", false);
+            acceptSessionAction("/webui-new-session");
+            sendTo(ws, success({ command: "new" }));
+            break;
+          }
+          if (slashCommand && normalizedCommandName === "resume" && images.length === 0) {
+            if (commandArgs) {
+              sendTo(ws, error("Usage: /resume (select a saved session in the browser)"));
+              break;
+            }
+            sendTo(ws, success({ command: "resume", ...(await listSavedSessions()) }));
+            break;
+          }
+          if (slashCommand && normalizedCommandName === "reload" && images.length === 0) {
+            if (commandArgs) throw new Error("Usage: /reload");
+            sendTo(ws, success({ command: "reload", ...requestReload() }));
+            break;
+          }
+          if (slashCommand && normalizedCommandName === "session" && images.length === 0) {
+            if (commandArgs) throw new Error("Usage: /session");
+            if (!latestCtx) throw new Error("No context available");
+            sendTo(ws, success({ command: "session", ...buildSessionDetails(latestCtx) }));
+            break;
+          }
+          if (slashCommand && normalizedCommandName === "export" && images.length === 0) {
+            if (commandArgs)
+              throw new Error("Usage: /export (HTML browser download; host paths and JSONL are not supported)");
+            if (!latestCtx) throw new Error("No context available");
+            sendTo(ws, success({ command: "export", ...(await exportHtml(latestCtx)) }));
+            break;
+          }
+          if (slashCommand && normalizedCommandName === "thinking" && images.length === 0) {
+            const requested = commandArgs.toLowerCase();
+            const availableThinkingLevels = getAvailableThinkingLevels(latestCtx);
+            if (!requested) {
+              sendTo(
+                ws,
+                success({ command: "thinking", thinkingLevel: pi.getThinkingLevel(), availableThinkingLevels }),
+              );
+              break;
+            }
+            if (!isThinkingLevel(requested)) {
+              sendTo(ws, error(`Unknown thinking level: ${requested}. Use ${availableThinkingLevels.join(", ")}.`));
+              break;
+            }
+            if (!availableThinkingLevels.includes(requested)) {
+              sendTo(
+                ws,
+                error(
+                  `Thinking level "${requested}" is not supported by the current model. Use ${availableThinkingLevels.join(", ")}.`,
+                ),
+              );
+              break;
+            }
+            pi.setThinkingLevel(requested);
+            sendTo(
+              ws,
+              success({
+                command: "thinking",
+                thinkingLevel: pi.getThinkingLevel(),
+                availableThinkingLevels,
+                message: `Thinking level: ${pi.getThinkingLevel()}`,
+              }),
+            );
+            break;
+          }
+          if (slashCommand && normalizedCommandName === "compact" && images.length === 0) {
+            if (!latestCtx) {
+              sendTo(ws, error("No Pi context available"));
+              break;
+            }
+            const compactScope = sessionScope(latestCtx);
+            const compactCtx = latestCtx;
+            const finishCompact = (payload: { summary?: unknown }) => {
+              if (!scopeIsCurrent(compactScope)) return;
+              latestCtx = compactCtx;
+              broadcast({ type: "event", event: "auto_compaction_end", payload });
+            };
+            broadcast({ type: "event", event: "auto_compaction_start", payload: {} });
+            compactCtx.compact({
+              customInstructions: commandArgs || undefined,
+              onComplete: (result: { summary?: unknown }) => finishCompact({ summary: result?.summary }),
+              onError: (err: Error) => finishCompact({ summary: `Error: ${err.message}` }),
+            });
+            sendTo(ws, success({ command: "compact" }));
+            break;
+          }
+          if (slashCommand && normalizedCommandName === "name" && images.length === 0) {
+            if (!commandArgs) {
+              const name = pi.getSessionName() ?? null;
+              sendTo(
+                ws,
+                success({ command: "name", name, message: name ? `Session name: ${name}` : "Session has no name" }),
+              );
+              break;
+            }
+            pi.setSessionName(commandArgs);
+            const name = pi.getSessionName() ?? null;
+            sendTo(
+              ws,
+              success({ command: "name", name, message: name ? `Session renamed to: ${name}` : "Session has no name" }),
+            );
+            break;
+          }
+          if (slashCommand && images.length === 0) {
+            const registeredCommand = pi.getCommands().some((command) => command.name === commandName);
+            if (!registeredCommand) {
+              sendTo(ws, error(`Unsupported or unknown slash command: /${commandName}`));
+              break;
+            }
+          }
+          const commandContext = latestCtx;
+          if (commandContext && !commandContext.isIdle()) {
             const behavior = typeof params.streamingBehavior === "string" ? params.streamingBehavior : "steer";
-            pi.sendUserMessage(message, { deliverAs: behavior === "followUp" ? "followUp" : "steer" });
+            pi.sendUserMessage(message, {
+              deliverAs: behavior === "followUp" ? "followUp" : "steer",
+              expandPromptTemplates: images.length === 0,
+            });
           } else {
-            const images = Array.isArray(params.images) ? (params.images as BrowserImage[]) : [];
             if (images.length) {
               const validMimes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
               const content: Array<TextContentBlock | ImageContentBlock> = [
@@ -636,9 +1560,11 @@ export default function (pi: ExtensionAPI) {
                   | "image/webp";
                 content.push({ type: "image", data, mimeType });
               }
-              pi.sendUserMessage(content.some((block) => block.type === "image") ? content : message);
+              pi.sendUserMessage(content.some((block) => block.type === "image") ? content : message, {
+                expandPromptTemplates: false,
+              });
             } else {
-              pi.sendUserMessage(message);
+              pi.sendUserMessage(message, { expandPromptTemplates: true });
             }
           }
           sendTo(ws, success());
@@ -646,12 +1572,14 @@ export default function (pi: ExtensionAPI) {
         }
 
         case "steer": {
+          if (sessionReplacementPending) throw new Error("A session action is already in progress");
           pi.sendUserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "steer" });
           sendTo(ws, success());
           break;
         }
 
         case "follow_up": {
+          if (sessionReplacementPending) throw new Error("A session action is already in progress");
           pi.sendUserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "followUp" });
           sendTo(ws, success());
           break;
@@ -675,6 +1603,31 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
+        case "get_commands": {
+          const commands = [
+            { name: "thinking", description: "Set the current thinking level", source: "builtin" },
+            { name: "compact", description: "Compact the current context", source: "builtin" },
+            { name: "name", description: "Show or set the session name", source: "builtin" },
+            { name: "resume", description: "Choose a saved session in the current project", source: "builtin" },
+            { name: "reload", description: "Reload Pi resources and reconnect Web UI", source: "builtin" },
+            { name: "new", description: "Start a new session", source: "builtin" },
+            { name: "fork", description: "Create a new session from a user message", source: "builtin" },
+            { name: "clone", description: "Duplicate the session at its current position", source: "builtin" },
+            { name: "settings", description: "Open Web UI settings", source: "builtin" },
+            { name: "model", description: "Select a model", source: "builtin" },
+            { name: "session", description: "Show session statistics", source: "builtin" },
+            { name: "tree", description: "Open the conversation tree", source: "builtin" },
+            { name: "copy", description: "Copy the last assistant message", source: "builtin" },
+            { name: "export", description: "Export the current session as HTML", source: "builtin" },
+            ...pi
+              .getCommands()
+              .filter(({ name }) => !internalCommands.has(name))
+              .map(({ name, description, source }) => ({ name, description, source })),
+          ];
+          sendTo(ws, success({ commands }));
+          break;
+        }
+
         case "get_state": {
           if (!ctx) {
             sendTo(ws, error("No context available"));
@@ -685,6 +1638,7 @@ export default function (pi: ExtensionAPI) {
             success({
               model: ctx.model,
               thinkingLevel: pi.getThinkingLevel(),
+              availableThinkingLevels: getAvailableThinkingLevels(latestCtx),
               isStreaming: !ctx.isIdle(),
               sessionFile: ctx.sessionManager.getSessionFile(),
               sessionName: pi.getSessionName(),
@@ -729,7 +1683,14 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("No API key for this model"));
             break;
           }
-          sendTo(ws, success(model));
+          sendTo(
+            ws,
+            success({
+              model,
+              thinkingLevel: pi.getThinkingLevel(),
+              availableThinkingLevels: getAvailableThinkingLevels(latestCtx),
+            }),
+          );
           break;
         }
 
@@ -749,27 +1710,44 @@ export default function (pi: ExtensionAPI) {
           );
           const nextModel = availModels[(idx + 1) % availModels.length];
           await pi.setModel(nextModel);
-          sendTo(ws, success({ model: nextModel, thinkingLevel: pi.getThinkingLevel() }));
+          sendTo(
+            ws,
+            success({
+              model: nextModel,
+              thinkingLevel: pi.getThinkingLevel(),
+              availableThinkingLevels: getAvailableThinkingLevels(latestCtx),
+            }),
+          );
           break;
         }
 
         case "cycle_thinking_level": {
-          const levels = ["off", "minimal", "low", "medium", "high"];
-          const current = pi.getThinkingLevel();
-          const next = levels[(levels.indexOf(current) + 1) % levels.length] as
-            | "off"
-            | "minimal"
-            | "low"
-            | "medium"
-            | "high";
+          const levels = getAvailableThinkingLevels(latestCtx);
+          const current = pi.getThinkingLevel() as BrowserThinkingLevel;
+          const currentIndex = levels.indexOf(current);
+          const next = levels[(currentIndex + 1 + levels.length) % levels.length];
           pi.setThinkingLevel(next);
-          sendTo(ws, success({ level: next }));
+          sendTo(ws, success({ level: pi.getThinkingLevel(), availableThinkingLevels: levels }));
           break;
         }
 
         case "set_thinking_level": {
-          pi.setThinkingLevel(params.level as "off" | "minimal" | "low" | "medium" | "high" | undefined);
-          sendTo(ws, success());
+          if (!isThinkingLevel(params.level)) {
+            sendTo(ws, error(`Invalid thinking level: ${String(params.level)}`));
+            break;
+          }
+          const availableThinkingLevels = getAvailableThinkingLevels(latestCtx);
+          if (!availableThinkingLevels.includes(params.level)) {
+            sendTo(
+              ws,
+              error(
+                `Thinking level "${params.level}" is not supported by the current model. Use ${availableThinkingLevels.join(", ")}.`,
+              ),
+            );
+            break;
+          }
+          pi.setThinkingLevel(params.level);
+          sendTo(ws, success({ level: pi.getThinkingLevel(), availableThinkingLevels }));
           break;
         }
 
@@ -778,28 +1756,49 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("No context available"));
             break;
           }
-          const usage = ctx.getContextUsage();
-          const entries = ctx.sessionManager.getEntries();
-          let userMessages = 0;
-          let assistantMessages = 0;
-          let toolCalls = 0;
-          for (const entry of entries) {
-            if (entry.type !== "message") continue;
-            if (entry.message?.role === "user") userMessages++;
-            else if (entry.message?.role === "assistant") assistantMessages++;
-            else if (entry.message?.role === "toolResult") toolCalls++;
+          sendTo(ws, success(buildSessionDetails(ctx)));
+          break;
+        }
+
+        case "get_saved_sessions": {
+          sendTo(ws, success(await listSavedSessions()));
+          break;
+        }
+
+        case "switch_session": {
+          sendTo(ws, success(requestResume(params.id, params.sessionId)));
+          break;
+        }
+
+        case "reload": {
+          sendTo(ws, success(requestReload(params.sessionId)));
+          break;
+        }
+
+        case "get_fork_messages": {
+          if (!ctx || !advancedFeaturesEnabled || !latestExecuteCtx) {
+            sendTo(ws, error("Run /webui first to enable session fork commands"));
+            break;
           }
-          sendTo(
-            ws,
-            success({
-              sessionFile: ctx.sessionManager.getSessionFile(),
-              userMessages,
-              assistantMessages,
-              toolCalls,
-              totalMessages: entries.length,
-              tokens: usage ? { input: usage.tokens, total: usage.tokens } : null,
-            }),
-          );
+          const messages = ctx.sessionManager
+            .getEntries()
+            .filter((entry) => entry.type === "message" && entry.message?.role === "user")
+            .map((entry) => {
+              const content = entry.message?.content;
+              const text =
+                typeof content === "string"
+                  ? content
+                  : Array.isArray(content)
+                    ? content
+                        .filter((part) => part.type === "text" && typeof part.text === "string")
+                        .map((part) => part.text)
+                        .join("\n")
+                    : "";
+              return { entryId: entry.id, text, timestamp: entry.timestamp };
+            })
+            .filter((entry) => entry.entryId && entry.text.trim())
+            .reverse();
+          sendTo(ws, success({ messages, sessionId: ctx.sessionManager.getSessionId() }));
           break;
         }
 
@@ -810,7 +1809,7 @@ export default function (pi: ExtensionAPI) {
             break;
           }
           pi.setSessionName(name);
-          sendTo(ws, success());
+          sendTo(ws, success({ name: pi.getSessionName() ?? null }));
           break;
         }
 
@@ -821,19 +1820,18 @@ export default function (pi: ExtensionAPI) {
 
         case "compact": {
           if (ctx) {
+            const compactScope = sessionScope(ctx);
+            const compactCtx = ctx;
+            const finishCompact = (payload: { summary?: unknown }) => {
+              if (!scopeIsCurrent(compactScope)) return;
+              latestCtx = compactCtx;
+              broadcast({ type: "event", event: "auto_compaction_end", payload });
+            };
             broadcast({ type: "event", event: "auto_compaction_start", payload: {} });
-            ctx.compact({
+            compactCtx.compact({
               customInstructions: typeof params.customInstructions === "string" ? params.customInstructions : undefined,
-              onComplete: (result: { summary?: unknown }) => {
-                broadcast({ type: "event", event: "auto_compaction_end", payload: { summary: result?.summary } });
-              },
-              onError: (err: Error) => {
-                broadcast({
-                  type: "event",
-                  event: "auto_compaction_end",
-                  payload: { summary: `Error: ${err.message}` },
-                });
-              },
+              onComplete: (result: { summary?: unknown }) => finishCompact({ summary: result?.summary }),
+              onError: (err: Error) => finishCompact({ summary: `Error: ${err.message}` }),
             });
           }
           sendTo(ws, success());
@@ -845,24 +1843,32 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("No context available"));
             break;
           }
-          try {
-            const sessionFile = ctx.sessionManager.getSessionFile();
-            if (!sessionFile) throw new Error("No session file to export");
-            const { execSync } = require("node:child_process");
-            const outputPath = typeof params.outputPath === "string" ? params.outputPath : "";
-            const args = outputPath ? `"${sessionFile}" "${outputPath}"` : `"${sessionFile}"`;
-            const output = execSync(`pi --export ${args}`, { cwd: process.cwd(), timeout: 30000, encoding: "utf-8" });
-            sendTo(ws, success({ path: output.trim().split("\n").pop() || sessionFile.replace(".jsonl", ".html") }));
-          } catch (e: unknown) {
-            sendTo(ws, error(e instanceof Error ? e.message : String(e)));
-          }
+          if (sessionReplacementPending) throw new Error("A session action is already in progress");
+          sendTo(ws, success(await exportHtml(ctx, params.outputPath)));
+          break;
+        }
+
+        case "get_tree": {
+          // The browser transport uses the same flat shape as state_sync, not
+          // Pi RPC's nested tree (which overflows JSON.stringify on long sessions).
+          sendTo(
+            ws,
+            success({
+              treeNodes: ctx ? flattenSessionTree(ctx.sessionManager.getTree()) : [],
+              leafId: ctx?.sessionManager.getLeafId() ?? null,
+            }),
+          );
           break;
         }
 
         case "sync_request": {
           const snapshot = ctx
             ? await buildStateSnapshot(ctx)
-            : { type: "event", event: "state_sync", payload: { entries: [], tree: [], leafId: null, model: null } };
+            : {
+                type: "event",
+                event: "state_sync",
+                payload: { entries: [], treeNodes: [], leafId: null, model: null },
+              };
           sendTo(ws, success(snapshot.payload));
           break;
         }
@@ -936,13 +1942,41 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
+        case "fork_session": {
+          requireSessionAction("session fork commands");
+          if (!latestCtx) throw new Error("No context available");
+          const action = params.action === "clone" ? "clone" : params.action === "fork" ? "fork" : null;
+          if (!action) {
+            sendTo(ws, error("Unknown session action"));
+            break;
+          }
+          if (params.sessionId !== latestCtx.sessionManager.getSessionId()) {
+            sendTo(ws, error("Session changed. Refresh the fork message picker and try again."));
+            break;
+          }
+          const requestedEntryId = typeof params.entryId === "string" ? params.entryId : "";
+          const entryId = action === "clone" ? latestCtx.sessionManager.getLeafId() : requestedEntryId;
+          if (!entryId) {
+            sendTo(ws, error(action === "clone" ? "Nothing to clone yet" : "Select a user message to fork from"));
+            break;
+          }
+          const entry = latestCtx.sessionManager.getEntry(entryId) as SessionEntry | undefined;
+          if (!entry || (action === "fork" && (entry.type !== "message" || entry.message?.role !== "user"))) {
+            sendTo(ws, error("Select a valid user message to fork from"));
+            break;
+          }
+          acceptSessionAction(`/webui-fork-session ${action}${action === "fork" ? ` ${entryId}` : ""}`);
+          sendTo(ws, success({ action, entryId }));
+          break;
+        }
+
         case "navigate_tree": {
           if (!advancedFeaturesEnabled || !latestExecuteCtx) {
             sendTo(ws, error("Run /webui first to enable editing"));
             break;
           }
-          if (!latestCtx?.isIdle()) {
-            sendTo(ws, error("Agent is busy"));
+          if (sessionReplacementPending || !latestCtx?.isIdle() || latestCtx.hasPendingMessages()) {
+            sendTo(ws, error("Agent or session action is busy"));
             break;
           }
           const entryId = typeof params.entryId === "string" ? params.entryId : "";
@@ -955,12 +1989,17 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("No model selected"));
             break;
           }
-          const result = await latestExecuteCtx.navigateTree(entryId);
-          if (result.cancelled) {
-            sendTo(ws, success({ cancelled: true }));
-            break;
+          sessionReplacementPending = true;
+          try {
+            const result = await latestExecuteCtx.navigateTree(entryId);
+            if (result.cancelled) {
+              sendTo(ws, success({ cancelled: true }));
+              break;
+            }
+            sendTo(ws, success({ editorText: result.editorText, cancelled: false }));
+          } finally {
+            sessionReplacementPending = false;
           }
-          sendTo(ws, success({ editorText: result.editorText, cancelled: false }));
           break;
         }
 
@@ -985,6 +2024,41 @@ export default function (pi: ExtensionAPI) {
 
     // Strip query params
     urlPath = urlPath.split("?")[0];
+
+    if (urlPath.startsWith("/api/exports")) {
+      pruneExports();
+      const match = /^\/api\/exports\/([0-9a-f-]{36})$/.exec(urlPath);
+      const exported = match ? exports.get(match[1]) : undefined;
+      if (!exported) {
+        res.writeHead(404, { "Cache-Control": "no-store" });
+        res.end("Export not found or expired");
+        return;
+      }
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        res.writeHead(405, { Allow: "GET, HEAD" });
+        res.end("Method not allowed");
+        return;
+      }
+      try {
+        // Reject a locally replaced symlink too. Tokens never resolve arbitrary paths.
+        if (!fs.lstatSync(exported.path).isFile() || fs.realpathSync(exported.path) !== exported.path)
+          throw new Error("Export expired");
+        const content = fs.readFileSync(exported.path);
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${exported.filename}"`,
+          "Content-Length": content.length,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        res.end(req.method === "HEAD" ? undefined : content);
+      } catch {
+        if (match) removeExport(match[1]);
+        res.writeHead(404, { "Cache-Control": "no-store" });
+        res.end("Export not found or expired");
+      }
+      return;
+    }
 
     // Default to index.html
     if (urlPath === "/") urlPath = "/index.html";
@@ -1397,9 +2471,17 @@ export default function (pi: ExtensionAPI) {
 
       // Immediately send state snapshot
       if (latestCtx) {
-        buildStateSnapshot(latestCtx).then((snapshot) => {
-          sendTo(ws, snapshot);
-        });
+        buildStateSnapshot(latestCtx)
+          .then((snapshot) => {
+            sendTo(ws, snapshot);
+          })
+          .catch((error: unknown) => {
+            sendTo(ws, {
+              type: "error",
+              code: "STATE_SYNC_FAILED",
+              message: error instanceof Error ? error.message : String(error),
+            });
+          });
       }
 
       ws.on("message", (data) => {
@@ -1428,6 +2510,8 @@ export default function (pi: ExtensionAPI) {
 
     // Heartbeat keeps mobile/Tailscale sessions alive and removes stale clients.
     heartbeatTimer = setInterval(() => {
+      pruneExports();
+      pruneSavedSelections();
       let changed = false;
       for (const client of clients) {
         if (client.readyState !== WebSocket.OPEN) {
@@ -1501,10 +2585,14 @@ export default function (pi: ExtensionAPI) {
   // Cleanup on shutdown
   // ═══════════════════════════════════════
   pi.on("session_shutdown", async () => {
+    runtimeActive = false;
+    lifecycleEpoch++;
+    savedSelections.clear();
+    clearSessionAction();
     advancedFeaturesEnabled = false;
     latestExecuteCtx = null;
     latestCtx = null;
     liveArtifactPaths.clear();
-    stopServer();
+    await stopServer();
   });
 }

@@ -40,7 +40,7 @@
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
+  --background: oklch(0.99 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
@@ -60,13 +60,13 @@
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --sidebar-background: 0 0% 98%;
-  --sidebar-foreground: 240 5.3% 26.1%;
-  --sidebar-primary: 240 5.9% 10%;
+  --sidebar-foreground: 0 0% 26%;
+  --sidebar-primary: 0 0% 10%;
   --sidebar-primary-foreground: 0 0% 98%;
-  --sidebar-accent: 240 4.8% 95.9%;
-  --sidebar-accent-foreground: 240 5.9% 10%;
-  --sidebar-border: 220 13% 91%;
-  --sidebar-ring: 217.2 91.2% 59.8%;
+  --sidebar-accent: 0 0% 95%;
+  --sidebar-accent-foreground: 0 0% 10%;
+  --sidebar-border: 0 0% 91%;
+  --sidebar-ring: 0 0% 60%;
 }
 
 .dark {
@@ -89,14 +89,14 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
-  --sidebar-background: 240 5.9% 10%;
-  --sidebar-foreground: 240 4.8% 95.9%;
-  --sidebar-primary: 224.3 76.3% 48%;
-  --sidebar-primary-foreground: 0 0% 100%;
-  --sidebar-accent: 240 3.7% 15.9%;
-  --sidebar-accent-foreground: 240 4.8% 95.9%;
-  --sidebar-border: 240 3.7% 15.9%;
-  --sidebar-ring: 217.2 91.2% 59.8%;
+  --sidebar-background: 0 0% 10%;
+  --sidebar-foreground: 0 0% 96%;
+  --sidebar-primary: 0 0% 90%;
+  --sidebar-primary-foreground: 0 0% 10%;
+  --sidebar-accent: 0 0% 16%;
+  --sidebar-accent-foreground: 0 0% 96%;
+  --sidebar-border: 0 0% 16%;
+  --sidebar-ring: 0 0% 60%;
 }
 
 @layer base {
@@ -120,4 +120,25 @@
   textarea {
     font: inherit;
   }
+}
+
+/* One quiet composer surface rather than nested form/input borders. */
+.chat-composer > [data-slot="input-group"] {
+  border-radius: 1rem;
+  border-color: var(--border);
+  background: var(--card);
+  box-shadow: none;
+}
+
+.chat-composer > [data-slot="input-group"]:focus-within {
+  border-color: var(--ring);
+  --tw-ring-shadow: 0 0 #0000;
+}
+
+/* Keep the existing context details usable even on narrow phones. */
+.context-surface > div {
+  max-width: calc(100% - 2rem);
+  max-height: calc(100% - 2rem);
+  overflow-y: auto;
+  box-shadow: 0 4px 16px oklch(0 0 0 / 6%);
 }

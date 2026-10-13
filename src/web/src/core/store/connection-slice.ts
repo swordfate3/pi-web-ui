@@ -1,3 +1,4 @@
+import { UiError, uiText } from "../ui-text";
 import type { ConnectionSlice, StoreSlice } from "./types";
 
 export const createConnectionSlice: StoreSlice<ConnectionSlice> = (set, get) => ({
@@ -11,7 +12,7 @@ export const createConnectionSlice: StoreSlice<ConnectionSlice> = (set, get) => 
 
   send: async (method, params) => {
     const client = get().client;
-    if (!client) throw new Error("Pi client is not connected");
+    if (!client) throw new UiError(uiText("Pi client is not connected"));
     return client.send(method, params);
   },
 

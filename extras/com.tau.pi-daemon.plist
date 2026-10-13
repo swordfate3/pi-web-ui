@@ -23,8 +23,6 @@
     <string>/tmp/pi-daemon.log</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>HOME</key>
-        <string>/Users/mattkennelly</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>

@@ -1,5 +1,6 @@
 import { MAX_IMAGE_DIM, VALID_IMAGE_MIME_TYPES } from "./constants";
 import type { ChatItem, PiMessage, PromptImage, Usage } from "./types";
+import { UiError, uiText } from "./ui-text";
 
 export function syncToItems(
   entries: Array<{ type: string; id?: string; message?: PiMessage }>,
@@ -178,7 +179,7 @@ function processImageFile(file: File): Promise<PromptImage> {
   return new Promise((resolve, reject) => {
     const mimeType = VALID_IMAGE_MIME_TYPES.includes(file.type) ? file.type : "image/png";
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.onerror = () => reject(new UiError(uiText("Failed to read file")));
     reader.onload = () => {
       const img = new Image();
       img.onload = () => {
@@ -193,7 +194,7 @@ function processImageFile(file: File): Promise<PromptImage> {
         canvas.height = height;
         const ctx = canvas.getContext("2d");
         if (!ctx) {
-          reject(new Error("Failed to create canvas"));
+          reject(new UiError(uiText("Failed to create canvas")));
           return;
         }
         ctx.drawImage(img, 0, 0, width, height);
@@ -201,12 +202,12 @@ function processImageFile(file: File): Promise<PromptImage> {
         const dataUrl = canvas.toDataURL(outputMime, outputMime === "image/jpeg" ? 0.85 : undefined);
         const base64 = dataUrl.split(",")[1];
         if (!base64) {
-          reject(new Error("Failed to encode image"));
+          reject(new UiError(uiText("Failed to encode image")));
           return;
         }
         resolve({ data: base64, mimeType: outputMime });
       };
-      img.onerror = () => reject(new Error("Failed to decode image"));
+      img.onerror = () => reject(new UiError(uiText("Failed to decode image")));
       img.src = String(reader.result);
     };
     reader.readAsDataURL(file);

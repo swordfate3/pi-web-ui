@@ -103,8 +103,9 @@ Run `$webui-visual-check` after UI, WebSocket-driven visible state, session tree
 ├── public/                      # Static assets copied by Vite (icons, manifest, sw.js)
 ├── dist/                        # Vite build output (gitignored)
 
-├── MOBILE.md                    # Mobile access guide
-├── RELEASING.md                 # npm publish and pi.dev verification checklist
+# Project documentation lives under docs/ (including mobile.md,
+# releasing.md, unit-tests.md, development-log.md and validation/).
+# Root README.md is the package entrypoint; AGENTS.md is harness policy.
 
 ├── package.json                 # npm package config + pi extension manifest
 ├── tsconfig.json                # TypeScript config (only src/web + vite.config.ts)
@@ -238,7 +239,11 @@ npm run lint
 
 ### Publishing
 
-For npm releases, read and follow `RELEASING.md` before changing package release metadata or running publish commands.
+For npm releases, read and follow `docs/releasing.md` before changing package release metadata or running publish commands.
+
+### Documentation placement
+
+Keep development logs, design documents, operating guides and human-readable validation reports under `docs/`. Append completed development work and known limitations to `docs/development-log.md`. Do not create prose reports in download directories, test directories or temporary directories. Raw logs, screenshots and benchmark data are test artifacts, not prose documentation; link their relative locations from docs. Keep the root `README.md` package entrypoint and `AGENTS.md` harness policy in their required locations.
 
 ```bash
 npm pack --dry-run --json

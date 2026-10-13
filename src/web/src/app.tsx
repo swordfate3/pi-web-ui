@@ -1,42 +1,42 @@
-import {
-  ArchiveIcon,
-  BarChart3Icon,
-  DownloadIcon,
-  PanelLeftCloseIcon,
-  PanelLeftOpenIcon,
-  TerminalIcon,
-  XIcon,
-} from "lucide-react";
+import { ArchiveIcon, BarChart3Icon, DownloadIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, XIcon } from "lucide-react";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Conversation,
-  ConversationContent,
-  ConversationEmptyState,
-  ConversationScrollButton,
-} from "@/components/ai-elements/conversation";
+import { Conversation, ConversationContent, ConversationScrollButton } from "@/components/ai-elements/conversation";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { cn } from "@/lib/utils";
 import {
   AppHeader,
   ChatInput,
-  ChatItemView,
   CommandPalette,
   ContextPopover,
   ConversationSidebar,
   ExtensionDialogView,
+  type ForkableMessage,
+  ForkMessagePicker,
   ModelPicker,
   RightPanel,
   SettingsPanel,
-  UserMessageView,
   WorkspaceStatusFloat,
 } from "./components/pi-web-ui";
+import { ChatList } from "./components/pi-web-ui/chat-list";
+import { ResumeSessionPicker } from "./components/pi-web-ui/resume-session-picker";
+import { SessionDetails, sessionStatsSummary } from "./components/pi-web-ui/session-details";
 import { extractText, processPromptFiles } from "./core/chat-conversion";
-import { copyText, formatTime, formatTokens, isEditableTarget } from "./core/format";
+import { downloadExport } from "./core/export-download";
+import { copyText, isEditableTarget } from "./core/format";
+import { t, useLanguage } from "./core/i18n";
 import { PiClient } from "./core/pi-client";
+import { readPreference, writePreference } from "./core/storage";
 import { usePiWebUiStore } from "./core/store";
 import { dispatchPiEvent } from "./core/store/event-dispatch";
-import type { ChatItem, PromptCommand } from "./core/types";
+import type {
+  ChatItem,
+  ExportHtmlResult,
+  PromptCommand,
+  SavedSession,
+  SavedSessionsResult,
+  SessionStatsResult,
+} from "./core/types";
+import { errorUiText, renderUiText, UiError, uiRelativeTime, uiText } from "./core/ui-text";
 
 const DEFAULT_LEFT_SIDEBAR_WIDTH = 320;
 const MIN_LEFT_SIDEBAR_WIDTH = 240;
@@ -45,12 +45,15 @@ const MIN_MAIN_CONTENT_WIDTH = 560;
 const LEFT_SIDEBAR_WIDTH_STORAGE_KEY = "pi-web-ui-left-sidebar-width";
 
 export function App() {
+  useLanguage();
   const items = usePiWebUiStore((state) => state.items);
   const connection = usePiWebUiStore((state) => state.connection);
   const chatStatus = usePiWebUiStore((state) => state.chatStatus);
   const modelLabel = usePiWebUiStore((state) => state.modelLabel);
   const currentModel = usePiWebUiStore((state) => state.currentModel);
   const thinkingLevel = usePiWebUiStore((state) => state.thinkingLevel);
+  const availableThinkingLevels = usePiWebUiStore((state) => state.availableThinkingLevels);
+  const commands = usePiWebUiStore((state) => state.commands);
   const sessionName = usePiWebUiStore((state) => state.sessionName);
   const error = usePiWebUiStore((state) => state.error);
   const advancedFeatures = usePiWebUiStore((state) => state.advancedFeatures);
@@ -58,6 +61,13 @@ export function App() {
   const archAvailable = usePiWebUiStore((state) => state.archAvailable);
   const tree = usePiWebUiStore((state) => state.tree);
   const leafId = usePiWebUiStore((state) => state.leafId);
+  const sessionId = usePiWebUiStore((state) => state.sessionId);
+  const runtimeId = usePiWebUiStore((state) => state.runtimeId);
+  const sessionActionPending = usePiWebUiStore((state) => state.sessionActionPending);
+  const sessionActionError = usePiWebUiStore((state) => state.sessionActionError);
+  const resumeSession = usePiWebUiStore((state) => state.resumeSession);
+  const reloadRuntime = usePiWebUiStore((state) => state.reloadRuntime);
+  const forkSession = usePiWebUiStore((state) => state.forkSession);
   const selectedTreeEntryId = usePiWebUiStore((state) => state.selectedTreeEntryId);
   const loadingTreeEntryId = usePiWebUiStore((state) => state.loadingTreeEntryId);
   const conversationSyncing = usePiWebUiStore((state) => state.conversationSyncing);
@@ -115,11 +125,14 @@ export function App() {
     () => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false,
   );
 
-  const [sidebarOpen, setSidebarOpen] = useState(
-    () => typeof window !== "undefined" && window.matchMedia("(min-width: 768px)").matches,
-  );
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
+  const openConversationSidebar = useCallback(() => {
+    if (window.matchMedia("(max-width: 767px)").matches) setSidebarMobileOpen(true);
+    else setSidebarOpen(true);
+  }, []);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(() => {
-    const storedWidth = Number(localStorage.getItem(LEFT_SIDEBAR_WIDTH_STORAGE_KEY));
+    const storedWidth = Number(readPreference(LEFT_SIDEBAR_WIDTH_STORAGE_KEY));
     const requestedWidth = Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : DEFAULT_LEFT_SIDEBAR_WIDTH;
     const maxWidth = Math.max(
       MIN_LEFT_SIDEBAR_WIDTH,
@@ -136,12 +149,35 @@ export function App() {
   const [modelSearch, setModelSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
-  const [contextOpen, setContextOpen] = useState(false);
+  const [statusOverlay, setStatusOverlay] = useState<"context" | "workspace" | null>(null);
+  const contextOpen = statusOverlay === "context";
+  const workspaceOpen = statusOverlay === "workspace";
+  const [forkPickerMessages, setForkPickerMessages] = useState<ForkableMessage[] | null>(null);
+  const [resumeListing, setResumeListing] = useState<SavedSessionsResult | null>(null);
+  const [resumeLoading, setResumeLoading] = useState(false);
+  const [sessionDetails, setSessionDetails] = useState<SessionStatsResult | null>(null);
+  const resumeSourceRuntimeRef = useRef<string | null>(null);
+  const resumeRequestRef = useRef(0);
+  const forkPickerSessionIdRef = useRef<string | null>(null);
+  const draftTextRef = useRef(draftText);
+  draftTextRef.current = draftText;
+  useEffect(() => {
+    if (forkPickerSessionIdRef.current !== sessionId) setForkPickerMessages(null);
+    setSessionDetails(null);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (resumeListing && (resumeListing.sessionId !== sessionId || resumeSourceRuntimeRef.current !== runtimeId)) {
+      setResumeListing(null);
+      setError(uiText("Session or runtime changed. Reopen the session picker."));
+    }
+  }, [resumeListing, sessionId, runtimeId, setError]);
 
   const itemElementsRef = useRef<Map<string, HTMLElement>>(new Map());
   const pendingFocusEntryIdRef = useRef<string | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
   const promptCounterRef = useRef(0);
+  const runWebUiSlashCommandRef = useRef<(text: string) => Promise<boolean | "preserve">>(async () => false);
 
   const resolvedTheme = themeMode === "system" ? (systemDark ? "dark" : "light") : themeMode;
 
@@ -166,17 +202,17 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("pi-web-ui-theme-mode", themeMode);
+    writePreference("pi-web-ui-theme-mode", themeMode);
     document.documentElement.classList.toggle("dark", resolvedTheme === "dark");
     document.documentElement.style.colorScheme = resolvedTheme;
   }, [resolvedTheme, themeMode]);
 
   useEffect(() => {
-    localStorage.setItem("pi-web-ui-show-thinking", String(showThinking));
+    writePreference("pi-web-ui-show-thinking", String(showThinking));
   }, [showThinking]);
 
   useEffect(() => {
-    localStorage.setItem(LEFT_SIDEBAR_WIDTH_STORAGE_KEY, String(leftSidebarWidth));
+    writePreference(LEFT_SIDEBAR_WIDTH_STORAGE_KEY, String(leftSidebarWidth));
   }, [leftSidebarWidth]);
 
   useEffect(() => {
@@ -210,10 +246,40 @@ export function App() {
       onEvent: (event) => dispatchPiEvent(usePiWebUiStore.getState(), event),
       onOpen: () => {
         setError(null);
-        void usePiWebUiStore.getState().requestConversationSync();
-        usePiWebUiStore.getState().requestGitStatusRefresh();
+        const store = usePiWebUiStore.getState();
+        void store.refreshSettingsState();
+        void store.requestConversationSync();
+        void store.requestGitStatusRefresh();
       },
-      onPromptResponse: () => usePiWebUiStore.getState().markPromptReady(),
+      onPromptResponse: (result) => {
+        const commandResult = result as
+          | {
+              command?: string;
+              message?: string;
+              thinkingLevel?: string;
+              availableThinkingLevels?: string[];
+            }
+          | undefined;
+        const store = usePiWebUiStore.getState();
+        store.markPromptReady();
+        if (commandResult?.command === "thinking") {
+          if (commandResult.thinkingLevel) store.setThinkingLevel(commandResult.thinkingLevel);
+          if (commandResult.availableThinkingLevels) {
+            store.setAvailableThinkingLevels(commandResult.availableThinkingLevels);
+          }
+          store.addSystemMessage(
+            commandResult.message ||
+              uiText("Thinking level: {level}{available}", {
+                level: commandResult.thinkingLevel || uiText("unknown"),
+                available: commandResult.availableThinkingLevels?.length
+                  ? uiText(" · Available: {levels}", { levels: commandResult.availableThinkingLevels.join(", ") })
+                  : "",
+              }),
+          );
+        } else if (typeof commandResult?.message === "string") {
+          store.addSystemMessage(commandResult.message, "success");
+        }
+      },
     });
     setClient(client);
     client.connect();
@@ -236,16 +302,43 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (chatStatus !== "ready" || queuedMessages.length === 0) return;
+    if (
+      chatStatus !== "ready" ||
+      sessionActionPending ||
+      sessionActionError ||
+      resumeLoading ||
+      resumeListing ||
+      forkPickerMessages ||
+      queuedMessages.length === 0
+    )
+      return;
+    if (usePiWebUiStore.getState().sessionActionPending) return;
     const [next, ...rest] = queuedMessages;
     setQueuedMessages(rest);
     sendPrompt(next);
-  }, [chatStatus, queuedMessages, sendPrompt]);
+  }, [
+    chatStatus,
+    queuedMessages,
+    sendPrompt,
+    sessionActionPending,
+    sessionActionError,
+    resumeLoading,
+    resumeListing,
+    forkPickerMessages,
+  ]);
 
   const submitMessage = useCallback(
     async ({ text, files }: { text: string; files?: unknown[] }) => {
+      if (usePiWebUiStore.getState().sessionActionPending) return;
       const trimmed = text.trim();
-      const images = await processPromptFiles(files);
+      let images: Awaited<ReturnType<typeof processPromptFiles>>;
+      try {
+        images = await processPromptFiles(files);
+      } catch (attachmentError) {
+        setError(errorUiText(attachmentError, uiText("Failed to read file")));
+        throw attachmentError; // Preserve attachments and draft so the user can retry.
+      }
+      if (usePiWebUiStore.getState().sessionActionPending) return;
       if (!trimmed && images.length === 0) return;
 
       const command: PromptCommand = {
@@ -253,6 +346,23 @@ export function App() {
         message: trimmed || "(see attached image)",
         images: images.length ? images : undefined,
       };
+
+      const isSlashCommand = images.length === 0 && /^\/[^\s]+(?:\s|$)/.test(trimmed);
+      if (isSlashCommand) {
+        setError(null);
+        try {
+          const handled = await runWebUiSlashCommandRef.current(trimmed);
+          if (handled) {
+            if (handled !== "preserve") setDraftText("");
+            return;
+          }
+          await compactSend("prompt", { message: trimmed });
+        } catch (submitError) {
+          setError(errorUiText(submitError, uiText("Command failed")));
+        }
+        setDraftText("");
+        return;
+      }
 
       if (chatStatus === "streaming" || chatStatus === "submitted") {
         setQueuedMessages((current) => [...current, command]);
@@ -263,7 +373,7 @@ export function App() {
       await sendPrompt(command);
       setDraftText("");
     },
-    [chatStatus, nextPromptId, sendPrompt],
+    [chatStatus, compactSend, nextPromptId, sendPrompt, setError],
   );
 
   const openModelPicker = useCallback(async () => {
@@ -287,44 +397,326 @@ export function App() {
   const compactContext = useCallback(async () => {
     try {
       await compactSend("compact");
-      addSystemMessage("Compaction requested");
+      addSystemMessage(uiText("Compaction requested"));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Compaction failed");
+      setError(errorUiText(err, uiText("Compaction failed")));
     }
   }, [addSystemMessage, compactSend, setError]);
 
   const exportHtml = useCallback(async () => {
+    if (
+      !window.confirm(
+        t(
+          "Export the complete session tree, including other branches, old compaction history and potentially sensitive tool inputs and outputs? Keep the downloaded HTML private.",
+        ),
+      )
+    )
+      return;
     try {
-      const result = (await compactSend("export_html")) as { path?: string } | undefined;
-      if (result?.path) addSystemMessage(`Exported: ${result.path}`, "success");
+      const result = (await compactSend("export_html")) as ExportHtmlResult;
+      downloadExport(result);
+      addSystemMessage(uiText("Download requested: {filename}", { filename: result.filename }), "success");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Export failed");
+      setError(errorUiText(err, uiText("Export failed")));
     }
   }, [addSystemMessage, compactSend, setError]);
 
   const showSessionStats = useCallback(async () => {
     try {
-      const stats = (await compactSend("get_session_stats")) as {
-        totalMessages?: number;
-        userMessages?: number;
-        assistantMessages?: number;
-        toolCalls?: number;
-        tokens?: { input?: number; total?: number };
-      };
-      addSystemMessage(
-        [
-          "Session stats",
-          `Messages: ${stats.totalMessages} (${stats.userMessages} user, ${stats.assistantMessages} assistant)`,
-          `Tool calls: ${stats.toolCalls}`,
-          stats.tokens ? `Context: ~${formatTokens(stats.tokens.input || stats.tokens.total || 0)} tokens` : "",
-        ]
-          .filter(Boolean)
-          .join("\n"),
-      );
+      const sourceSessionId = usePiWebUiStore.getState().sessionId;
+      const stats = (await compactSend("get_session_stats")) as SessionStatsResult;
+      if (
+        usePiWebUiStore.getState().sessionId !== sourceSessionId ||
+        (stats.sessionId && stats.sessionId !== sourceSessionId)
+      ) {
+        throw new UiError(uiText("Session changed. Request session details again."));
+      }
+      setSessionDetails(stats);
+      addSystemMessage(sessionStatsSummary(stats));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Stats failed");
+      setError(errorUiText(err, uiText("Stats failed")));
     }
   }, [addSystemMessage, compactSend, setError]);
+
+  const forkToNewSession = useCallback(
+    async (action: "fork" | "clone", entryId: string, text = "") => {
+      if (chatStatus !== "ready" || sessionActionPending) {
+        setError(uiText("Wait for the current Pi turn or session action to finish."));
+        return;
+      }
+      const targetId = action === "clone" ? leafId : entryId;
+      if (!targetId) {
+        setError(action === "clone" ? uiText("Nothing to clone yet.") : uiText("Select a user message to fork from."));
+        return;
+      }
+      if ((draftTextRef.current.trim() && !/^\/(fork|clone)\s*$/.test(draftTextRef.current)) || queuedMessages.length) {
+        if (!window.confirm(t("Replace the current draft and discard queued messages in a new session?"))) return;
+      }
+      setForkPickerMessages(null);
+      setLoadingTreeEntryId(targetId);
+      try {
+        await forkSession(action, targetId);
+        setDraftText(text);
+        setQueuedMessages([]);
+      } catch (err) {
+        setError(errorUiText(err, uiText(action === "clone" ? "clone failed" : "fork failed")));
+      } finally {
+        setLoadingTreeEntryId(null);
+      }
+    },
+    [chatStatus, forkSession, leafId, queuedMessages.length, sessionActionPending, setError, setLoadingTreeEntryId],
+  );
+
+  const openForkPicker = useCallback(async () => {
+    if (chatStatus !== "ready" || sessionActionPending) {
+      setError(uiText("Wait for the current Pi turn or session action to finish."));
+      return;
+    }
+    try {
+      const result = (await compactSend("get_fork_messages")) as
+        | { messages?: ForkableMessage[]; sessionId?: string }
+        | undefined;
+      if (!result?.sessionId || result.sessionId !== usePiWebUiStore.getState().sessionId) {
+        setError(uiText("Session changed. Reopen the fork message picker."));
+        return;
+      }
+      const messages = result?.messages || [];
+      if (messages.length === 0) {
+        setError(uiText("There are no user messages to fork from yet."));
+        return;
+      }
+      forkPickerSessionIdRef.current = result.sessionId;
+      setForkPickerMessages(messages);
+    } catch (err) {
+      setError(errorUiText(err, uiText("Could not load messages to fork from")));
+    }
+  }, [chatStatus, compactSend, sessionActionPending, setError]);
+
+  const openResumePicker = useCallback(async () => {
+    const store = usePiWebUiStore.getState();
+    if (
+      store.chatStatus !== "ready" ||
+      store.sessionActionPending ||
+      !store.sessionId ||
+      store.connection !== "connected"
+    ) {
+      setError(uiText("Connect and wait for the current Pi turn or session action to finish."));
+      return;
+    }
+    const sourceSessionId = store.sessionId;
+    const sourceRuntimeId = store.runtimeId;
+    const request = ++resumeRequestRef.current;
+    setResumeLoading(true);
+    try {
+      const listing = (await compactSend("get_saved_sessions")) as SavedSessionsResult;
+      if (request !== resumeRequestRef.current) return;
+      const current = usePiWebUiStore.getState();
+      if (
+        listing.sessionId !== sourceSessionId ||
+        current.sessionId !== sourceSessionId ||
+        current.runtimeId !== sourceRuntimeId ||
+        current.sessionActionPending
+      ) {
+        throw new UiError(uiText("Session changed. Reopen the session picker."));
+      }
+      resumeSourceRuntimeRef.current = sourceRuntimeId;
+      setResumeListing(listing);
+    } catch (err) {
+      setError(errorUiText(err, uiText("Could not load saved sessions")));
+    } finally {
+      if (request === resumeRequestRef.current) setResumeLoading(false);
+    }
+  }, [compactSend, setError]);
+
+  const resumeSelectedSession = useCallback(
+    async (selection: SavedSession) => {
+      const store = usePiWebUiStore.getState();
+      if (
+        !resumeListing ||
+        resumeListing.sessionId !== store.sessionId ||
+        resumeSourceRuntimeRef.current !== store.runtimeId
+      ) {
+        setError(uiText("Session changed. Reopen the session picker."));
+        setResumeListing(null);
+        return;
+      }
+      if (selection.isCurrent || selection.sessionId === store.sessionId || store.sessionActionPending) return;
+      if (
+        (draftTextRef.current.trim() || queuedMessages.length) &&
+        !window.confirm(
+          t(
+            "Resume the selected session and discard the current draft and queued messages? They will only be cleared after success.",
+          ),
+        )
+      )
+        return;
+      // The source binding is checked immediately before the store captures it.
+      try {
+        const completion = resumeSession(selection.id, selection.sessionId);
+        setResumeListing(null);
+        await completion;
+        setDraftText("");
+        setQueuedMessages([]);
+      } catch (err) {
+        setError(errorUiText(err, uiText("Resume failed")));
+      }
+    },
+    [queuedMessages.length, resumeListing, resumeSession, setError],
+  );
+
+  const reloadCurrentRuntime = useCallback(async () => {
+    if (
+      ((draftTextRef.current.trim() && !/^\/reload\s*$/.test(draftTextRef.current)) || queuedMessages.length) &&
+      !window.confirm(
+        t(
+          "Reload Pi resources and discard the current draft and queued messages? They will only be cleared after success.",
+        ),
+      )
+    )
+      return;
+    try {
+      await reloadRuntime();
+      setDraftText("");
+      setQueuedMessages([]);
+    } catch (err) {
+      setError(errorUiText(err, uiText("Reload failed")));
+    }
+  }, [queuedMessages.length, reloadRuntime, setError]);
+
+  const runWebUiSlashCommand = useCallback(
+    async (text: string) => {
+      const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
+      const name = match?.[1]?.toLowerCase();
+      const args = match?.[2]?.trim() ?? "";
+      if (!name) return false;
+      if (commands.some((command) => command.name.toLowerCase() === name && command.source !== "builtin")) {
+        await compactSend("prompt", { message: text, executePiCommand: true });
+        return true;
+      }
+
+      switch (name) {
+        case "settings":
+          if (args) {
+            setError(uiText("Usage: /settings"));
+            return true;
+          }
+          await openSettings();
+          return true;
+        case "model": {
+          await refreshSettingsState();
+          if (!args) {
+            setModelSearch("");
+            setModelOpen(true);
+            return true;
+          }
+          const query = args.toLowerCase();
+          const models = usePiWebUiStore.getState().availableModels;
+          const matches = models.filter((model) => {
+            const qualifiedName = `${model.provider}/${model.id}`.toLowerCase();
+            return qualifiedName === query || model.id.toLowerCase() === query;
+          });
+          if (matches.length === 1) {
+            await selectModel(matches[0]);
+            if (usePiWebUiStore.getState().currentModel?.id === matches[0].id) {
+              addSystemMessage(
+                uiText("Model selected: {model}", { model: `${matches[0].provider}/${matches[0].id}` }),
+                "success",
+              );
+            }
+          } else {
+            setModelSearch(args.replace("/", " "));
+            setModelOpen(true);
+          }
+          return true;
+        }
+        case "resume":
+          if (args) setError(uiText("Usage: /resume"));
+          else await openResumePicker();
+          return true;
+        case "reload":
+          if (args) setError(uiText("Usage: /reload"));
+          else await reloadCurrentRuntime();
+          return true;
+        case "fork":
+          if (args) {
+            setError(uiText("Usage: /fork"));
+            return true;
+          }
+          await openForkPicker();
+          return true;
+        case "clone":
+          if (args) {
+            setError(uiText("Usage: /clone"));
+            return true;
+          }
+          await forkToNewSession("clone", leafId || "");
+          return true;
+        case "session":
+          if (args) {
+            setError(uiText("Usage: /session"));
+            return true;
+          }
+          await showSessionStats();
+          return true;
+        case "tree":
+          if (args) {
+            setError(uiText("Usage: /tree"));
+            return true;
+          }
+          openConversationSidebar();
+          return true;
+        case "copy": {
+          if (args) {
+            setError(uiText("Usage: /copy"));
+            return true;
+          }
+          const lastAssistant = [...items]
+            .reverse()
+            .find((item) => item.kind === "message" && item.role === "assistant");
+          if (!lastAssistant || lastAssistant.kind !== "message" || !lastAssistant.text.trim()) {
+            setError(uiText("There is no assistant message to copy yet."));
+            return true;
+          }
+          try {
+            await copyText(lastAssistant.text);
+            addSystemMessage(uiText("Copied the last assistant message."), "success");
+          } catch (error) {
+            setError(errorUiText(error, uiText("Failed to copy the last assistant message")));
+          }
+          return true;
+        }
+        case "export":
+          if (args) {
+            setError(uiText("Usage: /export"));
+            return true;
+          }
+          await exportHtml();
+          return true;
+        default:
+          return false;
+      }
+    },
+    [
+      addSystemMessage,
+      commands,
+      compactSend,
+      exportHtml,
+      forkToNewSession,
+      items,
+      leafId,
+      openConversationSidebar,
+      openForkPicker,
+      openResumePicker,
+      reloadCurrentRuntime,
+      openSettings,
+      refreshSettingsState,
+      selectModel,
+      setError,
+      showSessionStats,
+    ],
+  );
+
+  runWebUiSlashCommandRef.current = runWebUiSlashCommand;
 
   useEffect(() => {
     if (!dialog?.timeout) return;
@@ -415,7 +807,7 @@ export function App() {
 
   const branchFromMessage = useCallback(
     async (entryId: string) => {
-      if (draftText.trim() && !window.confirm("Replace the current draft with this message?")) return;
+      if (draftTextRef.current.trim() && !window.confirm(t("Replace the current draft with this message?"))) return;
       let timestamp = "";
       let fallbackText = "";
       const stack = [...tree];
@@ -445,7 +837,9 @@ export function App() {
         await requestConversationSync();
         setDraftText(result?.editorText ?? fallbackText);
         addSystemMessage(
-          `Branching from ${formatTime(timestamp) || "selected message"}. Previous branch is preserved in this session.`,
+          uiText("Branching from {time}. Previous branch is preserved in this session.", {
+            time: uiRelativeTime(timestamp, uiText("selected message")),
+          }),
         );
         requestAnimationFrame(() => {
           const input = document.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
@@ -454,7 +848,7 @@ export function App() {
         });
       } catch (err) {
         pendingFocusEntryIdRef.current = null;
-        setError(err instanceof Error ? err.message : "Branch failed");
+        setError(errorUiText(err, uiText("Branch failed")));
       } finally {
         setLoadingTreeEntryId(null);
       }
@@ -462,7 +856,6 @@ export function App() {
     [
       addSystemMessage,
       compactSend,
-      draftText,
       requestConversationSync,
       setError,
       setLoadingTreeEntryId,
@@ -486,7 +879,7 @@ export function App() {
           input?.setSelectionRange(input.value.length, input.value.length);
         });
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Continue branch failed");
+        setError(errorUiText(err, uiText("Continue branch failed")));
       } finally {
         setLoadingTreeEntryId(null);
       }
@@ -496,7 +889,7 @@ export function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (isEditableTarget(event.target)) return;
+      if (event.defaultPrevented || isEditableTarget(event.target)) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setCommandOpen(true);
@@ -504,15 +897,31 @@ export function App() {
         event.preventDefault();
         document.querySelector<HTMLTextAreaElement>('textarea[name="message"]')?.focus();
       } else if (event.key === "Escape") {
-        if (commandOpen) setCommandOpen(false);
+        if (statusOverlay) setStatusOverlay(null);
+        else if (sidebarMobileOpen) setSidebarMobileOpen(false);
+        else if (commandOpen) setCommandOpen(false);
         else if (modelOpen) setModelOpen(false);
         else if (settingsOpen) setSettingsOpen(false);
+        else if (resumeListing) setResumeListing(null);
+        else if (forkPickerMessages) setForkPickerMessages(null);
+        else if (sessionDetails) setSessionDetails(null);
         else if (chatStatus === "streaming") abort();
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [abort, chatStatus, commandOpen, modelOpen, settingsOpen]);
+  }, [
+    abort,
+    chatStatus,
+    commandOpen,
+    modelOpen,
+    settingsOpen,
+    resumeListing,
+    forkPickerMessages,
+    sessionDetails,
+    statusOverlay,
+    sidebarMobileOpen,
+  ]);
 
   const totalCost = useMemo(
     () => items.reduce((sum, item) => sum + (item.kind === "message" ? item.cost || 0 : 0), 0),
@@ -522,36 +931,35 @@ export function App() {
   const usedContextTokens = (lastUsage?.input || 0) + (lastUsage?.cacheRead || 0);
   const contextPercent = contextWindowSize > 0 ? Math.round((usedContextTokens / contextWindowSize) * 100) : 0;
   const shouldSuggestCompaction = contextPercent >= 80;
-  const rightPanelOpen = rightPanelVisible && rightPanelTabs.length > 0;
 
   const commandActions = [
     {
-      label: "Compact",
-      desc: "Compact context to save tokens",
+      label: t("Compact"),
+      desc: t("Compact context to save tokens"),
       icon: ArchiveIcon,
       action: compactContext,
     },
     {
-      label: "Export HTML",
-      desc: "Export current session as HTML",
+      label: t("Export HTML"),
+      desc: t("Export current session as HTML"),
       icon: DownloadIcon,
       action: exportHtml,
     },
     {
-      label: "Session Stats",
-      desc: "Show message and tool call counts",
+      label: t("Session Stats"),
+      desc: t("Show message and tool call counts"),
       icon: BarChart3Icon,
       action: showSessionStats,
     },
     {
-      label: "Expand All Tools",
-      desc: "Open every tool card",
+      label: t("Expand All Tools"),
+      desc: t("Open every tool card"),
       icon: PanelLeftOpenIcon,
       action: () => toggleAllTools(true),
     },
     {
-      label: "Collapse All Tools",
-      desc: "Close every tool card",
+      label: t("Collapse All Tools"),
+      desc: t("Close every tool card"),
       icon: PanelLeftCloseIcon,
       action: () => toggleAllTools(false),
     },
@@ -562,10 +970,13 @@ export function App() {
       className="h-full min-h-0 bg-background text-foreground"
       onOpenChange={setSidebarOpen}
       open={sidebarOpen}
+      openMobile={sidebarMobileOpen}
+      onOpenMobileChange={setSidebarMobileOpen}
       style={{ "--sidebar-width": `${leftSidebarWidth}px` } as CSSProperties}
     >
       <ConversationSidebar
-        branchEnabled={advancedFeatures}
+        key={sessionId ?? "pending-session"}
+        branchEnabled={advancedFeatures && !sessionActionPending}
         connection={connection}
         leafId={leafId}
         loadingEntryId={loadingTreeEntryId}
@@ -576,12 +987,12 @@ export function App() {
         onResizeSidebar={updateLeftSidebarWidth}
         onSelectTree={selectTreeEntry}
         selectedEntryId={selectedTreeEntryId}
-        syncError={conversationSyncError}
+        syncError={conversationSyncError ? renderUiText(conversationSyncError) : null}
         syncing={conversationSyncing}
         tree={tree}
       />
 
-      <SidebarInset className="h-full min-h-0">
+      <SidebarInset className="h-full min-h-0 min-w-0">
         <AppHeader
           connection={connection}
           contextPercent={contextPercent}
@@ -593,7 +1004,11 @@ export function App() {
           onOpenCommandPalette={() => setCommandOpen(true)}
           onOpenModelPicker={openModelPicker}
           onReturnToLive={() => void requestConversationSync()}
-          onToggleContext={() => setContextOpen((open) => !open)}
+          onToggleContext={() => setStatusOverlay((current) => (current === "context" ? null : "context"))}
+          onToggleWorkspace={() => setStatusOverlay((current) => (current === "workspace" ? null : "workspace"))}
+          onOpenSettings={openSettings}
+          contextOpen={contextOpen}
+          workspaceOpen={workspaceOpen}
           shouldSuggestCompaction={shouldSuggestCompaction}
           thinkingLevel={thinkingLevel}
           title={sessionName}
@@ -604,66 +1019,38 @@ export function App() {
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="relative min-h-0 flex-1">
               <Conversation className="h-full">
-                <ConversationContent className="mx-auto w-full max-w-3xl gap-3 px-4 py-6">
-                  {items.length === 0 ? (
-                    <ConversationEmptyState
-                      description="Connect to the running Pi session and send a message."
-                      icon={<TerminalIcon className="size-7" />}
-                      title="Pi Web UI"
-                    />
-                  ) : (
-                    items.map((item) => {
-                      const highlighted = [item.entryId, ...(item.relatedEntryIds ?? [])].includes(
-                        highlightedEntryId ?? "",
-                      );
-                      return (
-                        <div
-                          className={cn(
-                            "rounded-lg transition-[background-color,box-shadow] duration-300",
-                            highlighted && "bg-primary/10 ring-1 ring-primary/40",
-                          )}
-                          key={item.id}
-                          ref={(node) => registerItemElement(item, node)}
-                        >
-                          {item.kind === "message" && item.role === "user" ? (
-                            <UserMessageView
-                              actionsVisible={highlighted}
-                              item={item as typeof item & { kind: "message"; role: "user" }}
-                              onBranch={advancedFeatures && item.entryId ? branchFromMessage : undefined}
-                              onCopy={(text) => copyText(text)}
-                            />
-                          ) : (
-                            <ChatItemView
-                              item={item}
-                              onCopy={(text) => copyText(text)}
-                              onToggleTool={toggleTool}
-                              showThinking={showThinking}
-                            />
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
+                <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-4 py-8 sm:px-6">
+                  <ChatList
+                    items={items}
+                    highlightedEntryId={highlightedEntryId}
+                    onBranch={advancedFeatures && !sessionActionPending ? branchFromMessage : undefined}
+                    onCopy={copyText}
+                    onToggleTool={toggleTool}
+                    registerItemElement={registerItemElement}
+                    showThinking={showThinking}
+                  />
                 </ConversationContent>
                 <ConversationScrollButton />
               </Conversation>
 
               {contextOpen && (
-                <ContextPopover
-                  contextWindowSize={contextWindowSize}
-                  lastUsage={lastUsage}
-                  onClose={() => setContextOpen(false)}
-                />
+                <div className="context-surface">
+                  <ContextPopover
+                    contextWindowSize={contextWindowSize}
+                    lastUsage={lastUsage}
+                    onClose={() => setStatusOverlay(null)}
+                  />
+                </div>
               )}
-              {!rightPanelOpen && !contextOpen && (
-                <WorkspaceStatusFloat
-                  artifacts={artifacts}
-                  gitLoading={gitLoading}
-                  gitStatus={gitStatus}
-                  onOpenArtifact={openArtifact}
-                  onOpenGitDiff={openGitDiff}
-                />
-              )}
+              <WorkspaceStatusFloat
+                open={workspaceOpen}
+                onOpenChange={(open) => setStatusOverlay(open ? "workspace" : null)}
+                artifacts={artifacts}
+                gitLoading={gitLoading}
+                gitStatus={gitStatus}
+                onOpenArtifact={openArtifact}
+                onOpenGitDiff={openGitDiff}
+              />
             </div>
 
             {queuedMessages.length > 0 && (
@@ -674,9 +1061,11 @@ export function App() {
                       className="flex items-center gap-2 rounded-md border bg-muted px-2 py-1 text-xs"
                       key={queued.id}
                     >
-                      <span className="text-muted-foreground">Queued</span>
+                      <span className="text-muted-foreground">{t("Queued")}</span>
                       <span className="max-w-72 truncate">{queued.message}</span>
                       <button
+                        aria-label={t("Remove queued message")}
+                        disabled={sessionActionPending}
                         onClick={() =>
                           setQueuedMessages((current) => current.filter((candidate) => candidate.id !== queued.id))
                         }
@@ -692,17 +1081,33 @@ export function App() {
 
             {error && (
               <div className="mx-auto w-full max-w-3xl px-4 py-2">
-                <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-sm">
-                  {error}
+                <div
+                  role="alert"
+                  className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-destructive text-sm"
+                >
+                  {renderUiText(error)}
                 </div>
               </div>
             )}
 
+            {(sessionActionPending || resumeLoading) && (
+              <p className="mx-auto w-full max-w-3xl px-4 py-2 text-muted-foreground text-sm" role="status">
+                {resumeLoading
+                  ? t("Loading saved sessions for this project…")
+                  : t(
+                      "Waiting for Pi to sync the requested session or runtime (up to 20 seconds). Draft and queued messages are preserved until success.",
+                    )}
+              </p>
+            )}
+
             <ChatInput
               archAvailable={archAvailable}
+              availableThinkingLevels={availableThinkingLevels}
+              commands={commands}
               archModeEnabled={archModeEnabled}
               chatStatus={chatStatus}
               connection={connection}
+              disabled={sessionActionPending || resumeLoading}
               onAbort={abort}
               onSubmit={submitMessage}
               onToggleArchMode={toggleArchMode}
@@ -745,8 +1150,13 @@ export function App() {
             onSetAutoCompaction={setAutoCompactionRemote}
             onSetTheme={setThemeMode}
             onSetThinking={async (level) => {
-              await compactSend("set_thinking_level", { level });
-              setThinkingLevel(level);
+              const result = (await compactSend("set_thinking_level", { level })) as
+                | { level?: string; availableThinkingLevels?: string[] }
+                | undefined;
+              setThinkingLevel(result?.level || level);
+              if (result?.availableThinkingLevels) {
+                usePiWebUiStore.getState().setAvailableThinkingLevels(result.availableThinkingLevels);
+              }
             }}
             onToggleAuth={toggleAuth}
             sessionName={sessionName}
@@ -754,9 +1164,32 @@ export function App() {
             setShowThinking={setShowThinking}
             themeMode={themeMode}
             thinkingLevel={thinkingLevel}
+            availableThinkingLevels={availableThinkingLevels}
           />
         )}
         {commandOpen && <CommandPalette commands={commandActions} onClose={() => setCommandOpen(false)} />}
+        {forkPickerMessages && (
+          <ForkMessagePicker
+            messages={forkPickerMessages}
+            onCancel={() => setForkPickerMessages(null)}
+            onSelect={(message) => {
+              if (forkPickerSessionIdRef.current !== usePiWebUiStore.getState().sessionId) {
+                setError(uiText("Session changed. Reopen the fork message picker."));
+                setForkPickerMessages(null);
+                return;
+              }
+              void forkToNewSession("fork", message.entryId, message.text);
+            }}
+          />
+        )}
+        {resumeListing && (
+          <ResumeSessionPicker
+            listing={resumeListing}
+            onCancel={() => setResumeListing(null)}
+            onSelect={(selection) => void resumeSelectedSession(selection)}
+          />
+        )}
+        {sessionDetails && <SessionDetails stats={sessionDetails} onClose={() => setSessionDetails(null)} />}
         {dialog && (
           <ExtensionDialogView
             dialog={dialog}

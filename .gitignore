@@ -8,4 +8,13 @@ test-results/
 # Pi session exports
 pi-session-*.html
 
+.tmp/
 .env
+.env.*
+!.env.example
+
+# Local credentials (never commit private keys)
+*.pem
+*.key
+*.p12
+*.pfx

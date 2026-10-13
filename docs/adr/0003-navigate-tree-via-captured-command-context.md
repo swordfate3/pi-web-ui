@@ -15,11 +15,11 @@ Pi 有两种上下文类型：
 
 Pi Web UI 的核心事件处理（WebSocket handler）运行在 `ExtensionContext` 中，因此**无法调用 `navigateTree` 等 session 控制方法**。
 
-Pi 作者明确拒绝将 session 控制方法暴露给 `ExtensionContext`（GitHub #3673）。`pi.sendUserMessage("/cmd")` 也不会触发已注册的命令（GitHub #4754，by design）。
+Pi 将 session 控制方法限定在 `ExtensionCommandContext`。早期版本的 `pi.sendUserMessage("/cmd")` 不会触发已注册命令；**Pi 1.1.0 支持显式 `{ expandPromptTemplates: true }` 的命令 dispatch**，因此早期行为不再适合作为当前版本的限制依据。普通事件上下文仍不能强转为命令上下文。
 
 ## Decision
 
-在 `/webui` 命令 handler（唯一能拿到 `ExtensionCommandContext` 的地方）中**捕获完整的 `ExtensionCommandContext`**，存储为模块级变量 `latestExecuteCtx`。
+在 `/webui` 命令 handler 中**捕获完整的 `ExtensionCommandContext`**，存储为模块级变量 `latestExecuteCtx`，用于未替换运行态时的同会话树导航。其他注册命令 handler 也能拿到 command context；生命周期替换操作通过独立内部命令的当次上下文执行，不复用这个捕获值。
 
 ```
 用户运行 /webui
@@ -48,7 +48,7 @@ Pi 作者明确拒绝将 session 控制方法暴露给 `ExtensionContext`（GitH
 ### 正向
 
 - 不修改 Pi 源码
-- 复用现有 `/webui` 命令，不注册额外斜杠命令
+- 复用 `/webui` 作为高级操作能力门槛；内部替换命令从浏览器发现列表隐藏
 - 捕获完整上下文，未来扩展 session 控制操作无需新增变量
 - 命名清晰：`latestCtx`（事件）vs `latestExecuteCtx`（命令）
 
@@ -76,5 +76,6 @@ Pi 作者明确拒绝将 session 控制方法暴露给 `ExtensionContext`（GitH
 
 - Pi Extension API: `ExtensionContext` vs `ExtensionCommandContext` (`extensions/types.ts`)
 - GitHub #3673: session control methods restricted to command context — rejected by author
-- GitHub #4754: `pi.sendUserMessage("/cmd")` does not execute slash commands — by design
+- GitHub #4754: historical default dispatch behavior; Pi 1.1.0 explicitly supports `expandPromptTemplates: true`
+- Pi 1.1.0 `docs/extensions.md` and `dist/core/extensions/types.d.ts`: command context lifecycle and dispatch options
 - Pi Extension Runner: `createCommandContext()` at runner.ts

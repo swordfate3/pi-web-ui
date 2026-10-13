@@ -28,7 +28,8 @@ For conversation tree/sidebar changes, verify:
 
 For Workspace Status Float changes, verify:
 
-- The float is visible in desktop two-column mode and hidden when the Right Panel is open.
+- The default page has no workspace float. The header entry opens a responsive Workspace dialog on demand.
+- Selecting Git/artifact closes the dialog, releases its focus trap, and opens the Right Panel; hiding the panel does not reopen the dialog.
 - Git branch and diff status fit without overlap.
 - Artifact rows fit, truncate professionally, and remain clickable.
 - Empty and non-git states are visible and understandable.

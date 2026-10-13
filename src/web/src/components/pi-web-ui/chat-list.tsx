@@ -1,0 +1,88 @@
+import { TerminalIcon } from "lucide-react";
+import { memo, useCallback } from "react";
+import { ConversationEmptyState } from "@/components/ai-elements/conversation";
+import { cn } from "@/lib/utils";
+import { t, useLanguage } from "../../core/i18n";
+import type { ChatItem } from "../../core/types";
+import { ChatItemView } from "./chat-item-view";
+import { UserMessageView } from "./user-message-view";
+
+type ChatListProps = {
+  items: ChatItem[];
+  highlightedEntryId: string | null;
+  onBranch?: (entryId: string) => Promise<void> | void;
+  onCopy: (text: string) => Promise<void> | void;
+  onToggleTool: (id: string, open: boolean) => void;
+  registerItemElement: (item: ChatItem, node: HTMLElement | null) => void;
+  showThinking: boolean;
+};
+
+type ChatRowProps = Omit<ChatListProps, "items" | "highlightedEntryId"> & {
+  item: ChatItem;
+  highlighted: boolean;
+};
+
+// Default shallow comparison deliberately includes *all* props. Store updates retain
+// unchanged item references; errors, streaming content and callbacks must not be ignored.
+const ChatRow = memo(function ChatRow({
+  item,
+  highlighted,
+  onBranch,
+  onCopy,
+  onToggleTool,
+  registerItemElement,
+  showThinking,
+}: ChatRowProps) {
+  const register = useCallback(
+    (node: HTMLDivElement | null) => registerItemElement(item, node),
+    [item, registerItemElement],
+  );
+  return (
+    <div
+      className={cn(
+        "rounded-lg transition-[background-color,box-shadow] duration-300",
+        highlighted && "bg-primary/10 ring-1 ring-primary/40",
+      )}
+      data-chat-item-id={item.id}
+      data-chat-item-kind={item.kind}
+      ref={register}
+    >
+      {item.kind === "message" && item.role === "user" ? (
+        <UserMessageView
+          actionsVisible={highlighted}
+          item={item as ChatItem & { kind: "message"; role: "user" }}
+          onBranch={item.entryId ? onBranch : undefined}
+          onCopy={onCopy}
+        />
+      ) : (
+        <ChatItemView item={item} onCopy={onCopy} onToggleTool={onToggleTool} showThinking={showThinking} />
+      )}
+    </div>
+  );
+});
+
+export const ChatList = memo(function ChatList({ items, highlightedEntryId, ...props }: ChatListProps) {
+  // The empty state subscribes here; each message subscribes independently, so memo
+  // boundaries never freeze translated UI or translated system/error messages.
+  useLanguage();
+  if (items.length === 0) {
+    return (
+      <ConversationEmptyState
+        description={t("Connect to the running Pi session and send a message.")}
+        icon={<TerminalIcon className="size-7" />}
+        title="Pi Web UI"
+      />
+    );
+  }
+  return items.map((item) => (
+    <ChatRow
+      {...props}
+      highlighted={Boolean(
+        highlightedEntryId &&
+          (item.entryId === highlightedEntryId || item.relatedEntryIds?.includes(highlightedEntryId)),
+      )}
+      item={item}
+      key={item.id}
+    />
+  ));
+});

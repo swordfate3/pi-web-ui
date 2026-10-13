@@ -1,4 +1,5 @@
 import type { RpcEvent, StateSyncPayload, WsEvent } from "../types";
+import { uiText } from "../ui-text";
 import type { PiWebUiStore } from "./types";
 
 export function dispatchPiEvent(store: PiWebUiStore, data: WsEvent) {
@@ -44,10 +45,13 @@ export function dispatchPiEvent(store: PiWebUiStore, data: WsEvent) {
       store.applyToolExecutionEnd(event);
       break;
     case "auto_compaction_start":
-      store.addSystemMessage("Compacting context...");
+      store.addSystemMessage(uiText("Compacting context..."));
       break;
     case "auto_compaction_end":
-      store.addSystemMessage(`Context compacted${event.summary ? `: ${event.summary}` : ""}`, "success");
+      store.addSystemMessage(
+        uiText("Context compacted{summary}", { summary: event.summary ? `: ${event.summary}` : "" }),
+        "success",
+      );
       store.setLastUsage(null);
       break;
     case "extension_ui_request":
@@ -65,10 +69,17 @@ export function dispatchPiEvent(store: PiWebUiStore, data: WsEvent) {
       }
       break;
     case "extension_error":
-      store.addSystemMessage(`Extension error: ${event.error || "Unknown error"}`, "error");
+      store.addSystemMessage(
+        uiText("Extension error: {error}", { error: event.error || uiText("Unknown error") }),
+        "error",
+      );
+      break;
+    case "webui_command_error":
+      store.setSessionActionError(typeof event.message === "string" ? event.message : uiText("Web UI command failed"));
       break;
     case "session_name":
-      if (event.name) store.setSessionName(event.name);
+    case "session_info_changed":
+      if (event.name === undefined || typeof event.name === "string") store.setSessionName(event.name || "Pi Web UI");
       break;
     case "auth_changed":
       store.setAuthEnabled(Boolean(event.enabled));
@@ -77,7 +88,18 @@ export function dispatchPiEvent(store: PiWebUiStore, data: WsEvent) {
       store.setArchModeEnabled(Boolean(event.enabled));
       break;
     case "model_select":
-      if (event.model) store.setCurrentModel(event.model);
+      if (event.model) {
+        store.setCurrentModel(event.model);
+        void store.refreshSettingsState();
+      }
+      break;
+    case "thinking_level_select":
+      if (typeof event.level === "string") store.setThinkingLevel(event.level);
+      if (Array.isArray(event.availableThinkingLevels)) {
+        store.setAvailableThinkingLevels(
+          event.availableThinkingLevels.filter((level): level is string => typeof level === "string"),
+        );
+      }
       break;
     default:
       break;

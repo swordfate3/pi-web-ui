@@ -8,15 +8,20 @@ export type PiWebUiHarness = {
   pageUrl: string;
   port: number;
   workspaceDir: string;
+  sessionDir: string;
   stop: () => Promise<void>;
 };
 
 export type PiWebUiHarnessOptions = {
   git?: boolean;
+  longSession?: boolean;
+  /** Optional immutable release root; defaults to the working repository. */
+  runtimeDir?: string;
 };
 
 export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessOptions = {}): Promise<PiWebUiHarness> {
   const repoRoot = path.resolve(__dirname, "../..");
+  const runtimeDir = options.runtimeDir ? path.resolve(options.runtimeDir) : repoRoot;
   const tempRoot = mkdtempSync(path.join(tmpdir(), "pi-web-ui-e2e-"));
   const workspaceDir = path.join(tempRoot, "workspace");
   const externalDir = path.join(tempRoot, "external");
@@ -29,10 +34,11 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   mkdirSync(agentDir, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
   if (options.git !== false) prepareGitWorkspace(workspaceDir);
+  const longSessionFile = options.longSession ? writeLongSessionFixture(sessionDir, workspaceDir) : undefined;
 
   const processOutput: string[] = [];
   const piProcess = spawn(
-    process.env.PI_E2E_BIN || "pi",
+    process.env.PI_E2E_BIN || path.join(runtimeDir, "node_modules/.bin/pi"),
     [
       "--mode",
       "rpc",
@@ -42,16 +48,27 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
       "faux-key",
       "--session-dir",
       sessionDir,
+      ...(longSessionFile ? ["--session", longSessionFile] : []),
       "--name",
       "Pi Web UI E2E",
       "--approve",
-      "--no-skills",
-      "--no-prompt-templates",
+      ...(fixtureName === "slash-commands" ? [] : ["--no-skills", "--no-prompt-templates"]),
       "--no-context-files",
+      ...(fixtureName === "slash-commands"
+        ? [
+            "--skill",
+            path.join(repoRoot, "e2e/fixtures/skills/e2e-skill"),
+            "--prompt-template",
+            path.join(repoRoot, "e2e/fixtures/prompts/e2e-prompt.md"),
+          ]
+        : []),
       "--extension",
       path.join(repoRoot, "e2e/fixtures/faux-provider-extension.ts"),
+      ...(fixtureName === "slash-commands"
+        ? ["--extension", path.join(repoRoot, "e2e/fixtures/slash-command-extension.ts")]
+        : []),
       "--extension",
-      path.join(repoRoot, "extensions/mirror-server.ts"),
+      path.join(runtimeDir, "extensions/mirror-server.ts"),
     ],
     {
       cwd: workspaceDir,
@@ -62,7 +79,7 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
         PI_OFFLINE: "1",
         PI_WEB_UI_HOST: "127.0.0.1",
         PI_WEB_UI_PORT: String(port),
-        PI_WEB_UI_STATIC_DIR: path.join(repoRoot, "dist"),
+        PI_WEB_UI_STATIC_DIR: path.join(runtimeDir, "dist"),
         PI_WEB_UI_E2E_FIXTURE: fixtureName,
         PI_WEB_UI_E2E_EXTERNAL_ARTIFACT: path.join(externalDir, "external-skill.md"),
       },
@@ -76,11 +93,62 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
     pageUrl: `http://127.0.0.1:${port}`,
     port,
     workspaceDir,
+    sessionDir,
     async stop() {
       await stopProcess(piProcess);
       if (existsSync(tempRoot)) rmSync(tempRoot, { recursive: true, force: true });
     },
   };
+}
+
+function writeLongSessionFixture(sessionDir: string, workspaceDir: string): string {
+  const sessionId = "7e91f4c2-6000-4500-8500-000000006000";
+  const file = path.join(sessionDir, `${Date.now()}_${sessionId}.jsonl`);
+  const timestamp = new Date().toISOString();
+  const lines = [JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp, cwd: workspaceDir })];
+  let parentId: string | null = null;
+  const ids: string[] = [];
+  for (let index = 0; index < 6000; index += 1) {
+    const id = index.toString(16).padStart(8, "0");
+    ids.push(id);
+    const role = index % 2 === 0 ? "user" : "assistant";
+    const text = index === 5999 ? "LONG_SESSION_END_MARKER_7e91f4" : `${role} history entry ${index}`;
+    const message =
+      role === "user"
+        ? { role, content: text, timestamp: Date.now() + index }
+        : {
+            role,
+            content: [{ type: "text", text }],
+            api: "anthropic-messages",
+            provider: "faux",
+            model: "faux-1",
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+            stopReason: "stop",
+            timestamp: Date.now() + index,
+          };
+    lines.push(JSON.stringify({ type: "message", id, parentId, timestamp, message }));
+    parentId = id;
+  }
+  for (const [targetIndex, label] of [
+    [500, "LONG_BRANCH_LABEL_ALPHA"],
+    [3000, "LONG_BRANCH_LABEL_BETA"],
+    [5000, "LONG_BRANCH_LABEL_GAMMA"],
+  ] as const) {
+    const id = `f${targetIndex.toString(16).padStart(7, "0")}`;
+    lines.push(
+      JSON.stringify({
+        type: "message",
+        id: `branch-${targetIndex}`,
+        parentId: ids[targetIndex],
+        timestamp,
+        message: { role: "user", content: `SIDE_BRANCH_${targetIndex}`, timestamp: Date.now() },
+      }),
+      JSON.stringify({ type: "label", id, parentId, timestamp, targetId: ids[targetIndex], label }),
+    );
+    parentId = id;
+  }
+  writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
+  return file;
 }
 
 function prepareGitWorkspace(workspaceDir: string) {

@@ -6,9 +6,12 @@ import {
   formatToolOutput,
   syncToItems,
 } from "../chat-conversion";
+import { decodeSessionTreeOrKeep } from "../session-tree-wire";
 import { isToolExpandable } from "../tool-summary";
 import type { ChatItem } from "../types";
+import { errorUiText, uiText } from "../ui-text";
 import { artifactsFromEntries } from "../workspace-artifacts";
+import { runSessionAction } from "./session-action";
 import type { SessionSlice, StoreSlice } from "./types";
 
 let conversationSyncInFlight = false;
@@ -23,12 +26,24 @@ function nextId(prefix: string) {
   return `${prefix}-${Date.now()}-${itemCounter}`;
 }
 
-export const createSessionSlice: StoreSlice<SessionSlice> = (set, get) => ({
+export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => ({
   items: [],
   chatStatus: "ready",
   tree: [],
   leafId: null,
+  sessionId: null,
+  runtimeId: null,
+  sessionActionPending: false,
+  sessionActionError: null,
+  sessionActionNotice: null,
   selectedTreeEntryId: null,
+
+  setSessionActionError: (message) => set({ sessionActionError: message, error: message }),
+
+  forkSession: (action, entryId) => runSessionAction([set, get, api], { method: "fork_session", action, entryId }),
+  resumeSession: (id, targetSessionId) =>
+    runSessionAction([set, get, api], { method: "switch_session", id, targetSessionId }),
+  reloadRuntime: () => runSessionAction([set, get, api], { method: "reload" }),
   loadingTreeEntryId: null,
   conversationSyncing: false,
   conversationSyncError: null,
@@ -43,11 +58,16 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get) => ({
     const entries = sync.entries ?? [];
     const items = syncToItems(entries, nextId);
     const artifacts = artifactsFromEntries(entries);
-    const tree = sync.tree ?? [];
-    const currentSelection = get().selectedTreeEntryId;
+    const decodedTree = decodeSessionTreeOrKeep(sync, get().tree);
+    const tree = decodedTree.tree;
+    const previousSessionId = get().sessionId;
+    const sessionChanged = Boolean(sync.sessionId && previousSessionId && sync.sessionId !== previousSessionId);
+    const notice = sessionChanged ? null : get().sessionActionNotice;
+    if (notice) items.push({ kind: "system", id: nextId("session-action"), text: notice, tone: "success" });
+    const currentSelection = sessionChanged ? null : get().selectedTreeEntryId;
     let selectedTreeEntryId: string | null = sync.leafId ?? null;
 
-    if (currentSelection) {
+    if (decodedTree.ok && currentSelection) {
       const stack = [...tree];
       while (stack.length > 0) {
         const node = stack.pop();
@@ -55,24 +75,36 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get) => ({
           selectedTreeEntryId = currentSelection;
           break;
         }
-        if (node) stack.push(...node.children);
+        if (node) {
+          for (const child of node.children) stack.push(child);
+        }
       }
     }
 
+    // Keep navigation state aligned with the retained tree on a rejected snapshot.
+    if (!decodedTree.ok) selectedTreeEntryId = get().selectedTreeEntryId;
+
     set({
       artifacts,
+      conversationSyncError: decodedTree.error,
       chatStatus: sync.isStreaming ? "streaming" : "ready",
       connection: "connected",
       contextWindowSize: sync.model?.contextWindow || get().contextWindowSize,
       currentModel: sync.model || null,
-      error: null,
+      error: sessionChanged ? null : get().error,
       items,
       lastUsage: findLastUsage(entries),
-      leafId: sync.leafId ?? null,
+      leafId: decodedTree.ok ? (sync.leafId ?? null) : get().leafId,
+      sessionId: sync.sessionId ?? previousSessionId,
+      // A runtime identity only counts when this snapshot explicitly identifies
+      // its session too (reload must not complete on a partial snapshot).
+      runtimeId: sync.sessionId ? (sync.runtimeId ?? (sessionChanged ? null : get().runtimeId)) : get().runtimeId,
+      sessionActionNotice: notice,
       modelLabel: sync.model?.id ? sync.model.id.split("/").pop() || sync.model.id : "model",
       selectedTreeEntryId,
       sessionName: sync.sessionName || "Pi Web UI",
       thinkingLevel: sync.thinkingLevel || "off",
+      availableThinkingLevels: sync.availableThinkingLevels || ["off"],
       tree,
     });
     get().requestGitStatusRefresh({ debounce: true });
@@ -99,7 +131,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get) => ({
       const sync = await get().send("sync_request");
       get().applyStateSync(sync as Parameters<SessionSlice["applyStateSync"]>[0]);
     } catch (error) {
-      set({ conversationSyncError: error instanceof Error ? error.message : "Sync failed" });
+      set({ conversationSyncError: errorUiText(error, uiText("Sync failed")) });
     } finally {
       conversationSyncInFlight = false;
       set({ conversationSyncing: false });
@@ -129,7 +161,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get) => ({
         ...(command.images?.length && { images: command.images }),
       });
     } catch (error) {
-      set({ chatStatus: "error", error: error instanceof Error ? error.message : "Prompt failed" });
+      set({ chatStatus: "error", error: errorUiText(error, uiText("Prompt failed")) });
     }
   },
 
@@ -137,9 +169,9 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get) => ({
     try {
       await get().send("abort");
       set({ chatStatus: "ready" });
-      get().addSystemMessage("Aborted by user", "error");
+      get().addSystemMessage(uiText("Aborted by user"), "error");
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : "Abort failed" });
+      set({ error: errorUiText(error, uiText("Abort failed")) });
     }
   },
 

@@ -11,7 +11,9 @@ The float is a compact status and entry surface. Full git diffs and full file co
 
 ## Solution
 
-Add a Codex-style Workspace Status Float in the chat area. It shows:
+Provide an on-demand workspace status surface from the header's
+`Open workspace status` button. It is closed initially and does not place a
+permanent card over chat content. When opened, it shows:
 
 - the current git branch and diff summary
 - Markdown artifacts produced by successful `edit` / `write` tool calls
@@ -93,17 +95,17 @@ The float is an entry surface for Right Panel tabs:
 - Git row opens `git-diff`.
 - Artifact row opens `artifact-file`.
 - Re-clicking an already-open target focuses the existing tab.
-- When the Right Panel is visible, the float hides.
-- When the Right Panel is hidden, the float returns.
+- Selecting Git or an artifact closes the status surface and opens the Right Panel.
+- Hiding the Right Panel does not automatically reopen the status surface.
+- The header workspace entry remains available for opening another target.
 - Closing the last tab hides the Right Panel while preserving the restore affordance.
 
 ## Mobile Behavior
 
-Mobile does not show the large desktop float. It uses a compact workspace button that opens the appropriate Right Panel surface:
-
-- If git diff is available, open `git-diff`.
-- Otherwise, if artifacts exist, open the most recent artifact.
-- If neither is available, keep the button disabled.
+Mobile uses the same header workspace entry and an on-demand status surface.
+Users can choose Git or any displayed recent artifact instead of automatically
+opening only the first available target. Non-git and empty states remain
+readable, so the entry itself is not disabled just because no target exists.
 
 The Right Panel should behave as a full-width sheet-like surface on mobile.
 
@@ -118,7 +120,7 @@ The Right Panel should behave as a full-width sheet-like surface on mobile.
 
 ## Acceptance Criteria
 
-1. Desktop float shows current git branch.
+1. Workspace details are hidden initially; opening the header entry shows the current git branch.
 2. Git repository with changes shows additions and deletions.
 3. Clean git repository shows `No changes`.
 4. Non-git workspace shows `No git repository`.
@@ -129,4 +131,4 @@ The Right Panel should behave as a full-width sheet-like surface on mobile.
 9. Clicking an artifact opens one `artifact-file` tab with readable Markdown content.
 10. Workspace-external Markdown artifacts written by the current session can be opened from the artifact list.
 11. Right Panel visibility and restore button behavior match `docs/prd/right-panel.md`.
-12. Mobile uses the compact workspace entry and does not display the desktop float.
+12. Mobile uses the header workspace entry and an on-demand surface, not a permanent floating card.

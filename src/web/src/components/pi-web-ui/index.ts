@@ -8,6 +8,8 @@ export { ContextPopover } from "./context-popover";
 export { ConversationSidebar } from "./conversation-sidebar";
 export { ConversationSidebarTree } from "./conversation-sidebar-tree";
 export { ExtensionDialogView } from "./extension-dialog";
+export type { ForkableMessage } from "./fork-message-picker";
+export { ForkMessagePicker } from "./fork-message-picker";
 export { ImagePreviewStrip } from "./image-preview-strip";
 export { ModelPicker } from "./model-picker";
 export {

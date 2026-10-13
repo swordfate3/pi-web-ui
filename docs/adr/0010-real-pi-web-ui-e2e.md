@@ -126,7 +126,7 @@ The harness waits until mirror-server responds on the selected `127.0.0.1:<port>
 
 ### Advanced Features
 
-Scenarios that need `latestExecuteCtx`, such as Branch, Continue, or tree navigation, must enable Web UI advanced features through the real `/webui` command path before exercising those controls. Workspace Status Float, git diff, artifacts, and Right Panel do not require `latestExecuteCtx`.
+Scenarios that need `latestExecuteCtx`, such as Branch, Continue, or tree navigation, must enable Web UI advanced features through the real `/webui` command path before exercising those controls. `/fork` and `/clone` also require `/webui`, but execute through a fresh internal command handler rather than reusing the captured context. After session replacement, advanced features are disabled until `/webui` is run again; no automatic context recapture is performed. Workspace Status Float, git diff, artifacts, and Right Panel do not require `latestExecuteCtx`.
 
 ### Faux Response Fixtures
 
@@ -172,14 +172,13 @@ Scenarios that need `No git repository` skip git initialization.
 
 ## Current Implementation
 
-The implemented scenarios live in `e2e/features/workspace-status.feature`.
+The implemented scenarios live in `e2e/features/chat-lifecycle.feature` and `e2e/features/workspace-status.feature`.
 
-It starts a real `pi --mode rpc` process, loads:
+The harness starts the project-local `node_modules/.bin/pi` (unless `PI_E2E_BIN` overrides it) in `--mode rpc` and loads `e2e/fixtures/faux-provider-extension.ts` plus `extensions/mirror-server.ts`. The package peer range and lockfile are pinned to the current stable Pi CLI line (`>=1.1.0`, lockfile `1.1.0`); use Node.js `>=22.19.0`, as required by Pi. For slash-command coverage, the harness additionally loads an explicit fixture skill, prompt template, and `e2e/fixtures/slash-command-extension.ts`; the scenario verifies that Web UI suggestions discover all three resources and that the real Pi prompt path expands/runs them. The faux provider responds deterministically to the expanded skill and template text, while the extension command changes the session name and verifies its event reaches the browser.
 
-- `e2e/fixtures/faux-provider-extension.ts`;
-- `extensions/mirror-server.ts`.
+The session replacement scenarios exercise `/new`, `/clone` and `/fork` through the browser and real WebSocket transport. Clone/fork checks also read JSONL files only from the active harness's isolated session directory: new session identities and parent-session links, clone history retention, fork-before-message semantics, and unchanged source/clone files. Browser checks cover draft restoration, cancelled picker/overwrite confirmation, `session_before_fork` hook cancellation, missing `/webui`, and empty fork choices. These are functional E2E assertions; desktop/mobile screenshot inspection remains a separate visual check.
 
-The faux provider fixtures call the real Pi `write` tool. One scenario modifies a committed Markdown file in a temporary git workspace, then verifies branch/diff/artifact state, `artifact-file`, and `git-diff` tabs. Another scenario writes a Markdown artifact outside the git workspace and verifies that the Right Panel can still open it as a session artifact.
+The workspace scenarios use real Pi `write` tools. One modifies a committed Markdown file in a temporary git workspace, then verifies branch/diff/artifact state, `artifact-file`, and `git-diff` tabs. Another writes a Markdown artifact outside the git workspace and verifies that the Right Panel can still open it as a session artifact.
 
 Run it locally with:
 
@@ -203,6 +202,15 @@ npm run e2e
 - Context popover and compact action surface.
 - Tool card success/error/long output expand behavior.
 - Arch mode availability and enter/exit flow.
+
+### Long-session regression
+
+Long persisted histories must be tested through the real Pi CLI and browser,
+not only extension loading or a short empty-session smoke check. Snapshots use
+flat `treeNodes` so a linear history cannot overflow JSON serialization.
+Frontend unit tests additionally cover 10,000-node flat/legacy trees and reject
+invalid topology atomically. Visual checks use an isolated 6,000-entry session
+and desktop/mobile screenshots; they are separate from functional E2E.
 
 ### P2
 
@@ -262,6 +270,28 @@ The canonical CI order is:
 5. Done: add Workspace Status + Right Panel feature using a real `write` tool call.
 6. Next: add Chat lifecycle as a smaller smoke scenario if it proves useful beside Workspace Status.
 7. Next: add conversation tree and connection recovery scenarios.
+
+## Minimal-chat regression coverage
+
+- Desktop and mobile start with navigation fully hidden. Explicit header toggles and mobile `/tree` reveal the navigation Sheet; close controls are exercised rather than offscreen elements.
+- Workspace opens on demand. Selecting Git/artifact closes its dialog before opening the detail surface; repeated targets retain tab deduplication.
+- `collapse-regression` uses native faux thinking and a real Pi `write` call. Reasoning and tool payloads start collapsed, expand with their public controls, and remain collapsed after history refresh.
+- The 6000-message long-session scenario keeps its full fixture and checks loading, label/end search, refresh, and complete snapshots. Its trace-enabled browser budget is 180 seconds; ordinary scenarios retain the normal timeout.
+- Browser screenshots remain a separate visual check, not a substitute for these tests.
+
+## Bilingual interface regression
+
+Language is a browser presentation preference, not a session command. Bilingual scenarios must run through a real Pi process and built Web UI, switch via Settings, verify document language and refresh persistence, and preserve drafts, session identity and original message content. Existing English scenarios remain a separate regression baseline. Browser-locale scenarios should use an actual browser context locale rather than replacing the Zustand store or mocking WebSocket data.
+
+See `docs/prd/interface-language.md` for the translation boundary. Raw provider errors, dynamic extension text and message content need not become Chinese when the interface does.
+
+## Interaction performance regression
+
+Use isolated real Pi fixtures for long-tree navigation and large multiline/single-line tool output. Record local timings and mounted row counts separately from functional pass/fail. Do not use a narrow machine-specific latency threshold as proof of correctness or a broad performance guarantee.
+
+Virtualized-tree tests navigate via public search/current-node controls and scrolling. An offscreen node need not exist in the DOM, but complete snapshots and later mounted rows must preserve its identity/content. Full output access must remain available even when a bounded preview or plain-text view avoids expensive highlighting.
+
+See `docs/prd/interaction-performance.md` for scope and preserved invariants.
 
 ## References
 

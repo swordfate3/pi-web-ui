@@ -143,7 +143,9 @@ The current `mirror_sync` type becomes a standard event:
   "event": "state_sync",
   "payload": {
     "entries": [...],
-    "tree": [...],
+    "treeNodes": [
+      { "entry": { "id": "abc123", "parentId": null, "type": "message" }, "parentNodeId": null }
+    ],
     "leafId": "abc123",
     "model": {...},
     "thinkingLevel": "off",
@@ -154,6 +156,19 @@ The current `mirror_sync` type becomes a standard event:
   }
 }
 ```
+
+`treeNodes` is a flat DFS-preorder list of all session-tree nodes. Each record
+contains `entry`, `parentNodeId` (the structural parent's ID, or `null` for a
+root), and optional `label` / `labelTimestamp`. The browser validates IDs and
+parent relationships, then rebuilds its internal nested tree iteratively. This
+keeps JSON nesting independent of history length and preserves every branch;
+`entry.parentId` is persisted history metadata, not a replacement for the wire
+parent. `get_tree` returns the same `{ treeNodes }` representation.
+
+The browser also validates legacy nested `tree` snapshots. Invalid topology
+(such as string `children`, duplicate IDs or cycles) reports a conversation-sync
+error and does not replace the last valid tree. A generic payload depth limiter
+must never truncate session-tree topology.
 
 Sent on WebSocket connect (full state snapshot). After `session_tree` or turn
 completion events, the browser requests a fresh snapshot with `sync_request`
@@ -279,5 +294,5 @@ Our custom envelope is isomorphic enough to JSON-RPC that migration later is tri
 ## References
 
 - [ADR 0002: Raw Web UI Event Forwarding](./0002-web-ui-extension-event-protocol.md) — event forwarding principle preserved
-- [ADR 0007: Conversation Tree Sidebar](./0007-conversation-tree-sidebar.md) — removes session endpoints
+- [Conversation Tree Sidebar PRD](../prd/tree-sidebar.md) — current-session tree scope (the previously linked ADR 0007 tree document is not present in this repository)
 - [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification) — considered, not adopted

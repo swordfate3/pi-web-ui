@@ -40,7 +40,7 @@ Toggle button 只控制 right panel 显隐。隐藏 panel 不关闭 tabs，不�
 
 ### 与 Workspace Status Float 的关系
 
-桌面双列模式下 Workspace Status Float 可见。Right Panel 打开后进入三列表面，Workspace Status Float 隐藏。关闭或隐藏 Right Panel 后，Workspace Status Float 按自身规则恢复。
+工作区状态由顶栏入口按需打开，不再常驻聊天浮窗。选择 git/artifact 后关闭状态弹层并打开 Right Panel。关闭或隐藏 Right Panel 不自动恢复状态弹层；需要查看其他目标时再次点击顶栏工作区入口。
 
 ### 右侧内容类型
 
@@ -67,5 +67,5 @@ Right Panel 支持：
 1. Git diff 和 Markdown artifact 都以 right panel tab 打开。
 2. 重复点击同一个 git diff 或 artifact 复用已有 tab。
 3. Toggle button 隐藏 panel 后，再次打开仍恢复 tabs 和 active tab。
-4. 关闭最后一个 tab 后 panel 关闭，Workspace Status Float 恢复。
+4. 关闭最后一个 tab 后 panel 关闭，聊天恢复完整可用宽度；工作区入口仍可按需打开。
 5. 移动端以 sheet 呈现，不挤压聊天区域。

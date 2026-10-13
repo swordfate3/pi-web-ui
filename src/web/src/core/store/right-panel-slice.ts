@@ -1,3 +1,4 @@
+import { errorUiText, uiText } from "../ui-text";
 import type { FileContentResult, GitDiffResult, RightPanelSlice, StoreSlice } from "./types";
 
 export const createRightPanelSlice: StoreSlice<RightPanelSlice> = (set, get) => ({
@@ -48,7 +49,7 @@ export const createRightPanelSlice: StoreSlice<RightPanelSlice> = (set, get) => 
         title: "Changes",
         branch: status?.branch ?? null,
         isRepo: status?.isRepo,
-        error: error instanceof Error ? error.message : "Failed to load git diff",
+        error: errorUiText(error, uiText("Failed to load git diff")),
         loading: false,
         updatedAt: Date.now(),
       });
@@ -82,7 +83,7 @@ export const createRightPanelSlice: StoreSlice<RightPanelSlice> = (set, get) => 
         kind: "artifact-file",
         title: artifact.name,
         path: artifact.path,
-        error: error instanceof Error ? error.message : "Failed to load artifact",
+        error: errorUiText(error, uiText("Failed to load artifact")),
         loading: false,
         updatedAt: Date.now(),
       });

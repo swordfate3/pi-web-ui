@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand";
 import type { PiClient } from "../pi-client";
 import type {
+  BrowserCommandInfo,
   ChatItem,
   ChatSubmitStatus,
   ConnectionState,
@@ -19,17 +20,18 @@ import type {
   Usage,
   WorkspaceArtifact,
 } from "../types";
+import type { UiText } from "../ui-text";
 
 export type ConnectionSlice = {
   client: PiClient | null;
   connection: ConnectionState;
-  error: string | null;
+  error: UiText | null;
   advancedFeatures: boolean;
   archAvailable: boolean;
   setClient: (client: PiClient | null) => void;
   send: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
   setConnection: (connection: ConnectionState) => void;
-  setError: (error: string | null) => void;
+  setError: (error: UiText | null) => void;
   applyWebUiState: (payload: Record<string, unknown>) => void;
 };
 
@@ -38,13 +40,22 @@ export type SessionSlice = {
   chatStatus: ChatSubmitStatus;
   tree: SessionTreeNode[];
   leafId: string | null;
+  sessionId: string | null;
+  runtimeId: string | null;
+  sessionActionPending: boolean;
+  sessionActionError: UiText | null;
+  sessionActionNotice: UiText | null;
+  forkSession: (action: "fork" | "clone", entryId?: string) => Promise<void>;
+  resumeSession: (id: string, targetSessionId: string) => Promise<void>;
+  reloadRuntime: () => Promise<void>;
+  setSessionActionError: (message: UiText) => void;
   selectedTreeEntryId: string | null;
   loadingTreeEntryId: string | null;
   conversationSyncing: boolean;
-  conversationSyncError: string | null;
+  conversationSyncError: UiText | null;
   lastUsage: Usage | null;
   contextWindowSize: number;
-  addSystemMessage: (text: string, tone?: SystemTone) => void;
+  addSystemMessage: (text: UiText, tone?: SystemTone) => void;
   applyStateSync: (sync: StateSyncPayload) => void;
   requestConversationSync: (options?: { debounce?: boolean }) => Promise<void> | void;
   clearConversationTimers: () => void;
@@ -73,6 +84,8 @@ export type SettingsSlice = {
   currentModel: ModelInfo | null;
   modelLabel: string;
   thinkingLevel: string;
+  availableThinkingLevels: string[];
+  commands: BrowserCommandInfo[];
   sessionName: string;
   autoCompaction: boolean;
   authConfigured: boolean;
@@ -85,6 +98,8 @@ export type SettingsSlice = {
   setAvailableModels: (models: ModelInfo[]) => void;
   setCurrentModel: (model: ModelInfo | null) => void;
   setThinkingLevel: (level: string) => void;
+  setAvailableThinkingLevels: (levels: string[]) => void;
+  setCommands: (commands: BrowserCommandInfo[]) => void;
   setSessionName: (name: string) => void;
   setAutoCompaction: (enabled: boolean) => void;
   setAuthEnabled: (enabled: boolean) => void;
@@ -142,6 +157,7 @@ export type StoreSlice<T> = StateCreator<PiWebUiStore, [], [], T>;
 export type SettingsStateResult = {
   model?: ModelInfo;
   thinkingLevel?: string;
+  availableThinkingLevels?: string[];
   sessionName?: string;
   autoCompactionEnabled?: boolean;
 };
@@ -151,12 +167,6 @@ export type AuthStateResult = {
   enabled?: boolean;
 };
 
-export type SessionStatsResult = {
-  totalMessages?: number;
-  userMessages?: number;
-  assistantMessages?: number;
-  toolCalls?: number;
-  tokens?: { input?: number; total?: number };
-};
+export type { SessionStatsResult } from "../types";
 
 export type { FileContentResult, GitDiffResult };

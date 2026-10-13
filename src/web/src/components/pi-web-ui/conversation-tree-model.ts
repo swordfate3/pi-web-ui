@@ -1,44 +1,32 @@
-import { extractText, extractThinking, extractToolCalls, formatToolOutput } from "../../core/chat-conversion";
+import { extractToolCalls } from "../../core/chat-conversion";
+import { t } from "../../core/i18n";
 import { formatToolInvocationSummary, formatToolInvocationTitle } from "../../core/tool-summary";
 import type { ConversationTreeItem, PiContentBlock, SessionEntry, SessionTreeNode } from "../../core/types";
+import { sidebarContentPreview } from "./sidebar-tree-preview";
 
-export function buildConversationTreeItems({
-  collapsedIds,
-  leafId,
-  searchQuery,
-  tree,
-}: {
-  tree: SessionTreeNode[];
-  leafId: string | null;
-  collapsedIds: Set<string>;
-  searchQuery: string;
-}) {
-  const normalizedQuery = searchQuery.trim().toLowerCase();
+/** Owned by one mounted sidebar; no global cache of historical sessions. */
+export function indexConversationTree(tree: SessionTreeNode[], leafId: string | null) {
   const toolCallsById = buildToolCallIndex(tree);
   const nodeById = new Map<string, SessionTreeNode>();
+  const parentById = new Map<string, string | null>();
   const visibleById = new Map<string, SessionTreeNode>();
   const visibleRoots: SessionTreeNode[] = [];
-  const items: ConversationTreeItem[] = [];
+  const visibleParentById = new Map<string, string | null>();
   const terminalEntryIds = new Set<string>();
-  const itemMetaById = new Map<
-    string,
-    {
-      detail?: string;
-      label?: string;
-      selfMatches: boolean;
-      text: string;
-    }
-  >();
-  const subtreeMatchesById = new Map<string, boolean>();
+  const itemMetaById = new Map<string, { detail?: string; label?: string; text: string; searchText: string }>();
+  const descendantCountById = new Map<string, number>();
 
-  const sourceStack = [...tree].reverse();
+  const sourceStack = tree.map((node) => ({ node, parentId: null as string | null })).reverse();
   while (sourceStack.length > 0) {
-    const node = sourceStack.pop();
-    if (!node?.entry.id) continue;
-    nodeById.set(node.entry.id, node);
-    if (node.children.length === 0) terminalEntryIds.add(node.entry.id);
+    const frame = sourceStack.pop();
+    if (!frame?.node.entry.id) continue;
+    const { node, parentId } = frame;
+    const nodeId = frame.node.entry.id;
+    nodeById.set(nodeId, node);
+    parentById.set(nodeId, parentId);
+    if (node.children.length === 0) terminalEntryIds.add(nodeId);
     for (let index = node.children.length - 1; index >= 0; index -= 1) {
-      sourceStack.push(node.children[index]);
+      sourceStack.push({ node: node.children[index], parentId: nodeId });
     }
   }
 
@@ -56,7 +44,7 @@ export function buildConversationTreeItems({
     if (entry.type !== "message" || entry.message?.role !== "assistant" || isCurrentLeaf) return true;
 
     const message = entry.message as { errorMessage?: string; stopReason?: string };
-    const hasText = extractText(entry.message.content).trim().length > 0;
+    const hasText = sidebarContentPreview(entry.message.content).length > 0;
     const isErrorOrAborted = Boolean(message.errorMessage || (message.stopReason && message.stopReason !== "stop"));
     return hasText || isErrorOrAborted;
   };
@@ -73,17 +61,17 @@ export function buildConversationTreeItems({
     });
   }
 
+  // Source traversal is preorder: resolve skipped ancestry once, not once per descendant.
+  const nearestVisibleById = new Map<string, string | null>();
   for (const node of nodeById.values()) {
     const nodeId = node.entry.id;
     if (!nodeId) continue;
+    const sourceParentId = parentById.get(nodeId) ?? null;
+    const parentId = sourceParentId ? (nearestVisibleById.get(sourceParentId) ?? null) : null;
     const visibleNode = visibleById.get(nodeId);
+    nearestVisibleById.set(nodeId, visibleNode ? nodeId : parentId);
     if (!visibleNode) continue;
-
-    let parentId = node.entry.parentId ?? null;
-    while (parentId && !visibleById.has(parentId)) {
-      parentId = nodeById.get(parentId)?.entry.parentId ?? null;
-    }
-
+    visibleParentById.set(nodeId, parentId);
     const visibleParent = parentId ? visibleById.get(parentId) : undefined;
     if (visibleParent) visibleParent.children.push(visibleNode);
     else visibleRoots.push(visibleNode);
@@ -94,10 +82,7 @@ export function buildConversationTreeItems({
   }
   visibleRoots.sort(compareTreeNodes);
 
-  let effectiveLeafId: string | null = leafId;
-  while (effectiveLeafId && !visibleById.has(effectiveLeafId)) {
-    effectiveLeafId = nodeById.get(effectiveLeafId)?.entry.parentId ?? null;
-  }
+  const effectiveLeafId = leafId ? (nearestVisibleById.get(leafId) ?? null) : null;
 
   const matchStack = visibleRoots.map((node) => ({ node, visited: false })).reverse();
   while (matchStack.length > 0) {
@@ -115,14 +100,59 @@ export function buildConversationTreeItems({
     const { detail, text } = getConversationTreeItemText(frame.node.entry, toolCallsById);
     const label = frame.node.label ?? (typeof frame.node.entry.label === "string" ? frame.node.entry.label : undefined);
     const searchText = `${text} ${detail ?? ""} ${label ?? ""} ${frame.node.entry.type}`.toLowerCase();
-    const selfMatches = !normalizedQuery || searchText.includes(normalizedQuery);
-    const descendantMatches = frame.node.children.some(
-      (child) => subtreeMatchesById.get(child.entry.id ?? "") === true,
+    itemMetaById.set(id, { detail, label, searchText, text });
+    descendantCountById.set(
+      id,
+      frame.node.children.reduce((count, child) => count + 1 + (descendantCountById.get(child.entry.id ?? "") ?? 0), 0),
     );
-    itemMetaById.set(id, { detail, label, selfMatches, text });
-    subtreeMatchesById.set(id, selfMatches || descendantMatches);
   }
+  return {
+    visibleRoots,
+    visibleById,
+    visibleParentById,
+    itemMetaById,
+    terminalEntryIds,
+    descendantCountById,
+    effectiveLeafId,
+    leafId,
+  };
+}
 
+export type ConversationTreeIndex = ReturnType<typeof indexConversationTree>;
+
+/** One active query only: ancestors remain visible and search overrides collapse. */
+export function searchConversationTree(index: ConversationTreeIndex, searchQuery: string) {
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const selfMatches = new Set<string>();
+  const subtreeMatchesById = new Set<string>();
+  if (normalizedQuery) {
+    const stack = index.visibleRoots.map((node) => ({ node, visited: false })).reverse();
+    while (stack.length) {
+      const frame = stack.pop();
+      const id = frame?.node.entry.id;
+      if (!frame || !id) continue;
+      if (!frame.visited) {
+        stack.push({ node: frame.node, visited: true });
+        for (const child of frame.node.children) stack.push({ node: child, visited: false });
+        continue;
+      }
+      if (index.itemMetaById.get(id)?.searchText.includes(normalizedQuery)) selfMatches.add(id);
+      if (selfMatches.has(id) || frame.node.children.some((child) => subtreeMatchesById.has(child.entry.id ?? ""))) {
+        subtreeMatchesById.add(id);
+      }
+    }
+  }
+  return { normalizedQuery, selfMatches, subtreeMatchesById };
+}
+
+export function projectConversationTree(
+  index: ConversationTreeIndex,
+  search: ReturnType<typeof searchConversationTree>,
+  collapsedIds: Set<string>,
+) {
+  const { visibleRoots, itemMetaById, terminalEntryIds, descendantCountById, effectiveLeafId, leafId } = index;
+  const { normalizedQuery, selfMatches, subtreeMatchesById } = search;
+  const items: ConversationTreeItem[] = [];
   let currentOrder = -1;
   const renderStack = visibleRoots
     .map((node, index) => ({
@@ -140,11 +170,11 @@ export function buildConversationTreeItems({
     const frame = renderStack.pop();
     const id = frame?.node.entry.id;
     if (!frame || !id) continue;
-    if (normalizedQuery && !subtreeMatchesById.get(id)) continue;
+    if (normalizedQuery && !subtreeMatchesById.has(id)) continue;
 
-    const meta = itemMetaById.get(id) ?? { selfMatches: false, text: "Event" };
+    const meta = itemMetaById.get(id) ?? { detail: undefined, label: undefined, text: t("Event") };
     const children = frame.node.children.filter(
-      (child) => !normalizedQuery || subtreeMatchesById.get(child.entry.id ?? ""),
+      (child) => !normalizedQuery || subtreeMatchesById.has(child.entry.id ?? ""),
     );
     const isBranchable = frame.node.entry.type === "message" && frame.node.entry.message?.role === "user";
     const isCustomMessage = frame.node.entry.type === "custom_message";
@@ -161,15 +191,14 @@ export function buildConversationTreeItems({
       detail: meta.detail,
       entry: frame.node.entry,
       entryType: frame.node.entry.type,
-      hiddenChildCount:
-        isExpandable && !isSegmentExpanded ? countVisibleDescendants(children, normalizedQuery, subtreeMatchesById) : 0,
+      hiddenChildCount: isExpandable && !isSegmentExpanded ? (descendantCountById.get(id) ?? 0) : 0,
       id,
       isBranchable,
       isContinuable,
       isExpandable,
       isExpanded: isSegmentExpanded,
       isLeaf: id === effectiveLeafId,
-      isSearchMatch: meta.selfMatches && Boolean(normalizedQuery),
+      isSearchMatch: selfMatches.has(id) && Boolean(normalizedQuery),
       label: meta.label,
       order: items.length,
       parentId: frame.node.entry.parentId ?? null,
@@ -220,70 +249,70 @@ export function buildConversationTreeItems({
   return { currentEntryId: effectiveLeafId, currentOrder, items };
 }
 
-function countVisibleDescendants(
-  children: SessionTreeNode[],
-  normalizedQuery: string,
-  subtreeMatchesById: Map<string, boolean>,
-) {
-  let count = 0;
-  const stack = [...children];
-  while (stack.length > 0) {
-    const node = stack.pop();
-    const id = node?.entry.id;
-    if (!node || !id) continue;
-    if (normalizedQuery && !subtreeMatchesById.get(id)) continue;
-    count += 1;
-    stack.push(...node.children);
-  }
-  return count;
+/** Compatibility entry point for callers/tests; hook caches the three stages separately. */
+export function buildConversationTreeItems({
+  tree,
+  leafId,
+  collapsedIds,
+  searchQuery,
+}: {
+  tree: SessionTreeNode[];
+  leafId: string | null;
+  collapsedIds: Set<string>;
+  searchQuery: string;
+}) {
+  const index = indexConversationTree(tree, leafId);
+  return projectConversationTree(index, searchConversationTree(index, searchQuery), collapsedIds);
 }
 
 function getConversationTreeItemText(entry: SessionEntry, toolCallsById: Map<string, ToolCallInfo>) {
   if (entry.type === "message") {
     if (entry.message?.role === "toolResult") {
       const call = entry.message.toolCallId ? toolCallsById.get(entry.message.toolCallId) : undefined;
-      const toolName = entry.message.toolName || call?.name || "Tool";
+      const toolName = entry.message.toolName || call?.name || t("Tool");
       const callSummary = formatToolInvocationSummary(toolName, call?.arguments);
-      const resultPreview =
-        extractText(entry.message.content).replace(/\s+/g, " ").trim() || formatToolOutput(entry.message.content);
       return {
-        detail: callSummary || truncateTreeText(resultPreview.replace(/\s+/g, " ").trim(), 140) || undefined,
+        // Do not scan large tool output when invocation details already describe this row.
+        detail: callSummary || sidebarContentPreview(entry.message.content) || undefined,
         text: formatToolInvocationTitle(toolName),
       };
     }
-    const text = extractText(entry.message?.content).replace(/\s+/g, " ").trim();
-    if (text) return { text: truncateTreeText(text, 140) || "Message" };
+    const text = sidebarContentPreview(entry.message?.content);
+    if (text) return { text: truncateTreeText(text, 140) || t("Message") };
     if (entry.message?.role === "assistant") {
       const toolCalls = extractToolCalls(entry.message.content);
       if (toolCalls.length > 0) return summarizeAssistantToolCalls(toolCalls);
-      const thinking = extractThinking(entry.message.content).replace(/\s+/g, " ").trim();
-      if (thinking) return { detail: truncateTreeText(thinking, 140), text: "Reasoning" };
-      return { text: "Assistant update" };
+      const thinking = sidebarContentPreview(entry.message.content, "thinking");
+      if (thinking) return { detail: truncateTreeText(thinking, 140), text: t("Reasoning") };
+      return { text: t("Assistant update") };
     }
-    if (entry.message?.role === "user") return { text: "User message" };
-    return { text: "Message" };
+    if (entry.message?.role === "user") return { text: t("User message") };
+    return { text: t("Message") };
   }
   if (entry.type === "branch_summary") {
-    return { text: truncateTreeText(typeof entry.summary === "string" ? entry.summary : "", 140) || "Branch summary" };
+    return {
+      text: truncateTreeText(typeof entry.summary === "string" ? entry.summary : "", 140) || t("Branch summary"),
+    };
   }
   if (entry.type === "compaction") {
     return {
-      text: "Compaction",
+      text: t("Compaction"),
       detail: truncateTreeText(typeof entry.summary === "string" ? entry.summary : "", 140),
     };
   }
   if (entry.type === "model_change") {
-    return { text: "Model change", detail: [entry.provider, entry.modelId].filter(Boolean).join("/") || undefined };
+    return { text: t("Model change"), detail: [entry.provider, entry.modelId].filter(Boolean).join("/") || undefined };
   }
-  if (entry.type === "thinking_level_change") return { text: `Thinking: ${entry.thinkingLevel || "changed"}` };
-  if (entry.type === "label") return { text: typeof entry.label === "string" ? entry.label : "Label" };
-  if (entry.type === "session_info") return { text: typeof entry.name === "string" ? entry.name : "Session info" };
+  if (entry.type === "thinking_level_change")
+    return { text: t("Thinking: {level}", { level: entry.thinkingLevel || t("changed") }) };
+  if (entry.type === "label") return { text: typeof entry.label === "string" ? entry.label : t("Label") };
+  if (entry.type === "session_info") return { text: typeof entry.name === "string" ? entry.name : t("Session info") };
   if (entry.type === "custom_message") {
     const content = entry.content;
-    if (typeof content === "string") return { text: truncateTreeText(content.replace(/\s+/g, " ").trim(), 140) };
-    return { text: "Custom message" };
+    if (typeof content === "string") return { text: sidebarContentPreview(content) };
+    return { text: t("Custom message") };
   }
-  return { text: entry.type || "Event" };
+  return { text: entry.type || t("Event") };
 }
 
 type ToolCallInfo = Extract<PiContentBlock, { type: "toolCall" }>;
@@ -294,8 +323,10 @@ function buildToolCallIndex(tree: SessionTreeNode[]) {
   while (stack.length > 0) {
     const node = stack.pop();
     if (!node) continue;
-    for (const call of extractToolCalls(node.entry.message?.content)) {
-      if (call.id) toolCallsById.set(call.id, call);
+    if (node.entry.message?.role === "assistant") {
+      for (const call of extractToolCalls(node.entry.message.content)) {
+        if (call.id) toolCallsById.set(call.id, call);
+      }
     }
     stack.push(...node.children);
   }
@@ -325,7 +356,7 @@ function summarizeAssistantToolCalls(toolCalls: ToolCallInfo[]) {
   const label =
     dominant && dominant[1] === toolCalls.length
       ? `${dominant[0]} ${toolCalls.length}x`
-      : `${toolCalls.length} tool calls`;
+      : t("{count} tool calls", { count: toolCalls.length });
   return { detail: truncateTreeText(firstDetails, 180), text: label };
 }
 

@@ -1,15 +1,20 @@
 import { shortModelName } from "../format";
+import { readPreference } from "../storage";
+import type { BrowserCommandInfo } from "../types";
+import { errorUiText, uiText } from "../ui-text";
 import type { AuthStateResult, SettingsSlice, SettingsStateResult, StoreSlice } from "./types";
 
 const initialThemeMode = () =>
-  (localStorage.getItem("pi-web-ui-theme-mode") as SettingsSlice["themeMode"] | null) || "system";
-const initialShowThinking = () => localStorage.getItem("pi-web-ui-show-thinking") !== "false";
+  (readPreference("pi-web-ui-theme-mode") as SettingsSlice["themeMode"] | null) || "system";
+const initialShowThinking = () => readPreference("pi-web-ui-show-thinking") !== "false";
 
 export const createSettingsSlice: StoreSlice<SettingsSlice> = (set, get) => ({
   availableModels: [],
   currentModel: null,
   modelLabel: "model",
   thinkingLevel: "off",
+  availableThinkingLevels: ["off"],
+  commands: [],
   sessionName: "Pi Web UI",
   autoCompaction: true,
   authConfigured: false,
@@ -20,14 +25,19 @@ export const createSettingsSlice: StoreSlice<SettingsSlice> = (set, get) => ({
 
   refreshSettingsState: async () => {
     try {
-      const [stateResult, modelsResult] = await Promise.allSettled([
+      const [stateResult, modelsResult, commandsResult] = await Promise.allSettled([
         get().send("get_state"),
         get().send("get_available_models"),
+        get().send("get_commands"),
       ]);
 
       if (modelsResult.status === "fulfilled") {
         const data = modelsResult.value as { models?: SettingsSlice["availableModels"] };
         set({ availableModels: data.models || [] });
+      }
+      if (commandsResult.status === "fulfilled") {
+        const data = commandsResult.value as { commands?: BrowserCommandInfo[] };
+        set({ commands: data.commands || [] });
       }
 
       if (stateResult.status === "fulfilled") {
@@ -38,6 +48,7 @@ export const createSettingsSlice: StoreSlice<SettingsSlice> = (set, get) => ({
           modelLabel: shortModelName(data.model?.id || "model"),
           sessionName: data.sessionName || "Pi Web UI",
           thinkingLevel: data.thinkingLevel || "off",
+          availableThinkingLevels: data.availableThinkingLevels || ["off"],
           ...(data.model?.contextWindow && { contextWindowSize: data.model.contextWindow }),
         });
       }
@@ -64,6 +75,8 @@ export const createSettingsSlice: StoreSlice<SettingsSlice> = (set, get) => ({
       ...(currentModel?.contextWindow && { contextWindowSize: currentModel.contextWindow }),
     }),
   setThinkingLevel: (thinkingLevel) => set({ thinkingLevel }),
+  setAvailableThinkingLevels: (availableThinkingLevels) => set({ availableThinkingLevels }),
+  setCommands: (commands: BrowserCommandInfo[]) => set({ commands }),
   setSessionName: (sessionName) => set({ sessionName }),
   setAutoCompaction: (autoCompaction) => set({ autoCompaction }),
   setAuthEnabled: (authEnabled) => set({ authEnabled }),
@@ -74,24 +87,32 @@ export const createSettingsSlice: StoreSlice<SettingsSlice> = (set, get) => ({
   cycleThinking: async () => {
     try {
       const result = (await get().send("cycle_thinking_level")) as
-        | { level?: string; thinkingLevel?: string }
+        | { level?: string; thinkingLevel?: string; availableThinkingLevels?: string[] }
         | undefined;
-      set({ thinkingLevel: result?.level || result?.thinkingLevel || "off" });
+      set({
+        thinkingLevel: result?.level || result?.thinkingLevel || "off",
+        ...(result?.availableThinkingLevels && { availableThinkingLevels: result.availableThinkingLevels }),
+      });
     } catch (error) {
-      get().setError(error instanceof Error ? error.message : "Failed to change thinking level");
+      get().setError(errorUiText(error, uiText("Failed to change thinking level")));
     }
   },
 
   selectModel: async (model) => {
     try {
-      await get().send("set_model", { provider: model.provider, modelId: model.id });
+      const result = (await get().send("set_model", { provider: model.provider, modelId: model.id })) as
+        | { model?: SettingsSlice["currentModel"]; thinkingLevel?: string; availableThinkingLevels?: string[] }
+        | undefined;
+      const selectedModel = result?.model || model;
       set({
-        currentModel: model,
-        modelLabel: shortModelName(model.id),
-        ...(model.contextWindow && { contextWindowSize: model.contextWindow }),
+        currentModel: selectedModel,
+        modelLabel: shortModelName(selectedModel.id),
+        ...(selectedModel.contextWindow && { contextWindowSize: selectedModel.contextWindow }),
+        ...(result?.thinkingLevel && { thinkingLevel: result.thinkingLevel }),
+        ...(result?.availableThinkingLevels && { availableThinkingLevels: result.availableThinkingLevels }),
       });
     } catch (error) {
-      get().setError(error instanceof Error ? error.message : "Failed to switch model");
+      get().setError(errorUiText(error, uiText("Failed to switch model")));
     }
   },
 
@@ -107,14 +128,14 @@ export const createSettingsSlice: StoreSlice<SettingsSlice> = (set, get) => ({
         | undefined;
       set({ authEnabled: Boolean(result?.enabled) });
     } catch (error) {
-      get().setError(error instanceof Error ? error.message : "Failed to update auth");
+      get().setError(errorUiText(error, uiText("Failed to update auth")));
     }
   },
 
   toggleArchMode: () => {
     get()
       .send(get().archModeEnabled ? "exit_arch_mode" : "enter_arch_mode")
-      .catch((error) => get().setError(error instanceof Error ? error.message : "Arch mode toggle failed"));
+      .catch((error) => get().setError(errorUiText(error, uiText("Arch mode toggle failed"))));
   },
 
   renameActiveSession: async (name) => {
@@ -124,7 +145,7 @@ export const createSettingsSlice: StoreSlice<SettingsSlice> = (set, get) => ({
       await get().send("set_session_name", { name: trimmed });
       set({ sessionName: trimmed });
     } catch (error) {
-      get().setError(error instanceof Error ? error.message : "Rename failed");
+      get().setError(errorUiText(error, uiText("Rename failed")));
     }
   },
 });

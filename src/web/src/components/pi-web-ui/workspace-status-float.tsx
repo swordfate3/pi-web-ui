@@ -1,36 +1,63 @@
-import { FileTextIcon, GitBranchIcon, GitCompareIcon, Loader2Icon } from "lucide-react";
-
-import { Button } from "@/components/ui/button";
+import { FileTextIcon, GitBranchIcon, Loader2Icon } from "lucide-react";
+import { useRef } from "react";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-
 import { formatTime } from "../../core/format";
+import { t, useLanguage } from "../../core/i18n";
 import type { GitStatusResult, WorkspaceArtifact } from "../../core/types";
 
 export function WorkspaceStatusFloat({
+  open,
+  onOpenChange,
   artifacts,
   gitLoading,
   gitStatus,
   onOpenArtifact,
   onOpenGitDiff,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   artifacts: WorkspaceArtifact[];
   gitLoading: boolean;
   gitStatus: GitStatusResult | null;
   onOpenArtifact: (artifact: WorkspaceArtifact) => void;
   onOpenGitDiff: () => void;
 }) {
+  useLanguage();
+  // Wait for the modal's focus trap to release before opening another surface.
+  const pendingSelectionRef = useRef<(() => void) | null>(null);
   const canOpenGitDiff = Boolean(gitStatus?.isRepo);
   const recentArtifacts = artifacts.slice(0, 5);
 
   return (
-    <>
-      <div
-        className="absolute right-4 top-4 z-20 hidden w-80 rounded-lg border bg-popover/95 p-4 shadow-lg backdrop-blur md:block"
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="max-h-[min(80dvh,36rem)] overflow-y-auto rounded-xl p-5 shadow-sm sm:max-w-md"
         data-testid="workspace-status-float"
+        onOpenAutoFocus={() => {
+          pendingSelectionRef.current = null;
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const selection = pendingSelectionRef.current;
+          pendingSelectionRef.current = null;
+          if (selection) {
+            selection();
+            requestAnimationFrame(() => {
+              document.querySelector<HTMLButtonElement>('[data-testid="hide-right-panel"]')?.focus();
+            });
+          } else {
+            document.querySelector<HTMLButtonElement>('[data-testid="open-workspace-status"]')?.focus();
+          }
+        }}
       >
+        <div className="space-y-1 pr-6">
+          <DialogTitle className="text-base">{t("Workspace")}</DialogTitle>
+          <DialogDescription>{t("Git changes and recent artifacts")}</DialogDescription>
+        </div>
         <section className="space-y-3">
           <div className="flex items-center justify-between gap-3">
-            <div className="text-muted-foreground text-sm">Workspace</div>
+            <div className="text-muted-foreground text-xs">Git</div>
             {gitLoading && <Loader2Icon className="size-3.5 animate-spin text-muted-foreground" />}
           </div>
           <button
@@ -40,7 +67,10 @@ export function WorkspaceStatusFloat({
             )}
             data-testid="workspace-git-row"
             disabled={!canOpenGitDiff}
-            onClick={onOpenGitDiff}
+            onClick={() => {
+              pendingSelectionRef.current = onOpenGitDiff;
+              onOpenChange(false);
+            }}
             type="button"
           >
             <GitBranchIcon className="size-4 shrink-0 text-muted-foreground" />
@@ -57,40 +87,35 @@ export function WorkspaceStatusFloat({
           </button>
         </section>
 
-        <section className="mt-4 space-y-2 border-t pt-4">
+        <section className="space-y-2 pt-2">
           <div className="flex items-center justify-between">
-            <div className="text-muted-foreground text-sm">Artifacts</div>
+            <div className="text-muted-foreground text-sm">{t("Artifacts")}</div>
             {artifacts.length > 0 && <div className="text-muted-foreground text-xs">{artifacts.length}</div>}
           </div>
           {recentArtifacts.length === 0 ? (
-            <div className="px-2 py-1.5 text-muted-foreground text-sm">No artifacts yet</div>
+            <div className="px-2 py-1.5 text-muted-foreground text-sm">{t("No artifacts yet")}</div>
           ) : (
             <div className="space-y-1">
               {recentArtifacts.map((artifact) => (
-                <ArtifactRow artifact={artifact} key={artifact.path} onOpen={() => onOpenArtifact(artifact)} />
+                <ArtifactRow
+                  artifact={artifact}
+                  key={artifact.path}
+                  onOpen={() => {
+                    pendingSelectionRef.current = () => onOpenArtifact(artifact);
+                    onOpenChange(false);
+                  }}
+                />
               ))}
             </div>
           )}
         </section>
-      </div>
-
-      <Button
-        aria-label="Open workspace status"
-        className="fixed right-3 bottom-36 z-30 shadow-lg md:hidden"
-        disabled={!canOpenGitDiff && recentArtifacts.length === 0}
-        onClick={() => (canOpenGitDiff ? onOpenGitDiff() : recentArtifacts[0] && onOpenArtifact(recentArtifacts[0]))}
-        size="icon-sm"
-        title="Workspace status"
-        type="button"
-        variant="outline"
-      >
-        <GitCompareIcon className="size-4" />
-      </Button>
-    </>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function ArtifactRow({ artifact, onOpen }: { artifact: WorkspaceArtifact; onOpen: () => void }) {
+  useLanguage();
   return (
     <button
       className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted"
@@ -111,17 +136,20 @@ function ArtifactRow({ artifact, onOpen }: { artifact: WorkspaceArtifact; onOpen
 }
 
 function gitBranchLabel(gitStatus: GitStatusResult | null, loading: boolean): string {
-  if (loading && !gitStatus) return "Loading git status";
-  if (!gitStatus) return "Git status unavailable";
-  if (!gitStatus.isRepo) return "No git repository";
-  return gitStatus.branch || "Detached HEAD";
+  if (loading && !gitStatus) return t("Loading git status");
+  if (!gitStatus) return t("Git status unavailable");
+  if (!gitStatus.isRepo) return t("No git repository");
+  return gitStatus.branch || t("Detached HEAD");
 }
 
 function gitDetailLabel(gitStatus: GitStatusResult | null, loading: boolean): string {
-  if (loading && !gitStatus) return "Checking workspace";
-  if (!gitStatus) return "Connect to Pi to load status";
-  if (!gitStatus.isRepo) return "Open a git workspace to view changes";
-  if (!gitStatus.hasChanges) return "No changes";
-  if (gitStatus.untracked) return `${gitStatus.untracked} untracked file${gitStatus.untracked === 1 ? "" : "s"}`;
-  return "Changes";
+  if (loading && !gitStatus) return t("Checking workspace");
+  if (!gitStatus) return t("Connect to Pi to load status");
+  if (!gitStatus.isRepo) return t("Open a git workspace to view changes");
+  if (!gitStatus.hasChanges) return t("No changes");
+  if (gitStatus.untracked)
+    return t(gitStatus.untracked === 1 ? "{count} untracked file" : "{count} untracked files", {
+      count: gitStatus.untracked,
+    });
+  return t("Changes");
 }

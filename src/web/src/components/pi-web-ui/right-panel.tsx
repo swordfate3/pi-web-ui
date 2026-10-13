@@ -9,6 +9,9 @@ import {
   RotateCwIcon,
   XIcon,
 } from "lucide-react";
+import { t, useLanguage } from "../../core/i18n";
+import { readPreference, writePreference } from "../../core/storage";
+import { renderUiText } from "../../core/ui-text";
 import "@git-diff-view/react/styles/diff-view-pure.css";
 import {
   type CSSProperties,
@@ -51,6 +54,7 @@ export function RightPanel({
   tabs: RightPanelTab[];
   visible: boolean;
 }) {
+  useLanguage();
   const [panelWidth, setPanelWidth] = useState(() => getInitialWidth());
   const [isResizing, setIsResizing] = useState(false);
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0] || null;
@@ -91,7 +95,7 @@ export function RightPanel({
   );
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, String(panelWidth));
+    writePreference(STORAGE_KEY, String(panelWidth));
   }, [panelWidth]);
 
   useEffect(() => {
@@ -106,7 +110,7 @@ export function RightPanel({
         className="fixed right-3 top-16 z-40 shadow-lg"
         onClick={onToggleVisible}
         size="icon-sm"
-        title="Show right panel"
+        title={t("Show right panel")}
         type="button"
         variant="outline"
       >
@@ -121,11 +125,11 @@ export function RightPanel({
       style={{ "--right-panel-width": `${panelWidth}px` } as CSSProperties}
     >
       <button
-        aria-label="Resize right panel"
+        aria-label={t("Resize right panel")}
         className="group absolute inset-y-0 left-0 z-20 hidden w-4 -translate-x-2 cursor-col-resize touch-none appearance-none border-0 bg-transparent p-0 xl:block"
         onDoubleClick={() => updateWidth(DEFAULT_WIDTH)}
         onPointerDown={startResize}
-        title="Drag to resize"
+        title={t("Drag to resize")}
         type="button"
       >
         <div className="mx-auto h-full w-px bg-border" />
@@ -158,12 +162,12 @@ export function RightPanel({
                   ) : (
                     <FileTextIcon className="size-3.5 shrink-0" />
                   )}
-                  <span className="truncate">{tab.title}</span>
+                  <span className="truncate">{tab.kind === "git-diff" ? t("Changes") : tab.title}</span>
                 </button>
                 <button
                   className="mr-1 shrink-0 rounded p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
                   onClick={() => onCloseTab(tab.id)}
-                  title="Close tab"
+                  title={t("Close tab")}
                   type="button"
                 >
                   <XIcon className="size-3" />
@@ -176,14 +180,21 @@ export function RightPanel({
           <Button
             onClick={() => onRefreshTab(activeTab)}
             size="icon-sm"
-            title="Refresh tab"
+            title={t("Refresh tab")}
             type="button"
             variant="ghost"
           >
             <RotateCwIcon className="size-4" />
           </Button>
         )}
-        <Button onClick={onToggleVisible} size="icon-sm" title="Hide right panel" type="button" variant="ghost">
+        <Button
+          data-testid="hide-right-panel"
+          onClick={onToggleVisible}
+          size="icon-sm"
+          title={t("Hide right panel")}
+          type="button"
+          variant="ghost"
+        >
           <PanelRightCloseIcon className="size-4" />
         </Button>
       </div>
@@ -196,22 +207,29 @@ export function RightPanel({
 }
 
 function RightPanelTabContent({ tab }: { tab: RightPanelTab }) {
-  if (tab.loading) return <LoadingPanel label={tab.kind === "git-diff" ? "Loading diff" : "Loading file"} />;
-  if (tab.error) return <PanelMessage tone="error" title="Unable to load" body={tab.error} />;
+  useLanguage();
+  if (tab.loading) return <LoadingPanel label={tab.kind === "git-diff" ? t("Loading diff") : t("Loading file")} />;
+  if (tab.error) return <PanelMessage tone="error" title={t("Unable to load")} body={renderUiText(tab.error)} />;
   if (tab.kind === "git-diff") return <GitDiffTab tab={tab} />;
   return <ArtifactFileTab tab={tab} />;
 }
 
 function GitDiffTab({ tab }: { tab: Extract<RightPanelTab, { kind: "git-diff" }> }) {
+  useLanguage();
   const diffFiles = useMemo(() => parseDiffFiles(tab.diff || ""), [tab.diff]);
   const diffTheme =
     typeof document !== "undefined" && document.documentElement.classList.contains("dark") ? "dark" : "light";
 
   if (!tab.isRepo) {
-    return <PanelMessage title="No git repository" body="Open a git workspace to view changes." />;
+    return <PanelMessage title={t("No git repository")} body={t("Open a git workspace to view changes.")} />;
   }
   if (!tab.diff?.trim()) {
-    return <PanelMessage title="No changes" body="The current branch has no staged, unstaged, or untracked diff." />;
+    return (
+      <PanelMessage
+        title={t("No changes")}
+        body={t("The current branch has no staged, unstaged, or untracked diff.")}
+      />
+    );
   }
 
   const totalAdditions = diffFiles.reduce((sum, file) => sum + file.additions, 0);
@@ -221,8 +239,8 @@ function GitDiffTab({ tab }: { tab: Extract<RightPanelTab, { kind: "git-diff" }>
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="font-medium text-sm">Changes</div>
-          <div className="truncate text-muted-foreground text-xs">{tab.branch || "Detached HEAD"}</div>
+          <div className="font-medium text-sm">{t("Changes")}</div>
+          <div className="truncate text-muted-foreground text-xs">{tab.branch || t("Detached HEAD")}</div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {diffFiles.length > 0 && (
@@ -238,7 +256,7 @@ function GitDiffTab({ tab }: { tab: Extract<RightPanelTab, { kind: "git-diff" }>
           <Button
             onClick={() => void copyText(tab.diff || "")}
             size="icon-sm"
-            title="Copy diff"
+            title={t("Copy diff")}
             type="button"
             variant="ghost"
           >
@@ -294,8 +312,9 @@ function GitDiffTab({ tab }: { tab: Extract<RightPanelTab, { kind: "git-diff" }>
 }
 
 function ArtifactFileTab({ tab }: { tab: Extract<RightPanelTab, { kind: "artifact-file" }> }) {
+  useLanguage();
   if (!tab.content?.trim()) {
-    return <PanelMessage title={tab.title} body="This artifact file is empty." />;
+    return <PanelMessage title={tab.title} body={t("This artifact file is empty.")} />;
   }
 
   return (
@@ -308,7 +327,7 @@ function ArtifactFileTab({ tab }: { tab: Extract<RightPanelTab, { kind: "artifac
         <Button
           onClick={() => void copyText(tab.content || "")}
           size="icon-sm"
-          title="Copy file content"
+          title={t("Copy file content")}
           type="button"
           variant="ghost"
         >
@@ -348,7 +367,10 @@ function PanelMessage({ body, title, tone = "muted" }: { body: string; title: st
 }
 
 function EmptyPanel() {
-  return <PanelMessage title="No tab selected" body="Open changes or an artifact from the workspace float." />;
+  useLanguage();
+  return (
+    <PanelMessage title={t("No tab selected")} body={t("Open changes or an artifact from the workspace float.")} />
+  );
 }
 
 type DiffPanelFile = {
@@ -411,7 +433,7 @@ function cleanDiffFileName(value: string): string {
 
 function getInitialWidth(): number {
   if (typeof window === "undefined") return DEFAULT_WIDTH;
-  const storedWidth = Number(localStorage.getItem(STORAGE_KEY));
+  const storedWidth = Number(readPreference(STORAGE_KEY));
   return clampPanelWidth(Number.isFinite(storedWidth) && storedWidth > 0 ? storedWidth : DEFAULT_WIDTH);
 }
 

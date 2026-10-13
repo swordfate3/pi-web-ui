@@ -7,24 +7,29 @@ import { useCallback } from "react";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { t, useLanguage } from "../../src/core/i18n";
 
 export type ConversationProps = ComponentProps<typeof StickToBottom>;
 
-export const Conversation = ({ className, ...props }: ConversationProps) => (
-  <StickToBottom
-    className={cn("relative flex-1 overflow-y-hidden", className)}
-    initial="smooth"
-    resize="smooth"
-    role="log"
-    {...props}
-  />
-);
+export const Conversation = ({ className, ...props }: ConversationProps) => {
+  return (
+    <StickToBottom
+      className={cn("relative flex-1 overflow-y-hidden", className)}
+      // Content expansion/reflow must not start another spring-scroll animation.
+      // Keep bottom following immediate; explicit user scroll controls stay smooth.
+      initial="instant"
+      resize="instant"
+      role="log"
+      {...props}
+    />
+  );
+};
 
 export type ConversationContentProps = ComponentProps<typeof StickToBottom.Content>;
 
-export const ConversationContent = ({ className, ...props }: ConversationContentProps) => (
-  <StickToBottom.Content className={cn("flex flex-col gap-8 p-4", className)} {...props} />
-);
+export const ConversationContent = ({ className, ...props }: ConversationContentProps) => {
+  return <StickToBottom.Content className={cn("flex flex-col gap-8 p-4", className)} {...props} />;
+};
 
 export type ConversationEmptyStateProps = ComponentProps<"div"> & {
   title?: string;
@@ -34,31 +39,35 @@ export type ConversationEmptyStateProps = ComponentProps<"div"> & {
 
 export const ConversationEmptyState = ({
   className,
-  title = "No messages yet",
-  description = "Start a conversation to see messages here",
+  title = t("No messages yet"),
+  description = t("Start a conversation to see messages here"),
   icon,
   children,
   ...props
-}: ConversationEmptyStateProps) => (
-  <div
-    className={cn("flex size-full flex-col items-center justify-center gap-3 p-8 text-center", className)}
-    {...props}
-  >
-    {children ?? (
-      <>
-        {icon && <div className="text-muted-foreground">{icon}</div>}
-        <div className="space-y-1">
-          <h3 className="font-medium text-sm">{title}</h3>
-          {description && <p className="text-muted-foreground text-sm">{description}</p>}
-        </div>
-      </>
-    )}
-  </div>
-);
+}: ConversationEmptyStateProps) => {
+  useLanguage();
+  return (
+    <div
+      className={cn("flex size-full flex-col items-center justify-center gap-3 p-8 text-center", className)}
+      {...props}
+    >
+      {children ?? (
+        <>
+          {icon && <div className="text-muted-foreground">{icon}</div>}
+          <div className="space-y-1">
+            <h3 className="font-medium text-sm">{title}</h3>
+            {description && <p className="text-muted-foreground text-sm">{description}</p>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
 
 export type ConversationScrollButtonProps = ComponentProps<typeof Button>;
 
 export const ConversationScrollButton = ({ className, ...props }: ConversationScrollButtonProps) => {
+  useLanguage();
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
 
   const handleScrollToBottom = useCallback(() => {
@@ -68,6 +77,7 @@ export const ConversationScrollButton = ({ className, ...props }: ConversationSc
   return (
     !isAtBottom && (
       <Button
+        aria-label={t("Scroll to bottom")}
         className={cn(
           "absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full dark:bg-background dark:hover:bg-muted",
           className,

@@ -11,6 +11,7 @@ import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRe
 import { Streamdown } from "streamdown";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { t, useLanguage } from "../../src/core/i18n";
 
 import { Shimmer } from "./shimmer";
 
@@ -136,16 +137,17 @@ export type ReasoningTriggerProps = ComponentProps<typeof CollapsibleTrigger> & 
 
 const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number) => {
   if (isStreaming || duration === 0) {
-    return <Shimmer duration={1}>Thinking...</Shimmer>;
+    return <Shimmer duration={1}>{t("Thinking...")}</Shimmer>;
   }
   if (duration === undefined) {
-    return <p>Thought for a few seconds</p>;
+    return <p>{t("Thought for a few seconds")}</p>;
   }
-  return <p>Thought for {duration} seconds</p>;
+  return <p>{t("Thought for {duration} seconds", { duration })}</p>;
 };
 
 export const ReasoningTrigger = memo(
   ({ className, children, getThinkingMessage = defaultGetThinkingMessage, ...props }: ReasoningTriggerProps) => {
+    useLanguage();
     const { isStreaming, isOpen, duration } = useReasoning();
 
     return (
@@ -174,20 +176,22 @@ export type ReasoningContentProps = ComponentProps<typeof CollapsibleContent> & 
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
-export const ReasoningContent = memo(({ className, children, ...props }: ReasoningContentProps) => (
-  <CollapsibleContent
-    className={cn(
-      "mt-2 text-sm",
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
-      className,
-    )}
-    {...props}
-  >
-    <Streamdown controls={false} plugins={streamdownPlugins}>
-      {children}
-    </Streamdown>
-  </CollapsibleContent>
-));
+export const ReasoningContent = memo(({ className, children, ...props }: ReasoningContentProps) => {
+  return (
+    <CollapsibleContent
+      className={cn(
+        "mt-2 text-sm",
+        "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-2 data-[state=open]:slide-in-from-top-2 text-muted-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+        className,
+      )}
+      {...props}
+    >
+      <Streamdown controls={false} plugins={streamdownPlugins}>
+        {children}
+      </Streamdown>
+    </CollapsibleContent>
+  );
+});
 
 Reasoning.displayName = "Reasoning";
 ReasoningTrigger.displayName = "ReasoningTrigger";

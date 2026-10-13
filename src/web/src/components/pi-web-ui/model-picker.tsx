@@ -1,9 +1,8 @@
 import { CheckIcon } from "lucide-react";
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-
 import { formatTokens, shortModelName } from "../../core/format";
+import { t, useLanguage } from "../../core/i18n";
 import type { ModelInfo } from "../../core/types";
 import { Modal } from "./modal";
 
@@ -22,16 +21,17 @@ export function ModelPicker({
   query: string;
   setQuery: (query: string) => void;
 }) {
+  useLanguage();
   const filtered = models.filter((model) =>
     `${model.provider || ""} ${model.id}`.toLowerCase().includes(query.toLowerCase()),
   );
 
   return (
-    <Modal onClose={onClose} title="Switch Model">
+    <Modal onClose={onClose} title={t("Switch Model")}>
       <Input
         autoFocus
         onChange={(event) => setQuery(event.target.value)}
-        placeholder="Search models..."
+        placeholder={t("Search models...")}
         value={query}
       />
       <div className="mt-3 max-h-96 overflow-y-auto">
@@ -53,12 +53,12 @@ export function ModelPicker({
           </button>
         ))}
         {filtered.length === 0 && (
-          <div className="px-3 py-8 text-center text-muted-foreground text-sm">No models found</div>
+          <div className="px-3 py-8 text-center text-muted-foreground text-sm">{t("No models found")}</div>
         )}
       </div>
       <div className="mt-4 flex justify-end">
         <Button onClick={onClose} type="button" variant="outline">
-          Close
+          {t("Close")}
         </Button>
       </div>
     </Modal>

@@ -1,6 +1,7 @@
 import { Building2Icon } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { t, useLanguage } from "../../core/i18n";
 
 type ArchModeToggleProps = {
   enabled: boolean;
@@ -9,12 +10,14 @@ type ArchModeToggleProps = {
 };
 
 export function ArchModeToggle({ enabled, onToggle, disabled }: ArchModeToggleProps) {
-  const label = enabled ? "Exit Architecture Mode" : "Architecture Mode";
+  useLanguage();
+  const label = enabled ? t("Exit Architecture Mode") : t("Architecture Mode");
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
+          aria-label={label}
           aria-checked={enabled}
           disabled={disabled}
           onClick={onToggle}

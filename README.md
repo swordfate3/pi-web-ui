@@ -2,8 +2,8 @@
 
 A web UI for [Pi](https://github.com/badlogic/pi-mono) coding agent. Runs as a Pi extension inside your existing Pi process — no separate server needed.
 
-> **Forked from [deflating/tau](https://github.com/deflating/tau).** Thanks to the original author for building the foundation.
-> Renamed to pi-web-ui with significant changes including single-session scope, removed auth, redesigned sidebar.
+> This fork is maintained at [swordfate3/pi-web-ui](https://github.com/swordfate3/pi-web-ui), based on [kkkiio/pi-web-ui](https://github.com/kkkiio/pi-web-ui), originally forked from [deflating/tau](https://github.com/deflating/tau). Thanks to both upstream projects.
+> Includes protected session controls, complete long-session tree transport, Chinese/English UI, minimal responsive layout and interaction optimizations.
 
 ## What it does
 
@@ -22,10 +22,10 @@ Pi Web UI connects to your running Pi session and gives you a browser interface.
 Install from GitHub:
 
 ```bash
-pi install git:github.com/kkkiio/pi-web-ui
+pi install git:github.com/swordfate3/pi-web-ui
 ```
 
-Or from npm:
+The upstream version is also available from npm (it does not include this fork's unpublished changes):
 
 ```bash
 pi install npm:@kkkiio/pi-web-ui
@@ -61,6 +61,7 @@ The server starts automatically when a Pi session begins and shuts down when the
 ### Commands & Settings
 - Command palette: compact, export HTML, session stats, tool toggle
 - Light, dark, and system theme modes
+- [Slash-command support matrix](docs/slash-command-support.md) compares Pi 1.1.0 commands with current Web UI behavior and limitations
 
 ## Configuration
 
@@ -116,10 +117,14 @@ graph LR
     B <-->|HTTP + WS :3001| C[Browser]
 ```
 
+## Documentation
+
+Project documentation lives under [`docs/`](docs/README.md), including the [development log](docs/development-log.md), [validation reports](docs/validation/README.md), and [release guide](docs/releasing.md).
+
 ## Development
 
 ```bash
-git clone https://github.com/kkkiio/pi-web-ui.git
+git clone https://github.com/swordfate3/pi-web-ui.git
 cd pi-web-ui
 npm install
 npm run build:web
@@ -136,4 +141,4 @@ Open `http://localhost:4444`; Vite serves the React UI and proxies `/api` and `/
 
 ## License
 
-MIT
+[MIT](LICENSE). Upstream attribution is preserved; see [license provenance](docs/license-provenance.md).

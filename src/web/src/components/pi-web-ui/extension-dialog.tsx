@@ -1,8 +1,8 @@
 import { useState } from "react";
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { dialogLabel, t, useLanguage } from "../../core/i18n";
 
 import type { ExtensionDialog } from "../../core/types";
 import { Modal } from "./modal";
@@ -16,15 +16,19 @@ export function ExtensionDialogView({
   onCancel: () => void;
   onRespond: (response: Record<string, unknown>) => void;
 }) {
+  useLanguage();
   const [value, setValue] = useState(dialog.prefill || "");
 
   if (dialog.method === "notify") {
     return (
-      <Modal onClose={onCancel} title={dialog.title || dialog.notifyType || "Notification"}>
+      <Modal
+        onClose={onCancel}
+        title={dialog.title || (dialog.notifyType ? dialogLabel(dialog.notifyType) : t("Notification"))}
+      >
         <p className="text-sm">{dialog.message}</p>
         <div className="mt-4 flex justify-end">
           <Button onClick={onCancel} type="button">
-            OK
+            {t("OK")}
           </Button>
         </div>
       </Modal>
@@ -32,7 +36,7 @@ export function ExtensionDialogView({
   }
 
   return (
-    <Modal onClose={onCancel} title={dialog.title || dialog.method}>
+    <Modal onClose={onCancel} title={dialog.title || dialogLabel(dialog.method)}>
       {dialog.message && <p className="mb-3 text-muted-foreground text-sm">{dialog.message}</p>}
       {dialog.method === "select" && (
         <div className="space-y-2">
@@ -52,10 +56,10 @@ export function ExtensionDialogView({
       {dialog.method === "confirm" && (
         <div className="flex justify-end gap-2">
           <Button onClick={() => onRespond({ confirmed: false })} type="button" variant="outline">
-            No
+            {t("No")}
           </Button>
           <Button onClick={() => onRespond({ confirmed: true })} type="button">
-            Yes
+            {t("Yes")}
           </Button>
         </div>
       )}
@@ -75,9 +79,9 @@ export function ExtensionDialogView({
           />
           <div className="flex justify-end gap-2">
             <Button onClick={onCancel} type="button" variant="outline">
-              Cancel
+              {t("Cancel")}
             </Button>
-            <Button type="submit">Submit</Button>
+            <Button type="submit">{t("Submit")}</Button>
           </div>
         </form>
       )}
@@ -92,9 +96,9 @@ export function ExtensionDialogView({
           <Textarea autoFocus className="min-h-40" onChange={(event) => setValue(event.target.value)} value={value} />
           <div className="flex justify-end gap-2">
             <Button onClick={onCancel} type="button" variant="outline">
-              Cancel
+              {t("Cancel")}
             </Button>
-            <Button type="submit">Save</Button>
+            <Button type="submit">{t("Save")}</Button>
           </div>
         </form>
       )}

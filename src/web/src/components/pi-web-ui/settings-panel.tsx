@@ -1,10 +1,9 @@
 import { useState } from "react";
-
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { setLanguage, t, themeLabel, thinkingLabel, useLanguage } from "../../core/i18n";
 
-import { THINKING_LEVELS } from "../../core/constants";
 import type { ThemeMode } from "../../core/types";
 import { Modal } from "./modal";
 
@@ -23,14 +22,33 @@ export function SettingsPanel(props: {
   setShowThinking: (show: boolean) => void;
   themeMode: ThemeMode;
   thinkingLevel: string;
+  availableThinkingLevels: string[];
 }) {
+  const language = useLanguage();
   const [draftName, setDraftName] = useState(props.sessionName);
 
   return (
-    <Modal onClose={props.onClose} title="Settings">
+    <Modal onClose={props.onClose} title={t("Settings")}>
       <div className="space-y-5">
+        <section className="space-y-2" aria-label={t("Language")}>
+          <h3 className="font-medium text-sm">{t("Language")}</h3>
+          <div className="grid grid-cols-2 gap-2">
+            {(["en", "zh-CN"] as const).map((option) => (
+              <Button
+                key={option}
+                type="button"
+                data-testid={`language-${option}`}
+                aria-pressed={language === option}
+                onClick={() => setLanguage(option)}
+                variant={language === option ? "default" : "outline"}
+              >
+                {option === "en" ? "English" : "简体中文"}
+              </Button>
+            ))}
+          </div>
+        </section>
         <section className="space-y-2">
-          <h3 className="font-medium text-sm">Appearance</h3>
+          <h3 className="font-medium text-sm">{t("Appearance")}</h3>
           <div className="grid grid-cols-3 gap-2">
             {(["system", "light", "dark"] as ThemeMode[]).map((theme) => (
               <Button
@@ -39,31 +57,35 @@ export function SettingsPanel(props: {
                 type="button"
                 variant={props.themeMode === theme ? "default" : "outline"}
               >
-                {theme}
+                {themeLabel(theme)}
               </Button>
             ))}
           </div>
         </section>
 
         <section className="space-y-2">
-          <h3 className="font-medium text-sm">Session</h3>
+          <h3 className="font-medium text-sm">{t("Session")}</h3>
           <div className="flex gap-2">
-            <Input onChange={(event) => setDraftName(event.target.value)} value={draftName} />
+            <Input
+              aria-label={t("Session name")}
+              onChange={(event) => setDraftName(event.target.value)}
+              value={draftName}
+            />
             <Button onClick={() => props.onRenameSession(draftName)} type="button">
-              Rename
+              {t("Rename")}
             </Button>
           </div>
         </section>
 
         <section className="space-y-2">
-          <h3 className="font-medium text-sm">Agent</h3>
+          <h3 className="font-medium text-sm">{t("Agent")}</h3>
           <SettingRow
-            label="Auto-compaction"
+            label={t("Auto-compaction")}
             onClick={() => props.onSetAutoCompaction(!props.autoCompaction)}
             value={props.autoCompaction}
           />
           <div className="flex flex-wrap gap-2">
-            {THINKING_LEVELS.map((level) => (
+            {props.availableThinkingLevels.map((level) => (
               <Button
                 key={level}
                 onClick={() => props.onSetThinking(level)}
@@ -71,16 +93,16 @@ export function SettingsPanel(props: {
                 type="button"
                 variant={props.thinkingLevel === level ? "default" : "outline"}
               >
-                {level}
+                {thinkingLabel(level)}
               </Button>
             ))}
           </div>
         </section>
 
         <section className="space-y-2">
-          <h3 className="font-medium text-sm">Display</h3>
+          <h3 className="font-medium text-sm">{t("Display")}</h3>
           <SettingRow
-            label="Show thinking"
+            label={t("Show thinking")}
             onClick={() => props.setShowThinking(!props.showThinking)}
             value={props.showThinking}
           />
@@ -88,8 +110,8 @@ export function SettingsPanel(props: {
 
         {props.authConfigured && (
           <section className="space-y-2">
-            <h3 className="font-medium text-sm">Authentication</h3>
-            <SettingRow label="Require login" onClick={props.onToggleAuth} value={props.authEnabled} />
+            <h3 className="font-medium text-sm">{t("Authentication")}</h3>
+            <SettingRow label={t("Require login")} onClick={props.onToggleAuth} value={props.authEnabled} />
           </section>
         )}
       </div>
@@ -98,6 +120,7 @@ export function SettingsPanel(props: {
 }
 
 function SettingRow({ label, onClick, value }: { label: string; onClick: () => void; value: boolean }) {
+  useLanguage();
   return (
     <button
       className="flex w-full items-center justify-between rounded-md border px-3 py-2"
@@ -111,7 +134,7 @@ function SettingRow({ label, onClick, value }: { label: string; onClick: () => v
           value ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground",
         )}
       >
-        {value ? "On" : "Off"}
+        {value ? t("On") : t("Off")}
       </span>
     </button>
   );

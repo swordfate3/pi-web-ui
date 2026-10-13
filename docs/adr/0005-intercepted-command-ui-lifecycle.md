@@ -163,4 +163,4 @@ Rejected as out of scope for pi-web-ui. It would require a Pi framework change.
   `arch:state-changed`) for state sync and WebSocket commands
   (`enter_arch_mode` / `exit_arch_mode`) for triggering mode changes — replacing
   the old input-interception approach documented in
-  [pi-arch-mode ADR-003](../pi-arch-mode/adrs/003-event-driven-extension-commands.md).
+  pi-arch-mode ADR-003 (`003-event-driven-extension-commands.md`, an external reference not included in this repository).

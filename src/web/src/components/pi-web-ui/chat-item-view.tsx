@@ -1,6 +1,5 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useState } from "react";
-
 import {
   Message,
   MessageAction,
@@ -11,9 +10,10 @@ import {
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
 import { cn } from "@/lib/utils";
-
+import { t, useLanguage } from "../../core/i18n";
 import { formatToolSummary, isToolExpandable } from "../../core/tool-summary";
 import type { ChatItem } from "../../core/types";
+import { renderUiText } from "../../core/ui-text";
 
 export function ChatItemView({
   item,
@@ -26,19 +26,20 @@ export function ChatItemView({
   onToggleTool: (id: string, open: boolean) => void;
   showThinking: boolean;
 }) {
+  useLanguage();
   const [copied, setCopied] = useState(false);
 
   if (item.kind === "system") {
     return (
       <div
         className={cn(
-          "mx-auto max-w-xl whitespace-pre-wrap rounded-md border px-3 py-2 text-center text-sm",
-          item.tone === "error" && "border-destructive/30 bg-destructive/10 text-destructive",
-          item.tone === "success" && "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-          (!item.tone || item.tone === "info") && "bg-muted text-muted-foreground",
+          "mx-auto max-w-xl whitespace-pre-wrap rounded-md px-3 py-2 text-center text-sm",
+          item.tone === "error" && "bg-destructive/10 text-destructive",
+          item.tone === "success" && "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+          (!item.tone || item.tone === "info") && "text-muted-foreground",
         )}
       >
-        {item.text}
+        {renderUiText(item.text)}
       </div>
     );
   }
@@ -49,7 +50,11 @@ export function ChatItemView({
 
     return (
       <div className="w-full max-w-[95%]">
-        <Tool onOpenChange={(nextOpen) => expandable && onToggleTool(item.id, nextOpen)} open={open}>
+        <Tool
+          className="mb-0 rounded-lg border-border/60 shadow-none"
+          onOpenChange={(nextOpen) => expandable && onToggleTool(item.id, nextOpen)}
+          open={open}
+        >
           <ToolHeader
             collapsible={expandable}
             state={item.state}
@@ -89,7 +94,7 @@ export function ChatItemView({
         )}
       >
         {showThinking && item.reasoning && (
-          <Reasoning className={cn(isActivity && "mb-1")} isStreaming={Boolean(item.streaming)}>
+          <Reasoning className={cn(isActivity && "mb-1")} defaultOpen={false} isStreaming={Boolean(item.streaming)}>
             <ReasoningTrigger className={cn(isActivity && "text-xs")} />
             <ReasoningContent className={cn(isActivity && "mt-1 text-xs")}>{item.reasoning}</ReasoningContent>
           </Reasoning>
@@ -101,8 +106,8 @@ export function ChatItemView({
         </MessageResponse>
       </MessageContent>
       {canCopy && (
-        <MessageActions className="self-start opacity-0 transition-opacity group-hover:opacity-100">
-          <MessageAction label="Copy message" onClick={copyMessage} tooltip="Copy">
+        <MessageActions className="self-start opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+          <MessageAction label={t("Copy message")} onClick={copyMessage} tooltip={t("Copy")}>
             {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
           </MessageAction>
         </MessageActions>

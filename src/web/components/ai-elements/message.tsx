@@ -13,45 +13,52 @@ import { Button } from "@/components/ui/button";
 import { ButtonGroup, ButtonGroupText } from "@/components/ui/button-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { streamdownTranslations, t, useLanguage } from "../../src/core/i18n";
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"];
 };
 
-export const Message = ({ className, from, ...props }: MessageProps) => (
-  <div
-    className={cn(
-      "group flex w-full max-w-[95%] flex-col gap-2",
-      from === "user" ? "is-user ml-auto justify-end" : "is-assistant",
-      className,
-    )}
-    {...props}
-  />
-);
+export const Message = ({ className, from, ...props }: MessageProps) => {
+  return (
+    <div
+      className={cn(
+        "group flex w-full max-w-[95%] flex-col gap-2",
+        from === "user" ? "is-user ml-auto justify-end" : "is-assistant",
+        className,
+      )}
+      {...props}
+    />
+  );
+};
 
 export type MessageContentProps = HTMLAttributes<HTMLDivElement>;
 
-export const MessageContent = ({ children, className, ...props }: MessageContentProps) => (
-  <div
-    className={cn(
-      "is-user:dark flex w-fit min-w-0 max-w-full flex-col gap-2 overflow-hidden text-sm",
-      "group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:bg-secondary group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground",
-      "group-[.is-assistant]:text-foreground",
-      className,
-    )}
-    {...props}
-  >
-    {children}
-  </div>
-);
+export const MessageContent = ({ children, className, ...props }: MessageContentProps) => {
+  return (
+    <div
+      className={cn(
+        "is-user:dark flex w-fit min-w-0 max-w-full flex-col gap-2 overflow-hidden text-sm",
+        "group-[.is-user]:ml-auto group-[.is-user]:rounded-lg group-[.is-user]:bg-secondary group-[.is-user]:px-4 group-[.is-user]:py-3 group-[.is-user]:text-foreground",
+        "group-[.is-assistant]:text-foreground",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </div>
+  );
+};
 
 export type MessageActionsProps = ComponentProps<"div">;
 
-export const MessageActions = ({ className, children, ...props }: MessageActionsProps) => (
-  <div className={cn("flex items-center gap-1", className)} {...props}>
-    {children}
-  </div>
-);
+export const MessageActions = ({ className, children, ...props }: MessageActionsProps) => {
+  return (
+    <div className={cn("flex items-center gap-1", className)} {...props}>
+      {children}
+    </div>
+  );
+};
 
 export type MessageActionProps = ComponentProps<typeof Button> & {
   tooltip?: string;
@@ -202,11 +209,12 @@ export const MessageBranchSelector = ({ className, ...props }: MessageBranchSele
 export type MessageBranchPreviousProps = ComponentProps<typeof Button>;
 
 export const MessageBranchPrevious = ({ children, ...props }: MessageBranchPreviousProps) => {
+  useLanguage();
   const { goToPrevious, totalBranches } = useMessageBranch();
 
   return (
     <Button
-      aria-label="Previous branch"
+      aria-label={t("Previous branch")}
       disabled={totalBranches <= 1}
       onClick={goToPrevious}
       size="icon-sm"
@@ -222,11 +230,12 @@ export const MessageBranchPrevious = ({ children, ...props }: MessageBranchPrevi
 export type MessageBranchNextProps = ComponentProps<typeof Button>;
 
 export const MessageBranchNext = ({ children, ...props }: MessageBranchNextProps) => {
+  useLanguage();
   const { goToNext, totalBranches } = useMessageBranch();
 
   return (
     <Button
-      aria-label="Next branch"
+      aria-label={t("Next branch")}
       disabled={totalBranches <= 1}
       onClick={goToNext}
       size="icon-sm"
@@ -259,23 +268,31 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 const streamdownPlugins = { cjk, code, math, mermaid };
 
 export const MessageResponse = memo(
-  ({ className, ...props }: MessageResponseProps) => (
-    <Streamdown
-      className={cn("size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0", className)}
-      plugins={streamdownPlugins}
-      {...props}
-    />
-  ),
-  (prevProps, nextProps) =>
-    prevProps.children === nextProps.children && nextProps.isAnimating === prevProps.isAnimating,
+  ({ className, ...props }: MessageResponseProps) => {
+    // Subscribe inside memo: unchanged Markdown must still update existing controls.
+    useLanguage();
+    return (
+      <Streamdown
+        className={cn("size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0", className)}
+        plugins={streamdownPlugins}
+        translations={streamdownTranslations()}
+        {...props}
+      />
+    );
+  },
+  (prevProps, nextProps) => {
+    return prevProps.children === nextProps.children && nextProps.isAnimating === prevProps.isAnimating;
+  },
 );
 
 MessageResponse.displayName = "MessageResponse";
 
 export type MessageToolbarProps = ComponentProps<"div">;
 
-export const MessageToolbar = ({ className, children, ...props }: MessageToolbarProps) => (
-  <div className={cn("mt-4 flex w-full items-center justify-between gap-4", className)} {...props}>
-    {children}
-  </div>
-);
+export const MessageToolbar = ({ className, children, ...props }: MessageToolbarProps) => {
+  return (
+    <div className={cn("mt-4 flex w-full items-center justify-between gap-4", className)} {...props}>
+      {children}
+    </div>
+  );
+};

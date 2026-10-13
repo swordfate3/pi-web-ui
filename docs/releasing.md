@@ -1,6 +1,6 @@
 # Releasing
 
-This document is the source of truth for publishing `@kkkiio/pi-web-ui` to npm and verifying the Pi package catalog entry.
+This is the upstream npm release guide for `@kkkiio/pi-web-ui` and the Pi package catalog. This fork is published to GitHub at `swordfate3/pi-web-ui`; its current package name is retained for compatibility, not a claim of permission to publish to the upstream npm scope. Do not run the npm publish steps for this fork without separately confirming package ownership and release metadata. See [license provenance](license-provenance.md).
 
 ## Release Policy
 
@@ -128,7 +128,7 @@ git diff -- package.json package-lock.json
 Commit release changes with a Conventional Commits message:
 
 ```bash
-git add package.json package-lock.json RELEASING.md AGENTS.md
+git add package.json package-lock.json docs/releasing.md AGENTS.md
 git commit -m "chore: prepare release"
 ```
 

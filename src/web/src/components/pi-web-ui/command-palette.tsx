@@ -1,9 +1,11 @@
+import { t, useLanguage } from "../../core/i18n";
 import type { CommandAction } from "../../core/types";
 import { Modal } from "./modal";
 
 export function CommandPalette({ commands, onClose }: { commands: CommandAction[]; onClose: () => void }) {
+  useLanguage();
   return (
-    <Modal onClose={onClose} title="Commands">
+    <Modal onClose={onClose} title={t("Commands")}>
       <div className="space-y-1">
         {commands.map((command) => {
           const Icon = command.icon;

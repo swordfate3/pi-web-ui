@@ -1,3 +1,5 @@
+import { getLanguage, t } from "./i18n";
+
 export function shortModelName(id: string) {
   return id.replace(/^claude-/, "").replace(/-\d{8}$/, "");
 }
@@ -6,16 +8,17 @@ export function formatTime(isoTimestamp?: string) {
   if (!isoTimestamp) return "";
   try {
     const date = new Date(isoTimestamp);
+    if (!Number.isFinite(date.getTime())) return "";
     const diffMs = Date.now() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
     const diffHours = Math.floor(diffMs / 3600000);
     const days = Math.floor(diffMs / 86400000);
-    if (diffMins < 1) return "Just now";
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (days === 1) return "Yesterday";
-    if (days < 7) return date.toLocaleDateString([], { weekday: "long" });
-    return date.toLocaleDateString([], { month: "short", day: "numeric" });
+    if (diffMins < 1) return t("Just now");
+    if (diffMins < 60) return t("{count}m ago", { count: diffMins });
+    if (diffHours < 24) return t("{count}h ago", { count: diffHours });
+    if (days === 1) return t("Yesterday");
+    if (days < 7) return date.toLocaleDateString(getLanguage(), { weekday: "long" });
+    return date.toLocaleDateString(getLanguage(), { month: "short", day: "numeric" });
   } catch {
     return "";
   }

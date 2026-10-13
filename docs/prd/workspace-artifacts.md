@@ -6,11 +6,11 @@ Pi Web UI 的聊天流会展示工具调用，但用户很难从聊天中快速�
 
 ## Solution
 
-把当前 session 中由成功 `edit` / `write` 工具调用改动到的 Markdown 文件识别为 Workspace Artifacts。文件可以位于当前 workspace 内，也可以位于 workspace 外。Workspace Status Float 展示最近 artifacts；点击 artifact 会在 Right Panel 中打开 `artifact-file` tab，以只读方式查看文件内容。
+把当前 session 中由成功 `edit` / `write` 工具调用改动到的 Markdown 文件识别为 Workspace Artifacts。文件可以位于当前 workspace 内，也可以位于 workspace 外。用户从顶栏工作区入口按需查看最近 artifacts；点击 artifact 后关闭状态弹层，在 Right Panel 中打开 `artifact-file` tab，以只读方式查看文件内容。
 
 ## User Stories
 
-1. 作为 Pi Web UI 用户，我希望浮窗自动列出 agent 修改过的 Markdown 文件，这样我能快速找到本轮产物。
+1. 作为 Pi Web UI 用户，我希望工作区列表随工具执行自动更新，并能按需打开查看，而不是常驻浮窗覆盖聊天。
 2. 作为 Pi Web UI 用户，我希望点击 artifact 后在右侧 panel 查看文件内容，而不离开聊天。
 3. 作为 Pi Web UI 用户，我希望同一个文件只出现一次，并按最近修改时间排序。
 4. 作为 Pi Web UI 用户，我希望刷新页面后仍能从当前 session 历史恢复 artifact 列表。
@@ -43,7 +43,7 @@ Artifacts 按 normalized path 去重。重复改动同一文件时更新 `update
 
 ### 展示信息
 
-Workspace Status Float 中的 artifact row 展示：
+按需工作区列表中的 artifact row 展示：
 
 - 文件名。
 - 相对路径或父目录。
@@ -70,7 +70,7 @@ Right Panel 的 `artifact-file` tab 展示：
 
 ## Acceptance Criteria
 
-1. 成功 `edit` / `write` 修改 Markdown 文件后，该文件出现在 Workspace Status Float 的 Artifacts 区域。
+1. 成功 `edit` / `write` 修改 Markdown 文件后，打开工作区状态即可在 Artifacts 区域看到该文件。
 2. 同一路径多次修改只显示一个 artifact，并移动到列表前面。
 3. 点击 artifact 打开 Right Panel 的 `artifact-file` tab。
 4. 刷新页面后能从 session entries 恢复 artifact 列表。

@@ -1,4 +1,5 @@
 import { XIcon } from "lucide-react";
+import { t, useLanguage } from "../../core/i18n";
 
 import type { PromptImage } from "../../core/types";
 
@@ -11,6 +12,7 @@ export function ImagePreviewStrip({
   onRemove?: (index: number) => void;
   readonly?: boolean;
 }) {
+  useLanguage();
   if (!images?.length) return null;
 
   return (
@@ -20,9 +22,14 @@ export function ImagePreviewStrip({
           className="relative size-16 overflow-hidden rounded-md border bg-muted"
           key={`${image.mimeType}-${image.data.slice(0, 64)}`}
         >
-          <img alt="Attached" className="size-full object-cover" src={`data:${image.mimeType};base64,${image.data}`} />
+          <img
+            alt={t("Attached")}
+            className="size-full object-cover"
+            src={`data:${image.mimeType};base64,${image.data}`}
+          />
           {!readonly && (
             <button
+              aria-label={t("Remove attachment")}
               className="absolute right-1 top-1 rounded bg-background/80 p-0.5"
               onClick={() => onRemove?.(index)}
               type="button"

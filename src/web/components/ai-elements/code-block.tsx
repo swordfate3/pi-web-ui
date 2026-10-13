@@ -8,6 +8,16 @@ import { createHighlighter } from "shiki";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { createBoundedAsyncCache } from "../../src/core/bounded-async-cache";
+import { t, useLanguage } from "../../src/core/i18n";
+import {
+  canHighlight,
+  HIGHLIGHT_MAX_TOKENS,
+  highlightKey,
+  PLAIN_PAGE_CHARS,
+  PLAIN_PAGE_LINES,
+  textWindow,
+} from "../../src/core/text-window";
 
 // Shiki uses bitflags for font styles: 1=italic, 2=bold, 4=underline
 // oxlint-disable-next-line eslint(no-bitwise)
@@ -84,12 +94,15 @@ type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
+  /** Copy actions retain the complete source even when the visible code is a preview. */
+  copyCode?: string;
 };
 
 interface TokenizedCode {
   tokens: ThemedToken[][];
   fg: string;
   bg: string;
+  plain?: boolean;
 }
 
 interface CodeBlockContextType {
@@ -101,114 +114,74 @@ const CodeBlockContext = createContext<CodeBlockContextType>({
   code: "",
 });
 
-// Highlighter cache (singleton per language)
-const highlighterCache = new Map<string, Promise<HighlighterGeneric<BundledLanguage, BundledTheme>>>();
-
-// Token cache
-const tokensCache = new Map<string, TokenizedCode>();
-
-// Subscribers for async token updates
-const subscribers = new Map<string, Set<(result: TokenizedCode) => void>>();
-
-const getTokensCacheKey = (code: string, language: BundledLanguage) => {
-  const start = code.slice(0, 100);
-  const end = code.length > 100 ? code.slice(-100) : "";
-  return `${language}:${code.length}:${start}:${end}`;
-};
-
-const getHighlighter = (language: BundledLanguage): Promise<HighlighterGeneric<BundledLanguage, BundledTheme>> => {
-  const cached = highlighterCache.get(language);
-  if (cached) {
-    return cached;
-  }
-
-  const highlighterPromise = createHighlighter({
-    langs: [language],
-    themes: ["github-light", "github-dark"],
-  });
-
-  highlighterCache.set(language, highlighterPromise);
-  return highlighterPromise;
-};
-
-// Create raw tokens for immediate display while highlighting loads
-const createRawTokens = (code: string): TokenizedCode => ({
-  bg: "transparent",
-  fg: "inherit",
-  tokens: code.split("\n").map((line) =>
-    line === ""
-      ? []
-      : [
-          {
-            color: "inherit",
-            content: line,
-          } as ThemedToken,
-        ],
-  ),
+// One engine/theme pair, with deduplicated language loading (not an engine per language).
+let highlighterPromise: Promise<HighlighterGeneric<BundledLanguage, BundledTheme>> | undefined;
+const languageLoads = new Map<string, Promise<void>>();
+const tokensCache = createBoundedAsyncCache<TokenizedCode>({
+  maxEntries: 64,
+  maxWeight: 8_000_000,
+  maxPending: 16,
+  weight: (value, key) =>
+    key.length * 2 +
+    value.tokens.reduce((sum, line) => sum + line.reduce((size, token) => size + 160 + token.content.length * 2, 0), 0),
 });
 
-// Synchronous highlight with callback for async results
+async function getHighlighter(language: BundledLanguage) {
+  highlighterPromise ??= createHighlighter({
+    langs: [],
+    themes: ["github-light", "github-dark"],
+  }).catch((error) => {
+    highlighterPromise = undefined;
+    throw error;
+  });
+  const highlighter = await highlighterPromise;
+  if (!highlighter.getLoadedLanguages().includes(language)) {
+    let loading = languageLoads.get(language);
+    if (!loading) {
+      loading = highlighter.loadLanguage(language).finally(() => languageLoads.delete(language));
+      languageLoads.set(language, loading);
+    }
+    await loading;
+  }
+  return highlighter;
+}
+
+async function requestHighlight(code: string, language: BundledLanguage): Promise<TokenizedCode | undefined> {
+  if (!canHighlight(code)) return undefined;
+  return tokensCache.load(highlightKey(code, language), async () => {
+    const highlighter = await getHighlighter(language);
+    // Yield a task before CPU tokenization, even with an already-loaded engine.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const result = highlighter.codeToTokens(code, {
+      lang: language,
+      themes: { dark: "github-dark", light: "github-light" },
+    });
+    // Bound token DOM too: punctuation-heavy inputs can have many tokens per line.
+    if (result.tokens.reduce((count, line) => count + line.length, 0) > HIGHLIGHT_MAX_TOKENS) {
+      // Cache the decision too, so remounting a dense snippet does not retokenize it.
+      return { bg: "transparent", fg: "inherit", tokens: [], plain: true };
+    }
+    return { bg: result.bg ?? "transparent", fg: result.fg ?? "inherit", tokens: result.tokens };
+  });
+}
+
+// Compatibility API: callers get cached tokens or an asynchronous notification.
+// CodeBlockContent invokes this only after commit, never during render.
 export const highlightCode = (
   code: string,
   language: BundledLanguage,
-  // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-callbacks)
   callback?: (result: TokenizedCode) => void,
 ): TokenizedCode | null => {
-  const tokensCacheKey = getTokensCacheKey(code, language);
-
-  // Return cached result if available
-  const cached = tokensCache.get(tokensCacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  // Subscribe callback if provided
-  if (callback) {
-    if (!subscribers.has(tokensCacheKey)) {
-      subscribers.set(tokensCacheKey, new Set());
-    }
-    subscribers.get(tokensCacheKey)?.add(callback);
-  }
-
-  // Start highlighting in background - fire-and-forget async pattern
-  getHighlighter(language)
-    // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-then)
-    .then((highlighter) => {
-      const availableLangs = highlighter.getLoadedLanguages();
-      const langToUse = availableLangs.includes(language) ? language : "text";
-
-      const result = highlighter.codeToTokens(code, {
-        lang: langToUse,
-        themes: {
-          dark: "github-dark",
-          light: "github-light",
-        },
-      });
-
-      const tokenized: TokenizedCode = {
-        bg: result.bg ?? "transparent",
-        fg: result.fg ?? "inherit",
-        tokens: result.tokens,
-      };
-
-      // Cache the result
-      tokensCache.set(tokensCacheKey, tokenized);
-
-      // Notify all subscribers
-      const subs = subscribers.get(tokensCacheKey);
-      if (subs) {
-        for (const sub of subs) {
-          sub(tokenized);
-        }
-        subscribers.delete(tokensCacheKey);
-      }
+  if (!canHighlight(code)) return null;
+  const cached = tokensCache.get(highlightKey(code, language));
+  if (cached) return cached;
+  void requestHighlight(code, language)
+    .then((result) => {
+      if (result) callback?.(result);
     })
-    // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-then), eslint-plugin-promise(prefer-await-to-callbacks)
-    .catch((error) => {
-      console.error("Failed to highlight code:", error);
-      subscribers.delete(tokensCacheKey);
+    .catch(() => {
+      /* Unsupported languages/failures keep the original plain text. */
     });
-
   return null;
 };
 
@@ -301,7 +274,54 @@ export const CodeBlockActions = ({ children, className, ...props }: HTMLAttribut
   </div>
 );
 
-export const CodeBlockContent = ({
+// A single text node per page avoids raw-token arrays and thousands of line spans.
+const PlainCode = ({ code, paged }: { code: string; paged: boolean }) => {
+  useLanguage();
+  const [position, setPosition] = useState({ code, starts: [0] });
+  const starts = position.code === code ? position.starts : [0];
+  const start = starts[starts.length - 1];
+  const page = useMemo(() => textWindow(code, start, PLAIN_PAGE_LINES, PLAIN_PAGE_CHARS), [code, start]);
+  const needsPages = paged && (start > 0 || page.hasMore);
+  return (
+    <div data-code-rendering="plain">
+      {paged && (
+        <p className="px-4 pt-2 text-muted-foreground text-xs" data-code-plain-notice>
+          {needsPages
+            ? t("Large content is shown as plain text in pages. Copy includes the full content.")
+            : t("Syntax highlighting is disabled for large content.")}
+        </p>
+      )}
+      <pre className="m-0 p-4 text-sm">
+        <code className="font-mono">{paged ? page.text : code}</code>
+      </pre>
+      {needsPages && (
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t px-3 py-2" data-code-pagination>
+          <span className="mr-auto text-muted-foreground text-xs">
+            {t("Characters {start}–{end} of {total}", { start: start + 1, end: page.end, total: code.length })}
+          </span>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={starts.length === 1}
+            onClick={() => setPosition({ code, starts: starts.slice(0, -1) })}
+          >
+            {t("Previous page")}
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={!page.hasMore}
+            onClick={() => setPosition({ code, starts: [...starts, page.end] })}
+          >
+            {t("Next page")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export const CodeBlockContent = memo(function CodeBlockContent({
   code,
   language,
   showLineNumbers = false,
@@ -309,55 +329,45 @@ export const CodeBlockContent = ({
   code: string;
   language: BundledLanguage;
   showLineNumbers?: boolean;
-}) => {
-  // Memoized raw tokens for immediate display
-  const rawTokens = useMemo(() => createRawTokens(code), [code]);
-
-  // Synchronous cache lookup — avoids setState in effect for cached results
-  const syncTokens = useMemo(() => highlightCode(code, language) ?? rawTokens, [code, language, rawTokens]);
-
-  // Async highlighting result (populated after shiki loads)
-  const [asyncTokens, setAsyncTokens] = useState<TokenizedCode | null>(null);
-  const asyncKeyRef = useRef({ code, language });
-
-  // Invalidate stale async tokens synchronously during render
-  if (asyncKeyRef.current.code !== code || asyncKeyRef.current.language !== language) {
-    asyncKeyRef.current = { code, language };
-    setAsyncTokens(null);
-  }
+}) {
+  const eligible = useMemo(() => canHighlight(code), [code]);
+  const [result, setResult] = useState<{ code: string; language: BundledLanguage; tokens: TokenizedCode } | null>(null);
 
   useEffect(() => {
+    if (!eligible) return;
     let cancelled = false;
-
-    highlightCode(code, language, (result) => {
-      if (!cancelled) {
-        setAsyncTokens(result);
-      }
-    });
-
+    const accept = (tokens: TokenizedCode) => {
+      if (!cancelled) setResult({ code, language, tokens });
+    };
+    const cached = highlightCode(code, language, accept);
+    if (cached) accept(cached);
     return () => {
       cancelled = true;
     };
-  }, [code, language]);
+  }, [code, language, eligible]);
 
-  const tokenized = asyncTokens ?? syncTokens;
-
+  const tokens = result?.code === code && result.language === language ? result.tokens : null;
   return (
     <div className="relative overflow-auto">
-      <CodeBlockBody showLineNumbers={showLineNumbers} tokenized={tokenized} />
+      {tokens && !tokens.plain ? (
+        <CodeBlockBody showLineNumbers={showLineNumbers} tokenized={tokens} />
+      ) : (
+        <PlainCode code={code} paged={!eligible || Boolean(tokens?.plain)} />
+      )}
     </div>
   );
-};
+});
 
 export const CodeBlock = ({
   code,
+  copyCode = code,
   language,
   showLineNumbers = false,
   className,
   children,
   ...props
 }: CodeBlockProps) => {
-  const contextValue = useMemo(() => ({ code }), [code]);
+  const contextValue = useMemo(() => ({ code: copyCode }), [copyCode]);
 
   return (
     <CodeBlockContext.Provider value={contextValue}>
@@ -383,13 +393,14 @@ export const CodeBlockCopyButton = ({
   className,
   ...props
 }: CodeBlockCopyButtonProps) => {
+  useLanguage();
   const [isCopied, setIsCopied] = useState(false);
   const timeoutRef = useRef<number>(0);
   const { code } = useContext(CodeBlockContext);
 
   const copyToClipboard = useCallback(async () => {
     if (typeof window === "undefined" || !navigator?.clipboard?.writeText) {
-      onError?.(new Error("Clipboard API not available"));
+      onError?.(new Error(t("Clipboard API not available")));
       return;
     }
 
@@ -415,7 +426,14 @@ export const CodeBlockCopyButton = ({
   const Icon = isCopied ? CheckIcon : CopyIcon;
 
   return (
-    <Button className={cn("shrink-0", className)} onClick={copyToClipboard} size="icon" variant="ghost" {...props}>
+    <Button
+      aria-label={t("Copy code")}
+      className={cn("shrink-0", className)}
+      onClick={copyToClipboard}
+      size="icon"
+      variant="ghost"
+      {...props}
+    >
       {children ?? <Icon size={14} />}
     </Button>
   );

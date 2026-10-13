@@ -1,5 +1,6 @@
 import type { ChatStatus } from "ai";
 import type { ComponentType } from "react";
+import type { UiText } from "./ui-text";
 
 export type ConnectionState = "connecting" | "connected" | "disconnected";
 export type ThemeMode = "system" | "light" | "dark";
@@ -49,7 +50,7 @@ export type ChatItem =
   | {
       kind: "system";
       id: string;
-      text: string;
+      text: UiText;
       tone?: SystemTone;
       entryId?: string;
       relatedEntryIds?: string[];
@@ -82,6 +83,8 @@ export type RpcEvent = {
   notifyType?: "info" | "warning" | "error";
   enabled?: boolean;
   model?: ModelInfo;
+  level?: string;
+  availableThinkingLevels?: string[];
 };
 
 export type PiMessage = {
@@ -120,6 +123,14 @@ export type ModelInfo = {
   id: string;
   provider?: string;
   contextWindow?: number;
+  reasoning?: boolean;
+  thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max", string | null>>;
+};
+
+export type BrowserCommandInfo = {
+  name: string;
+  description?: string;
+  source: "builtin" | "extension" | "prompt" | "skill";
 };
 
 export type WsRequest = {
@@ -152,12 +163,18 @@ export type WsError = {
 
 export type StateSyncPayload = {
   entries?: SessionEntry[];
+  /** Preferred flat DFS pre-order tree; structural parents are independent of entry.parentId. */
+  treeNodes?: SessionTreeNodeWire[];
+  /** Legacy nested tree. Both wire formats require runtime validation before use. */
   tree?: SessionTreeNode[];
   leafId?: string | null;
   model?: ModelInfo;
   thinkingLevel?: string;
+  availableThinkingLevels?: string[];
   sessionName?: string;
   sessionFile?: string;
+  sessionId?: string;
+  runtimeId?: string;
   isStreaming?: boolean;
   contextUsage?: { tokens?: number };
 };
@@ -180,6 +197,13 @@ export type SessionEntry = {
   thinkingLevel?: string;
   activeToolNames?: string[];
   [key: string]: unknown;
+};
+
+export type SessionTreeNodeWire = {
+  entry: SessionEntry & { id: string };
+  parentNodeId: string | null;
+  label?: string;
+  labelTimestamp?: string;
 };
 
 export type SessionTreeNode = {
@@ -252,7 +276,7 @@ export type RightPanelTab =
       diff?: string;
       isRepo?: boolean;
       loading?: boolean;
-      error?: string;
+      error?: UiText;
       updatedAt: number;
     }
   | {
@@ -263,7 +287,7 @@ export type RightPanelTab =
       content?: string;
       size?: number;
       loading?: boolean;
-      error?: string;
+      error?: UiText;
       updatedAt: number;
     };
 
@@ -287,3 +311,64 @@ export type CommandAction = {
 };
 
 export type ChatSubmitStatus = ChatStatus;
+
+/** Opaque selection IDs are scoped to this listing's source session. */
+export type SavedSession = {
+  id: string;
+  sessionId: string;
+  name: string | null;
+  created: string;
+  modified: string;
+  messageCount: number;
+  firstMessage: string;
+  isCurrent: boolean;
+};
+
+export type SavedSessionsResult = {
+  sessionId: string;
+  cwd: string;
+  sessions: SavedSession[];
+};
+
+export type SwitchSessionRequest = { id: string; sessionId: string };
+export type SwitchSessionAck = { accepted: boolean; sessionId: string; targetSessionId: string };
+export type ReloadRequest = { sessionId: string };
+/** runtimeId is the OLD runtime, not proof of completion. */
+export type ReloadAck = { accepted: boolean; sessionId: string; runtimeId: string };
+export type ExportHtmlResult = { token: string; filename: string; downloadUrl: string };
+
+export type SessionStatisticsTotals = {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  total?: number;
+};
+
+export type SessionStatsResult = {
+  sessionFile?: string | null;
+  sessionId?: string;
+  sessionName?: string | null;
+  cwd?: string;
+  sessionDir?: string;
+  header?: Record<string, unknown> | null;
+  leafId?: string | null;
+  entryCount?: number;
+  branchEntryCount?: number;
+  userMessages?: number;
+  assistantMessages?: number;
+  toolCalls?: number;
+  toolResults?: number;
+  totalMessages?: number;
+  tokens?: SessionStatisticsTotals;
+  cost?: number;
+  costs?: SessionStatisticsTotals;
+  contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null } | null;
+  model?: ModelInfo | null;
+  thinkingLevel?: string;
+  isStreaming?: boolean;
+  hasPendingMessages?: boolean;
+  autoCompactionEnabled?: boolean;
+  runtimeId?: string;
+  statisticsScope?: string;
+};

@@ -11,20 +11,22 @@ import {
   XCircleIcon,
 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
-import { isValidElement, useMemo, useState } from "react";
+import { isValidElement, memo, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { t, useLanguage } from "../../src/core/i18n";
+import type { MessageKey } from "../../src/core/messages";
 
-import { CodeBlock } from "./code-block";
+import { toolText } from "../../src/core/tool-text";
 
-const TOOL_BLOCK_PREVIEW_LINES = 12;
+import { CodeBlock, CodeBlockCopyButton } from "./code-block";
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
-export const Tool = ({ className, ...props }: ToolProps) => (
-  <Collapsible className={cn("group not-prose w-full", className)} {...props} />
-);
+export const Tool = ({ className, ...props }: ToolProps) => {
+  return <Collapsible className={cn("group not-prose w-full", className)} {...props} />;
+};
 
 export type ToolPart = ToolUIPart | DynamicToolUIPart;
 
@@ -42,7 +44,7 @@ export type ToolHeaderProps = {
     }
 );
 
-const statusLabels: Record<ToolPart["state"], string> = {
+const statusLabels: Record<ToolPart["state"], MessageKey> = {
   "approval-requested": "Awaiting Approval",
   "approval-responded": "Responded",
   "input-available": "Running",
@@ -64,10 +66,10 @@ const statusIcons: Record<ToolPart["state"], ReactNode> = {
 
 export const getStatusBadge = (status: ToolPart["state"]) => (
   <span
-    aria-label={statusLabels[status]}
+    aria-label={t(statusLabels[status])}
     className="inline-flex size-4 shrink-0 items-center justify-center"
     role="img"
-    title={statusLabels[status]}
+    title={t(statusLabels[status])}
   >
     {statusIcons[status]}
   </span>
@@ -83,6 +85,7 @@ export const ToolHeader = ({
   toolName,
   ...props
 }: ToolHeaderProps) => {
+  useLanguage();
   const derivedName = type === "dynamic-tool" ? toolName : type.split("-").slice(1).join("-");
 
   return (
@@ -115,38 +118,51 @@ export const ToolHeader = ({
 
 export type ToolContentProps = ComponentProps<typeof CollapsibleContent>;
 
-export const ToolContent = ({ className, ...props }: ToolContentProps) => (
-  <CollapsibleContent
-    className={cn(
-      "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-1 data-[state=open]:slide-in-from-top-1 mt-1 space-y-2 pb-1 pl-6 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
-      className,
-    )}
-    {...props}
-  />
-);
+export const ToolContent = ({ className, ...props }: ToolContentProps) => {
+  return (
+    <CollapsibleContent
+      className={cn(
+        "data-[state=closed]:fade-out-0 data-[state=closed]:slide-out-to-top-1 data-[state=open]:slide-in-from-top-1 mt-1 space-y-2 pb-1 pl-6 text-popover-foreground outline-none data-[state=closed]:animate-out data-[state=open]:animate-in",
+        className,
+      )}
+      {...props}
+    />
+  );
+};
 
 export type ToolInputProps = ComponentProps<"div"> & {
   input: ToolPart["input"];
 };
 
-export const ToolInput = ({ className, input, ...props }: ToolInputProps) => {
+export const ToolInput = memo(function ToolInput({ className, input, ...props }: ToolInputProps) {
+  useLanguage();
   const [isExpanded, setIsExpanded] = useState(false);
-  const code = useMemo(() => JSON.stringify(input, null, 2) ?? "undefined", [input]);
-  const lines = useMemo(() => code.split("\n"), [code]);
-  const isLong = lines.length > TOOL_BLOCK_PREVIEW_LINES;
-  const visibleCode = isLong && !isExpanded ? lines.slice(0, TOOL_BLOCK_PREVIEW_LINES).join("\n") : code;
-  const buttonLabel = isExpanded ? "Collapse" : "Show full";
+  const { code, preview, isLong } = useMemo(
+    () => toolText(typeof input === "string" ? JSON.stringify(input) : input),
+    [input],
+  );
+  const visibleCode = isLong && !isExpanded ? preview : code;
+  const buttonLabel = isExpanded ? t("Collapse") : t("Show full");
 
   return (
     <div className={cn("space-y-1.5 overflow-hidden", className)} {...props}>
-      <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">Parameters</h4>
+      <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">{t("Parameters")}</h4>
       <div className="overflow-hidden rounded-md bg-muted/35">
-        <CodeBlock code={visibleCode} className={cn(isLong && "rounded-b-none border-b-0")} language="json" />
+        <CodeBlock
+          code={visibleCode}
+          copyCode={code}
+          className={cn(isLong && "rounded-b-none border-b-0")}
+          language="json"
+        >
+          <div className="flex justify-end px-2 pt-1">
+            <CodeBlockCopyButton aria-label={t("Copy full parameters")} />
+          </div>
+        </CodeBlock>
         {isLong && (
           <div className="flex justify-end border bg-background/80 px-2 py-1.5">
             <Button
               aria-expanded={isExpanded}
-              aria-label={isExpanded ? "Collapse parameters" : "Show full parameters"}
+              aria-label={isExpanded ? t("Collapse parameters") : t("Show full parameters")}
               className="text-muted-foreground"
               onClick={() => setIsExpanded((expanded) => !expanded)}
               size="xs"
@@ -161,46 +177,48 @@ export const ToolInput = ({ className, input, ...props }: ToolInputProps) => {
       </div>
     </div>
   );
-};
+});
 
 export type ToolOutputProps = ComponentProps<"div"> & {
   output: ToolPart["output"];
   errorText: ToolPart["errorText"];
 };
 
-export const ToolOutput = ({ className, output, errorText, ...props }: ToolOutputProps) => {
+export const ToolOutput = memo(function ToolOutput({ className, output, errorText, ...props }: ToolOutputProps) {
+  useLanguage();
   const [isExpanded, setIsExpanded] = useState(false);
 
-  if (!(output || errorText)) {
+  const text = useMemo(() => {
+    if (errorText) return toolText(errorText);
+    if (isValidElement(output)) return null;
+    if (typeof output === "string" || (output !== null && typeof output === "object")) return toolText(output);
     return null;
-  }
+  }, [output, errorText]);
 
-  const code =
-    errorText ||
-    (typeof output === "object" && !isValidElement(output)
-      ? JSON.stringify(output, null, 2)
-      : typeof output === "string"
-        ? output
-        : null);
-  const lines = code?.split("\n") ?? [];
-  const isLong = lines.length > TOOL_BLOCK_PREVIEW_LINES;
-  const visibleCode = code && isLong && !isExpanded ? lines.slice(0, TOOL_BLOCK_PREVIEW_LINES).join("\n") : code;
-  const buttonLabel = isExpanded ? "Collapse" : "Show full";
+  if (!(output || errorText)) return null;
+  const isLong = text?.isLong ?? false;
+  const visibleCode = text && isLong && !isExpanded ? text.preview : text?.code;
+  const buttonLabel = isExpanded ? t("Collapse") : t("Show full");
 
   const Output = visibleCode ? (
     <CodeBlock
       code={visibleCode}
+      copyCode={text?.code}
       className={cn(isLong && "rounded-b-none border-b-0", errorText && "border-destructive/20 bg-destructive/10")}
       language="json"
-    />
+    >
+      <div className="flex justify-end px-2 pt-1">
+        <CodeBlockCopyButton aria-label={t("Copy full tool result")} />
+      </div>
+    </CodeBlock>
   ) : (
     <div>{output as ReactNode}</div>
   );
 
   return (
-    <div className={cn("space-y-1.5", className)} {...props}>
+    <div className={cn("space-y-1.5", className)} data-tool-output {...props}>
       <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-        {errorText ? "Error" : "Result"}
+        {errorText ? t("Error") : t("Result")}
       </h4>
       <div
         className={cn(
@@ -213,7 +231,7 @@ export const ToolOutput = ({ className, output, errorText, ...props }: ToolOutpu
           <div className="flex justify-end border bg-background/80 px-2 py-1.5">
             <Button
               aria-expanded={isExpanded}
-              aria-label={isExpanded ? "Collapse tool result" : "Show full tool result"}
+              aria-label={isExpanded ? t("Collapse tool result") : t("Show full tool result")}
               className={cn("text-muted-foreground", errorText && "text-destructive hover:text-destructive")}
               onClick={() => setIsExpanded((expanded) => !expanded)}
               size="xs"
@@ -228,4 +246,4 @@ export const ToolOutput = ({ className, output, errorText, ...props }: ToolOutpu
       </div>
     </div>
   );
-};
+});

@@ -1,5 +1,5 @@
 node_modules/
-dist/
+# dist/ is intentionally tracked: Pi Git installs consume prebuilt assets.
 .DS_Store
 e2e/.features-gen/
 playwright-report/

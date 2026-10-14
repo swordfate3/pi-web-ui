@@ -5,13 +5,14 @@ This is the upstream npm release guide for `@kkkiio/pi-web-ui` and the Pi packag
 ## Release Policy
 
 - Publish from a reviewed commit on the intended release branch.
-- Keep `dist/` out of git. `npm publish` runs `prepack`, which runs `npm run build:web` and includes `dist/` in the npm tarball.
+- Commit prebuilt `dist/` and its manifest together with source changes on Git installation refs. See [ADR 0007](adr/0007-npm-publish-distribution-strategy.md).
+- `prepare` only checks the prebuilt package, with no compiler/download. `npm publish` runs `prepack`, which builds and includes `dist/` in the tarball.
 - Do not run `npm publish` until the package contents have been checked with `npm pack --dry-run --json`.
 - Treat package media as part of the release. If `README.md` references local images, those files must be included in `package.json.files`. If pi.dev should show a card preview, `package.json` must provide `pi.image`.
 
 ## Prerequisites
 
-Use Node.js 18 or newer and an npm account that can publish `@kkkiio/pi-web-ui`.
+Use Node.js 22.19 or newer (CI uses Node 24). npm publishing additionally requires an account authorized for the chosen npm package name.
 
 ```bash
 node --version
@@ -22,8 +23,37 @@ npm whoami
 Install dependencies before running checks:
 
 ```bash
-npm install
+npm ci --legacy-peer-deps
 ```
+
+## Git installation release checks
+
+Run from the repository root with development dependencies installed:
+
+```bash
+npm run verify:dist
+npm run build:web
+npm run verify:dist
+npm run test:unit
+node scripts/test-git-install.mjs
+```
+
+Commit the rebuilt dist with the source changes; a source-only commit with stale assets is invalid. CI verifies correspondence before and after rebuilding. `scripts/test-git-install.mjs` makes an isolated temporary Git repository/config, runs the real Pi CLI's ordinary install and changed-commit update with production dependencies, checks package content/dependency boundaries and lock-write behavior, and tests tarball installation. It does not change personal settings or prompt any model. Test assets are local; npm registry access is still required.
+
+For optional Chromium runtime checks against the production-only installed snapshot, keep test tool dependencies in the development repository:
+
+```bash
+PI_E2E_RUNTIME_DIR=<installed-package-path> PI_E2E_BIN="$PWD/node_modules/.bin/pi" npm run e2e
+```
+
+After publishing the reviewed commit, user commands are:
+
+```bash
+pi install git:github.com/swordfate3/pi-web-ui
+pi update git:github.com/swordfate3/pi-web-ui
+```
+
+No `npm_config_include=dev` workaround is needed for new commits using this strategy. Older installed commits still use the old prepare behavior until updated. Users manually reload Pi resources and run `/webui`; maintainers do not stop/reload their sessions automatically. Installing an unpinned source follows its tracked remote branch; a pinned ref follows that ref's Pi update semantics.
 
 ## Pre-Release Checks
 
@@ -80,6 +110,8 @@ then `package.json.files` must include `docs/images/`:
   "extensions/",
   "dist/",
   "public/",
+  "scripts/web-dist.mjs",
+  "LICENSE",
   "docs/images/",
   "README.md"
 ]
@@ -101,6 +133,9 @@ The output must include at least:
 - `dist/index.html`
 - `dist/assets/`
 - `public/`
+- `scripts/web-dist.mjs`
+- `dist/build-manifest.json`
+- `LICENSE`
 - `docs/images/pi-web-ui-example.png` when README references that image
 
 Check the CDN path that pi.dev will use for README images after publish. Replace `<version>` with the version being released:

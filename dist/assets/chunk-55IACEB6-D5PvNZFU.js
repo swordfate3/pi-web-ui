@@ -1,0 +1,1 @@
+import{Nn as e,Yt as t}from"./index-D0u4NrlD.js";var n=e((e,n)=>{let r;return n===`sandbox`&&(r=t(`#i`+e)),t(n===`sandbox`?r.nodes()[0].contentDocument.body:`body`).select(`[id="${e}"]`)},`getDiagramElement`);export{n as t};

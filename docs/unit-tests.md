@@ -3,11 +3,10 @@
 Run all commands from the repository root with the supported Node 22.19+ (verified with Node 24). Full suite (tree, i18n, rendering/cache and sidebar logic):
 
 ```sh
-node --import ./tests/register-ts.mjs --test \
-  tests/*.test.ts \
-  src/web/src/core/i18n.test.ts \
-  src/web/src/components/pi-web-ui/sidebar-tree.test.ts
+npm run test:unit
 ```
+
+This includes TypeScript frontend tests and `tests/*.test.mjs` prebuilt-distribution integrity tests. Production install/update lifecycle checks are separate: `node scripts/test-git-install.mjs`.
 
 Only session-tree tests:
 

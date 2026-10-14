@@ -157,6 +157,16 @@
 - 发布前 Biome/build/diff 检查和 55 项单测通过；此前 36 个真实 E2E 结果仍作为功能证据，本次仅元数据/文档/忽略规则变更未重跑浏览器套件。
 - 本节记录发布准备，不预先宣称 push 成功；最终提交与远端状态以 Git 为准。
 
+## 09 · Git 安装无需开发工具
+
+- 修正旧 prepare 在生产依赖安装时调用 Vite/TypeScript 的问题；安装不再构建或另行下载资产。
+- 前端完整 `dist/` 随安装 ref 提交，新增确定性 source/output manifest；prepare 使用 Node 内建校验，完整源码与产物不同步时拒绝安装。安装时仅豁免 npm 可能写回的 lock 字节，CI/default 仍验证 lock。
+- 生产依赖缩减为 `ws`；React/diff/Zustand 归为构建依赖，Pi 1.1 仅作为开发测试 runner，不在消费包中嵌套安装。
+- CI 增加提交产物检查、重建一致性、72 项单测、真实 Pi 生产安装/更新及生产安装版 E2E。
+- 本地验证：真实 install/update/tarball 通过；真实 Pi 安装过期源码 commit 被 prepare 拒绝；仅 1 个运行依赖；36 项真实 E2E 通过。干净 dev install 重建一致，正常 npm pack 完成（685 文件/约 4.8 MB 压缩包）。
+- 不修改用户 package settings、不升级现有启用包、不自动 reload 会话。维护者已授权将本批源码与产物一起发布到远程 main；实际发布提交以 Git 历史为准，GitHub CI 运行结果另行核对。
+- 详见 [ADR 0007](adr/0007-npm-publish-distribution-strategy.md)、[安装验证](validation/git-install-validation.md)。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。

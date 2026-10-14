@@ -5,6 +5,7 @@
 - [简约布局](minimal-validation.md)：27 个真实 E2E 及桌面/手机检查。
 - [双语](i18n-validation.md)：32 个真实 E2E、38 个单测及翻译边界。
 - [性能优化最终验证](perf-validation.md)：36 个真实 E2E、55 个单测、可比样本与局限。
+- [预构建 Git 安装验证](git-install-validation.md)：普通生产依赖安装/更新、真实 prepare 拒绝与正常 pack。
 - [早期基线尝试](perf-baseline-report.md)：包含首次历史加载干扰，仅为历史追溯，不能作为最终性能对比。
 
 ## 原始产物位置

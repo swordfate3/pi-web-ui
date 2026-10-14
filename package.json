@@ -24,7 +24,9 @@
   },
   "scripts": {
     "dev:web": "vite --host 127.0.0.1",
-    "build:web": "tsc --noEmit && vite build",
+    "build:web": "tsc --noEmit && vite build && node scripts/web-dist.mjs --write",
+    "verify:dist": "node scripts/web-dist.mjs",
+    "test:unit": "node --import ./tests/register-ts.mjs --test tests/*.test.ts tests/*.test.mjs src/web/src/core/i18n.test.ts src/web/src/components/pi-web-ui/sidebar-tree.test.ts",
     "preview:web": "vite preview --host 127.0.0.1",
     "e2e:gen": "bddgen test -c e2e/playwright.config.ts",
     "e2e": "npm run build:web && npm run e2e:gen && playwright test -c e2e/playwright.config.ts",
@@ -33,20 +35,21 @@
     "check": "biome check .",
     "check:write": "biome check --write .",
     "ci:biome": "biome ci .",
-    "prepare": "npm run build:web",
+    "prepare": "node scripts/web-dist.mjs --install",
     "prepack": "npm run build:web"
   },
   "dependencies": {
-    "@git-diff-view/react": "^0.1.6",
-    "ws": "^8.16.0",
-    "zustand": "^5.0.14"
+    "ws": "^8.16.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=1.1.0"
   },
   "devDependencies": {
+    "@git-diff-view/react": "^0.1.6",
+    "zustand": "^5.0.14",
     "@ai-sdk/react": "^3.0.193",
     "@biomejs/biome": "2.4.15",
+    "@earendil-works/pi-coding-agent": "1.1.0",
     "@playwright/test": "^1.61.1",
     "@radix-ui/react-use-controllable-state": "^1.2.2",
     "@streamdown/cjk": "^1.0.3",
@@ -85,6 +88,9 @@
     "extensions/",
     "dist/",
     "public/",
+    "scripts/web-dist.mjs",
+    "docs/images/",
+    "LICENSE",
     "README.md"
   ]
 }

@@ -10,6 +10,9 @@
     "ignoreUnknown": true,
     "includes": [
       "components.json",
+      "bin/**/*.mjs",
+      "hub/**/*.ts",
+      "hub/package.json",
       "e2e/**/*.ts",
       "extensions/**/*.ts",
       "package.json",
@@ -23,6 +26,8 @@
       "tests/connection-path.test.ts",
       "tests/service-worker-scope.test.ts",
       "tests/remote-access.test.ts",
+      "tests/session-hub.test.ts",
+      "tests/hub-cli.test.ts",
       "tsconfig.json",
       "tsconfig.connection.json",
       "vite.config.ts"

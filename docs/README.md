@@ -7,6 +7,7 @@
 - [开发日志](development-log.md)：项目自身的阶段性改动、验证、运行快照和待办。
 - [斜杠命令支持矩阵](slash-command-support.md)：Pi 1.1.0 命令与浏览器边界。
 - [连接配置](connection.md)：无需 WSL 的本地使用、手机访问、代理子路径及可选原生登记。
+- [多会话总入口](hub.md)：包内独立总管、本地启动、集中配置、凭据与卷边界。
 - [远程引导与登录管理](remote-access.md)：部署材料、终端设置账号、修改密码、独立恢复及适用边界。
 - [发布指南](releasing.md)：npm 发布流程；本地未提交快照不等于 npm 发布。
 - [许可证来源](license-provenance.md)：MIT 上游归属、fork 初始化许可证与包名边界。

@@ -191,6 +191,19 @@
 
 详见 [使用指南](remote-access.md)、[验证报告](validation/remote-access-onboarding.md)。
 
+## 11 · 包内独立多会话总管（2026-10-14，本地实现）
+
+- 同一扩展包新增 `pi-web-hub` CLI 与独立总管：初始化、按会话签发／撤销凭据、登记续租、会话列表、HTTP／WebSocket 路由和中文响应式入口。普通单 Pi 仍无需启动总管。
+- 原生登记协议与现有扩展复用，不依赖个人 WSL 路径、宿主服务或源码注入。总管不负责启动 Pi、容器或 SSH，不需要 Docker socket。
+- 私有 config/state 与可共享 runtime 分离；每个并发 Pi 使用单独 capability，端口归属通过签名后端证明核验。在线租约仅在内存，失效链接归属持久化，重启后由 Pi 换 generation 重新登记。
+- 默认 loopback，限制 Host／Origin，过滤转发敏感头；注销、过期、撤销和重启使旧链接失效。TLS、网页登录及跨同 UID 的隔离仍需外部可信部署，不能把总管当作 Agent 沙箱。
+- 聚焦复审先复现并修复四处生命周期问题：拒绝 WS 升级的半关闭连接阻碍退出、陈旧 socket 并发启动竞争、证明等待跨租约后错误续期、未登记 generation 的注销未封禁。修复后 11 项定向测试通过，复审未发现这些修改的残留重要问题。
+- 最终本地验证：78 项 Node 单元／真实 Pi 集成、44 项完整浏览器 E2E；TypeScript、Biome、构建、diff 和 npm 打包清单通过。生产依赖审计为 0；Python 网关 10 项通过、3 项可选真实 Caddy 检查跳过。
+- 已核验桌面 1440×900 与手机尺寸 390×844 的入口截图。本次未部署 Docker 示例、未验证实体手机／阿里云；未修改真实 pirun、WSL 服务、共享 Pi 卷或服务器密码。
+- 保留 `codex/portable-web-connection` 的未提交本地修改，不提交、不推送、不发布。实际迁移需要另行确认，不能仅 `/reload` 就宣称已替换现有会话路由。
+
+详见 [总管操作指南](hub.md)、[ADR 0013](adr/0013-package-owned-session-hub.md) 与 [验证报告](validation/2026-10-14-package-session-hub.md)。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。

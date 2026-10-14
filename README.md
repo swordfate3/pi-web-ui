@@ -15,7 +15,8 @@ Pi Web UI connects to your running Pi session and gives you a browser interface.
 - **Conversation tree sidebar** — inspect the current session tree, select nodes without changing drafts, branch from user messages, and continue from branch ends
 - **React UI** — Vite, Tailwind, shadcn/ui, AI Elements
 - **Markdown rendering** — Streamdown for code blocks, math, Mermaid
-- **No extra process** — the Pi extension *is* the server
+- **No extra process for a single session** — the Pi extension *is* the server
+- **Optional multi-session hub** — the same package supplies a separate portal/router; no WSL service required
 
 ## Install
 
@@ -43,6 +44,13 @@ The bilingual wizard generates reviewable connection and Caddy account-managemen
 it never accepts passwords or executes server administration in the browser. New remote
 templates support Linux/OpenSSH/Caddy with one Pi session, not a multi-session router.
 See [remote setup, password changes and recovery](docs/remote-access.md).
+
+For several running Pi instances, the package also includes `pi-web-hub`:
+one `/sessions/` page lists them and routes each independently. Start the hub
+explicitly and give each Pi its own registration credential. It does not launch
+agents or configure tunnels/authentication for you. See the
+[multi-session operating guide](docs/hub.md) for local setup, Docker mount scopes,
+persistence, restart behavior and the authenticated-gateway boundary.
 
 ## Features
 

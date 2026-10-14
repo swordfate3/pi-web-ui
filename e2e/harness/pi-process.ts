@@ -17,10 +17,13 @@ export type PiWebUiHarnessOptions = {
   longSession?: boolean;
   /** Optional immutable release root; defaults to the working repository. */
   runtimeDir?: string;
+  /** Explicit root for Node ESM integration runners (Playwright supplies __dirname). */
+  repositoryRoot?: string;
+  registration?: { socketPath: string; credentialFile: string };
 };
 
 export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessOptions = {}): Promise<PiWebUiHarness> {
-  const repoRoot = path.resolve(__dirname, "../..");
+  const repoRoot = options.repositoryRoot ?? path.resolve(__dirname, "../..");
   const runtimeDir = options.runtimeDir ? path.resolve(options.runtimeDir) : repoRoot;
   const tempRoot = mkdtempSync(path.join(tmpdir(), "pi-web-ui-e2e-"));
   const workspaceDir = path.join(tempRoot, "workspace");
@@ -81,8 +84,8 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
         PI_WEB_UI_PORT: String(port),
         PI_WEB_UI_DISABLED: "false",
         PI_WEB_UI_PUBLIC_URL: "",
-        PI_WEB_UI_REGISTRY_SOCKET: "",
-        PI_WEB_UI_REGISTRY_CREDENTIAL_FILE: "",
+        PI_WEB_UI_REGISTRY_SOCKET: options.registration?.socketPath ?? "",
+        PI_WEB_UI_REGISTRY_CREDENTIAL_FILE: options.registration?.credentialFile ?? "",
         PI_WEB_UI_STATIC_DIR: path.join(runtimeDir, "dist"),
         PI_WEB_UI_E2E_FIXTURE: fixtureName,
         PI_WEB_UI_E2E_EXTERNAL_ARTIFACT: path.join(externalDir, "external-skill.md"),

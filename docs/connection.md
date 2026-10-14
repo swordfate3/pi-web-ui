@@ -103,7 +103,8 @@ clear that site's old worker/cache before validating a migrated gateway.
 
 ## Optional native session registration
 
-An external registry may provide a per-process public URL. Enable its client:
+An external registry, or the package's optional [independent hub](hub.md), may
+provide a per-process public URL. Enable its client:
 
 ```json
 {
@@ -172,8 +173,10 @@ real containers are separate operations, not performed by this feature branch.
 
 ## Boundaries
 
-This does not bundle tunnel providers, a registry daemon, a login page, QR pairing,
-or multi-agent process management. Local Web is independent of WSL; public mobile
+The single-Pi extension does not bundle tunnel providers, a login page, QR pairing,
+or multi-agent process management. The package now also includes a separately
+started registry/router/portal, documented in [hub.md](hub.md) and ADR 0013.
+Local Web is independent of WSL; public mobile
 access still needs reachable networking and trusted authentication infrastructure.
 See [ADR 0012](adr/0012-portable-web-connection.md) and the
 [validation report](validation/2026-10-14-portable-web-connection.md).

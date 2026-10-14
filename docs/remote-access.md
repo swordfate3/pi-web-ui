@@ -80,6 +80,10 @@ python3 gateway.py verify
 
 接入已有多会话网关时，使用路由实际发出的 generation URL；原生登记需要 `PI_WEB_UI_REGISTRY_SOCKET` 与 `PI_WEB_UI_REGISTRY_CREDENTIAL_FILE` 配套，凭据由已有路由签发。Docker 内使用容器可见路径并提前配置挂载。`/reload` 不能增加挂载，且原生登记与旧源码注入适配器不能同时启用。不要仅修改公网地址就认为隧道／路由已经建立。
 
+多 Pi 会话可使用包内独立总管，见 [hub.md](hub.md)。它与这里的单会话
+远程部署向导是两个层次：网关应转发总管端口和全部子路径，认证仍在
+可信网关管理。本次没有把生成单会话材料升级为多会话自动安装器。
+
 ## English quick reference
 
 Open `/webui-setup` locally or Settings → Remote access / Login management. Generate and review nonsecret materials; nothing is executed remotely by the browser. New deployments support a Linux/OpenSSH/Caddy single-session gateway, not an installer or multi-session portal. Local use does not require WSL or Docker.

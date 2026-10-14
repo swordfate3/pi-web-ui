@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted for the in-Pi extension. Package-level registry/daemon exclusion is
+superseded by [ADR 0013](0013-package-owned-session-hub.md), which allows a
+separately launched portal/router without agent process orchestration.
 
 ## Context
 

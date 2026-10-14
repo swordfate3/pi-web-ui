@@ -4,6 +4,10 @@
 
 Accepted for this feature branch, 2026-10-14. Not deployed by this change.
 
+The subsequent [ADR 0013](0013-package-owned-session-hub.md) adds an optional
+package-owned hub. The client and one-process listener decisions here still
+apply; the exclusion of a bundled registry is superseded for that separate role.
+
 ## Context
 
 Local Web should not require a user's WSL launcher. An external gateway needs to

@@ -12,19 +12,45 @@ import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
+const runtimeDir = process.env.PI_E2E_RUNTIME_DIR ? path.resolve(process.env.PI_E2E_RUNTIME_DIR) : root;
 const credential = { run_id: "1".repeat(32), token: "2".repeat(64) };
 const proof = (text: string) => createHmac("sha256", credential.token).update(text).digest("hex");
 
-async function eventually(predicate: () => boolean | Promise<boolean>, message: string) {
+async function eventually(predicate: () => boolean | Promise<boolean>, message: string | (() => string)) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  assert.fail(message);
+  assert.fail(typeof message === "function" ? message() : message);
 }
 
-async function fixture(t: test.TestContext, registration: "working" | "missing" | "off") {
+async function listen(server: http.Server, port: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const failed = (error: Error) => reject(error);
+    server.once("error", failed);
+    server.listen(port, "127.0.0.1", () => {
+      server.removeListener("error", failed);
+      resolve((server.address() as net.AddressInfo).port);
+    });
+  });
+}
+
+async function closeServer(server: http.Server): Promise<void> {
+  server.closeAllConnections();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+type RegistrationFixture =
+  | "working"
+  | "missing"
+  | "off"
+  | "missing-capability"
+  | "malformed-capability"
+  | "array-run-id"
+  | "array-token";
+
+async function fixture(t: test.TestContext, registration: RegistrationFixture, reservedPort?: number) {
   const dir = mkdtempSync(path.join(tmpdir(), "pi-portable-"));
   const agentDir = path.join(dir, "agent");
   const workspaceDir = path.join(dir, "workspace");
@@ -32,7 +58,16 @@ async function fixture(t: test.TestContext, registration: "working" | "missing" 
   mkdirSync(workspaceDir);
   const socketPath = path.join(dir, "registry.sock");
   const credentialFile = path.join(dir, "capability.json");
-  writeFileSync(credentialFile, JSON.stringify(credential), { mode: 0o600 });
+  if (registration !== "missing-capability") {
+    const contents =
+      registration === "malformed-capability"
+        ? "not-json"
+        : JSON.stringify({
+            run_id: registration === "array-run-id" ? [credential.run_id] : credential.run_id,
+            token: registration === "array-token" ? [credential.token] : credential.token,
+          });
+    writeFileSync(credentialFile, contents, { mode: 0o600 });
+  }
   const requests: Record<string, unknown>[] = [];
   const sockets = new Set<net.Socket>();
   const registry = net.createServer((socket) => {
@@ -49,26 +84,38 @@ async function fixture(t: test.TestContext, registration: "working" | "missing" 
       );
     });
   });
-  if (registration === "working") await new Promise<void>((resolve) => registry.listen(socketPath, resolve));
-  const probe = http.createServer();
-  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-  const port = (probe.address() as net.AddressInfo).port;
-  await new Promise<void>((resolve) => probe.close(() => resolve()));
   let child: ChildProcessWithoutNullStreams | undefined;
+  let exited = Promise.resolve();
+  let processClosed = false;
   const output: string[] = [];
-  const closed = () =>
-    new Promise<void>((resolve) => {
-      if (!child || child.exitCode !== null || child.signalCode !== null) resolve();
-      else child.once("exit", () => resolve());
-    });
+  const closed = () => exited;
   t.after(async () => {
-    const exited = closed();
-    child?.kill("SIGTERM");
-    await exited;
-    for (const socket of sockets) socket.destroy();
-    await new Promise<void>((resolve) => registry.close(() => resolve()));
-    rmSync(dir, { recursive: true, force: true });
+    // Also runs after assertions/timeouts and spawn errors; close drains diagnostic output.
+    const forceStop = setTimeout(() => {
+      if (!processClosed) child?.kill("SIGKILL");
+    }, 2000);
+    try {
+      if (!processClosed) child?.kill("SIGTERM");
+      await exited;
+    } finally {
+      clearTimeout(forceStop);
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => registry.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
+  if (registration !== "missing" && registration !== "off") {
+    await new Promise<void>((resolve) => registry.listen(socketPath, resolve));
+  }
+  let port = reservedPort;
+  if (port === undefined) {
+    const probe = http.createServer();
+    try {
+      port = await listen(probe, 0);
+    } finally {
+      await closeServer(probe);
+    }
+  }
   const start = () => {
     child = spawn(
       process.env.PI_E2E_BIN || path.join(root, "node_modules/.bin/pi"),
@@ -88,7 +135,7 @@ async function fixture(t: test.TestContext, registration: "working" | "missing" 
         "--extension",
         path.join(root, "e2e/fixtures/connection-lifecycle-extension.ts"),
         "--extension",
-        path.join(root, "extensions/mirror-server.ts"),
+        path.join(runtimeDir, "extensions/mirror-server.ts"),
       ],
       {
         cwd: workspaceDir,
@@ -100,13 +147,19 @@ async function fixture(t: test.TestContext, registration: "working" | "missing" 
           PI_WEB_UI_HOST: "127.0.0.1",
           PI_WEB_UI_PORT: String(port),
           PI_WEB_UI_DISABLED: "false",
-          PI_WEB_UI_STATIC_DIR: path.join(root, "dist"),
+          PI_WEB_UI_STATIC_DIR: path.join(runtimeDir, "dist"),
           PI_WEB_UI_PUBLIC_URL: undefined,
           PI_WEB_UI_REGISTRY_SOCKET: registration === "off" ? undefined : socketPath,
           PI_WEB_UI_REGISTRY_CREDENTIAL_FILE: registration === "off" ? undefined : credentialFile,
         },
       },
     );
+    exited = new Promise<void>((resolve) => {
+      child?.once("close", () => {
+        processClosed = true;
+        resolve();
+      });
+    });
     child.stdout.on("data", (chunk) => output.push(chunk.toString()));
     child.stderr.on("data", (chunk) => output.push(chunk.toString()));
     child.on("error", (error) => output.push(error.message));
@@ -115,17 +168,24 @@ async function fixture(t: test.TestContext, registration: "working" | "missing" 
     if (!child) throw new Error("Pi test process is not started");
     child.stdin.write(`${JSON.stringify({ type: "prompt", message })}\n`);
   };
-  const ready = async (actualPort = port) =>
-    eventually(
-      async () => {
-        try {
-          return (await fetch(`http://127.0.0.1:${actualPort}/`)).ok;
-        } catch {
-          return false;
-        }
-      },
-      `Pi Web did not start: ${output.join("").slice(-2000)}`,
-    );
+  const ready = async (actualPort = port) => {
+    let lastProbe = "not attempted";
+    const diagnostic = () =>
+      `Pi Web did not start on 127.0.0.1:${actualPort} (configured ${port}; last probe: ${lastProbe}; ` +
+      `exit=${child?.exitCode}, signal=${child?.signalCode}):\n${output.join("").slice(-8000)}`;
+    await eventually(async () => {
+      if (processClosed) assert.fail(diagnostic());
+      try {
+        const response = await fetch(`http://127.0.0.1:${actualPort}/`, { signal: AbortSignal.timeout(1000) });
+        lastProbe = `HTTP ${response.status}`;
+        await response.body?.cancel();
+        return response.ok;
+      } catch (error) {
+        lastProbe = error instanceof Error ? error.message : String(error);
+        return false;
+      }
+    }, diagnostic);
+  };
   return { port, start, send, ready, requests, closed, stop: () => child?.kill("SIGTERM") };
 }
 
@@ -189,6 +249,70 @@ test("real Pi registers natively, guards WebSockets, and unregisters on stop", {
   assert.equal(pi.requests.at(-1)?.action, "unregister");
 });
 
+for (const registration of [
+  "missing-capability",
+  "malformed-capability",
+  "array-run-id",
+  "array-token",
+  "off",
+] as const) {
+  test(`real Pi fails closed for routed requests with ${registration}`, { timeout: 20_000 }, async (t) => {
+    const pi = await fixture(t, registration);
+    pi.start();
+    await pi.ready();
+    const url = `http://127.0.0.1:${pi.port}`;
+    const generation = "4".repeat(32);
+    const claims: Record<string, string>[] = [
+      { "x-pi-web-generation": generation, "x-pi-web-proof": proof(generation) },
+      { "x-pi-web-generation": generation },
+      { "x-pi-web-proof": proof(generation) },
+      { "x-pi-web-generation": "" },
+      { "x-pi-web-proof": "" },
+    ];
+    for (const headers of claims) {
+      const response = await fetch(`${url}/`, { headers });
+      assert.equal(response.status, 409);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(await response.text(), "");
+      const ws = new WebSocket(`ws://127.0.0.1:${pi.port}/ws`, { headers, handshakeTimeout: 5000 });
+      try {
+        await assert.rejects(
+          new Promise<void>((resolve, reject) => {
+            ws.once("open", resolve);
+            ws.once("error", reject);
+          }),
+          /Unexpected server response: 409/,
+        );
+      } finally {
+        ws.terminate();
+      }
+    }
+    const challenge = "3".repeat(48);
+    for (const headers of [
+      {},
+      { "x-pi-web-challenge": challenge, "x-pi-web-challenge-proof": proof(challenge) },
+    ] as Record<string, string>[]) {
+      const identity = await fetch(`${url}/.pi-web-identity?probe=1`, { headers });
+      assert.equal(identity.status, 403);
+      assert.equal(identity.headers.get("cache-control"), "no-store");
+      assert.equal(await identity.text(), "");
+    }
+    // Failed remote routing must neither expose session data nor disable local use.
+    assert.equal((await fetch(`${url}/`)).status, 200);
+    const local = new WebSocket(`ws://127.0.0.1:${pi.port}/ws`, { handshakeTimeout: 5000 });
+    try {
+      const message = await new Promise<string>((resolve, reject) => {
+        local.once("message", (data) => resolve(data.toString()));
+        local.once("error", reject);
+      });
+      assert.equal(JSON.parse(message).type, "event");
+    } finally {
+      local.terminate();
+    }
+    assert.equal(pi.requests.length, 0);
+  });
+}
+
 test("real Pi remains locally usable when configured registry is missing", { timeout: 20_000 }, async (t) => {
   const pi = await fixture(t, "missing");
   pi.start();
@@ -197,16 +321,35 @@ test("real Pi remains locally usable when configured registry is missing", { tim
 });
 
 test("real Pi advances an occupied port without registration", { timeout: 20_000 }, async (t) => {
-  const pi = await fixture(t, "off");
-  const occupied = http.createServer((_req, res) => res.writeHead(503).end());
-  await new Promise<void>((resolve) => occupied.listen(pi.port, "127.0.0.1", resolve));
-  t.after(
-    () =>
-      new Promise<void>((resolve) => {
-        occupied.closeAllConnections();
-        occupied.close(() => resolve());
-      }),
-  );
+  // An OS-selected ephemeral port does not imply port+1 is free. Reserve both
+  // before starting Pi; keep the first occupied and release only its successor.
+  let occupied: http.Server | undefined;
+  let successor: http.Server | undefined;
+  t.after(async () => {
+    if (occupied) await closeServer(occupied);
+    if (successor) await closeServer(successor);
+  });
+  let port: number | undefined;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    occupied = http.createServer((_req, res) => res.writeHead(503).end());
+    successor = http.createServer();
+    const candidate = await listen(occupied, 0);
+    if (candidate < 65535) {
+      try {
+        await listen(successor, candidate + 1);
+        port = candidate;
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+      }
+    }
+    await closeServer(occupied);
+    await closeServer(successor);
+  }
+  assert.ok(port !== undefined && successor, "Could not reserve two consecutive loopback ports");
+  const pi = await fixture(t, "off", port);
+  await closeServer(successor);
+  successor = undefined;
   pi.start();
   await pi.ready(pi.port + 1);
   assert.equal((await fetch(`http://127.0.0.1:${pi.port}/`)).status, 503);

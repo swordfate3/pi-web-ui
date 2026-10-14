@@ -1,24 +1,29 @@
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import gatewaySource from "../../../../../extensions/remote-access/gateway.py?raw";
 import { defaultRemotePlan, type RemotePlan, validateRemotePlan } from "../../../../../extensions/remote-access/plan";
 import { connectionLabel, t, useLanguage } from "../../core/i18n";
-import { buildRemoteMaterials, type DeploymentMaterial } from "../../core/remote-access-materials";
+import { buildRemoteMaterials } from "../../core/remote-access-materials";
 import { readPreference, writePreference } from "../../core/storage";
 import { usePiWebUiStore } from "../../core/store";
 import type { WebConnectionInfo } from "../../core/types";
 import { Modal } from "./modal";
+import {
+  createRemoteAccessDraft,
+  type RemoteAccessDraftAction,
+  remoteAccessDraftReducer,
+} from "./remote-access-draft-state";
 
 const PLAN_KEY = "pi-web-ui-remote-plan-v1";
-function initialPlan(): RemotePlan {
+function initialDraft() {
   try {
     const stored = readPreference(PLAN_KEY);
-    if (stored) return validateRemotePlan(JSON.parse(stored));
+    if (stored) return createRemoteAccessDraft(validateRemotePlan(JSON.parse(stored)));
   } catch {
     /* Invalid/stale drafts are not executed. */
   }
-  return defaultRemotePlan();
+  return createRemoteAccessDraft(defaultRemotePlan());
 }
 
 export function RemoteAccessPanel({
@@ -32,8 +37,8 @@ export function RemoteAccessPanel({
   const connection = usePiWebUiStore((state) => state.connection);
   const getWebConnection = usePiWebUiStore((state) => state.getWebConnection);
   const [tab, setTab] = useState(initialTab);
-  const [plan, setPlan] = useState(initialPlan);
-  const [materials, setMaterials] = useState<DeploymentMaterial[]>([]);
+  const [draft, dispatchDraft] = useReducer(remoteAccessDraftReducer, undefined, initialDraft);
+  const { plan, materials } = draft;
   const [selected, setSelected] = useState("README.txt");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -45,7 +50,7 @@ export function RemoteAccessPanel({
       .then((status) => {
         if (!active) return;
         setRuntime(status);
-        if (!readPreference(PLAN_KEY)) setPlan((previous) => ({ ...previous, localPort: status.port }));
+        if (!readPreference(PLAN_KEY)) dispatchDraft({ type: "listener-port-received", port: status.port });
       })
       .catch(() => {
         /* Older extension: show unavailable rather than inventing a port. */
@@ -56,15 +61,15 @@ export function RemoteAccessPanel({
   }, [connection, getWebConnection]);
 
   function edit<K extends keyof RemotePlan>(field: K, value: RemotePlan[K]) {
-    setPlan((previous) => ({ ...previous, [field]: value }));
-    setMaterials([]);
+    dispatchDraft({ type: "edit", field, value } as RemoteAccessDraftAction);
     setError("");
     setSaved(false);
   }
   function generate() {
     try {
-      const result = buildRemoteMaterials(plan, gatewaySource);
-      setMaterials(result);
+      const sourcePlan = { ...plan };
+      const result = buildRemoteMaterials(sourcePlan, gatewaySource);
+      dispatchDraft({ type: "materials-generated", sourcePlan, materials: result });
       setSelected("README.txt");
       setError("");
     } catch {
@@ -199,6 +204,7 @@ export function RemoteAccessPanel({
                   </span>
                   <Input
                     id={`remote-${key}`}
+                    data-testid={key === "localPort" ? "remote-local-port" : undefined}
                     type="number"
                     min={1}
                     max={65535}

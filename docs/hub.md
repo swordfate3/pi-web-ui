@@ -14,13 +14,16 @@
 应在对应容器终端执行，而不是宿主机的另一个 Pi 配置环境：
 
 ```bash
-npm_config_include=dev pi install git:github.com/swordfate3/pi-web-ui@codex/portable-web-connection
+pi install git:github.com/swordfate3/pi-web-ui@codex/portable-web-connection
 ```
 
-当前 Git 源安装仍需开发依赖完成 `prepare` 网页构建，因此显式设置
-`npm_config_include=dev`；这不是已经做好的“只装生产依赖”发布流程。
-宿主 pirun 不一定转发这个环境变量，不要假设在宿主命令前设置就会进入容器。
-后续对同一来源更新时也需在同一环境保留该构建设置。
+该分支已整合预构建发布改造：普通 Git 安装只需生产依赖，`prepare` 使用
+Node 核验随源码交付的网页资源，无需 `npm_config_include=dev`。
+后续更新同一来源可执行：
+
+```bash
+pi update git:github.com/swordfate3/pi-web-ui@codex/portable-web-connection
+```
 
 如果之前启用了本地 release 或 npm 版，应检查 Pi 的 packages/extensions
 配置，只启用一份 Web 扩展；安装 Git 源不会自动替你停用另外的本地副本。
@@ -37,11 +40,11 @@ npm_config_include=dev pi install git:github.com/swordfate3/pi-web-ui@codex/port
 ```bash
 PI_WEB_PACKAGE="$PWD"
 PI_HUB_DIR="$HOME/.pi/web-hub"
-node "$PI_WEB_PACKAGE/bin/pi-web-hub.mjs" init --config "$PI_HUB_DIR/config.json"
-node "$PI_WEB_PACKAGE/bin/pi-web-hub.mjs" issue \
+node "$PI_WEB_PACKAGE/dist/hub/pi-web-hub.mjs" init --config "$PI_HUB_DIR/config.json"
+node "$PI_WEB_PACKAGE/dist/hub/pi-web-hub.mjs" issue \
   --config "$PI_HUB_DIR/config.json" \
   --output "$PI_HUB_DIR/session-a.json" --label "项目 A"
-node "$PI_WEB_PACKAGE/bin/pi-web-hub.mjs" serve --config "$PI_HUB_DIR/config.json"
+node "$PI_WEB_PACKAGE/dist/hub/pi-web-hub.mjs" serve --config "$PI_HUB_DIR/config.json"
 ```
 
 `serve` 是前台进程，会显示入口和 socket 路径；不要关闭这个终端。
@@ -121,7 +124,7 @@ services:
     user: "1000:1000"
     network_mode: host
     entrypoint: ["node"]
-    command: ["/opt/pi-web-ui/bin/pi-web-hub.mjs", "serve", "--config", "/hub/private/config.json"]
+    command: ["/opt/pi-web-ui/dist/hub/pi-web-hub.mjs", "serve", "--config", "/hub/private/config.json"]
     volumes:
       - ./hub-private:/hub/private
       - ./hub-runtime:/run/pi-web-hub

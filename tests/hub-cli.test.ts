@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const cli = fileURLToPath(new URL("../bin/pi-web-hub.mjs", import.meta.url));
+const cli = fileURLToPath(new URL("../dist/hub/pi-web-hub.mjs", import.meta.url));
 test("CLI initializes once and issues private individual credentials without printing tokens", (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "pi-hub-cli-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

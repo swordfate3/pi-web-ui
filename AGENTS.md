@@ -101,7 +101,7 @@ Run `$webui-visual-check` after UI, WebSocket-driven visible state, session tree
 │   └── lib/
 │       └── utils.ts             # shadcn/ui utility (cn helper)
 ├── public/                      # Static assets copied by Vite (icons, manifest, sw.js)
-├── dist/                        # Vite build output (gitignored)
+├── dist/                        # Tracked prebuilt assets + source/output manifest
 
 # Project documentation lives under docs/ (including mobile.md,
 # releasing.md, unit-tests.md, development-log.md and validation/).
@@ -164,7 +164,9 @@ Open `http://localhost:4444`. Vite serves the React UI and proxies `/api` and `/
 npm run build:web
 ```
 
-Output goes to `dist/`. Then run Pi with the built assets:
+Output goes to tracked `dist/`, including a deterministic source/output manifest. Git consumers do not compile: prepare verifies the supplied assets using Node alone. After source/extension/build-dependency changes, rebuild and include the updated dist in the same reviewed commit. See `docs/adr/0007-npm-publish-distribution-strategy.md`.
+
+Verify correspondence with `npm run verify:dist`; production-only Git install/update regression is `node scripts/test-git-install.mjs` (isolated settings and temporary snapshot, npm network required). Then run Pi with the built assets:
 
 ```bash
 PI_WEB_UI_STATIC_DIR=$(pwd)/dist pi

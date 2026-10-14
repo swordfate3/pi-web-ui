@@ -4,7 +4,8 @@
 
 在 `codex/portable-web-connection` 本地工作区实现同包独立 `pi-web-hub`，
 复用 Pi 扩展的原生登记客户端。Node 单元／后端集成、真实 Pi 浏览器回归、
-CLI 和包清单均通过。未提交／推送，不等于用户现有 pirun 或阿里云已升级。
+CLI 和包清单均通过。此处描述最初本地实现阶段；随后用户授权推送同一
+功能分支，整合后的新鲜验证见下文。仓库交付不等于现有 pirun 或阿里云已升级。
 
 环境：Linux、Node 22.19.0、仓库依赖和本地 Chromium。测试使用临时项目、
 凭据、IPC socket、随机端口和 faux provider；真实 Pi 运行，但不向真实
@@ -30,7 +31,7 @@ CLI 和包清单均通过。未提交／推送，不等于用户现有 pirun 或
 node --import ./tests/register-ts.mjs --test --test-timeout=70000 \
   tests/*.test.ts e2e/portable-connection.integration.ts e2e/session-hub.integration.ts
 
-PI_E2E_BROWSER_EXECUTABLE=/home/fate/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome \
+PI_E2E_BROWSER_EXECUTABLE="$PI_BROWSER_BIN" \
   npx playwright test -c e2e/playwright.config.ts
 
 python3 -m unittest discover -s tests -p 'test_gateway*.py'
@@ -86,3 +87,41 @@ Python 的三个可选实际 Caddy 测试因本轮环境未提供其运行条件
   配置和验证。未修改实际 pirun、WSL 路由、容器、共享卷、隧道或阿里云。
 
 操作入口与详细恢复步骤见 [hub.md](../hub.md)。
+
+## 远程分支整合与分发回归（2026-10-14）
+
+本地功能提交 `5976ef7` 与远程安装／路由修复 `847079e` 整合，两侧功能
+均保留。旧 WSL 服务、实际 Pi 安装、共享卷和阿里云配置均未迁移。
+用户授权将整合结果推送 `codex/portable-web-connection`；实际推送结果
+以远程 Git 提交为准，此报告不是部署记录。
+
+生产分发回归先发现：源码内总管 CLI 可用，但 npm 包落在 `node_modules`
+后，Node 拒绝直接剥离其中 TypeScript。先在真实安装测试中复现失败，
+再把总管构建为 `dist/hub/pi-web-hub.mjs`，由 package bin 引用。Node 内置
+模块与 `ws` 保持外部依赖，不引入用户侧编译步骤或运行时 TS 加载器。
+源码清单新增 hub、CLI 和构建配置，过期源码拒绝测试覆盖这三类输入。
+
+重新执行的结果：
+
+- 132 项 Node 单元／真实 Pi 集成通过，0 跳过；其中真实 Pi 后端 9 项。
+- 完整源码环境浏览器回归 45/45 通过，包含桌面／手机总入口和单会话页面。
+- 生产依赖 Git 安装副本的真实 Pi 后端 9/9 通过；显式指定宿主 Pi 程序，
+  扩展、静态网页资源从安装副本加载，不把宿主 Pi 装入扩展依赖。
+- 同一生产安装副本的完整浏览器回归 45/45 通过，约 2.8 分钟；不是只测
+  仓库源码或仅测静态 HTML。
+- 普通真实 Pi Git install、update、npm tarball 安装通过；六类过期源码
+  经真实 prepare 拒绝。Git 运行依赖只有 `ws`，tarball consumer 只有包本身
+  和 `ws`；`.bin` 是入口目录，不计为第三个依赖。
+- npm 安装后的可执行入口 `pi-web-hub --help` 可用。CLI 生命周期测试使用
+  构建后的入口，覆盖初始化、签发、撤销、HTTP 入口和 SIGTERM 退出。
+- `build:web`、`verify:dist`、`just check`（149 文件）、连接模块类型检查
+  通过；pack dry-run 699 文件，压缩估算 4,871,141 字节，包含预构建总管。
+- Python 网关 19 项中 16 通过、3 项可选真实 Caddy 检查跳过。未实测阿里云。
+- 手写源码的 Git whitespace 检查通过；tracked dist 的第三方生成代码
+  含既有行尾空白提示，未手工改写构建输出。大 chunk 提示仍存在。
+
+失败尝试也保留在本地测试日志：一次沙箱禁止监听导致源码测试无法完成；
+授权临时测试端口后重跑通过。首次对生产副本跑浏览器时漏设
+`PI_E2E_BIN`，测试误在只含扩展的目录找 Pi；修正为与 CI 相同的两变量
+配置再验证，不改安装模型。桌面／手机截图使用 Chromium 并直接查看；
+本轮工具未提供 in-app Browser，不冒充完成该入口的检查。

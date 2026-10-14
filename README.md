@@ -20,11 +20,21 @@ Pi Web UI connects to your running Pi session and gives you a browser interface.
 
 ## Install
 
-Install from GitHub:
+Install from GitHub with Node.js 22.19+ (Node 24 recommended):
 
 ```bash
 pi install git:github.com/swordfate3/pi-web-ui
 ```
+
+The installation ref contains prebuilt frontend assets. Installation only needs the extension's production dependency (`ws`); no TypeScript/Vite build, development-dependency override or extra asset download is required. `prepare` verifies packaged files and fails if they are incomplete or stale. Pi supplies its own runtime APIs.
+
+Update with:
+
+```bash
+pi update git:github.com/swordfate3/pi-web-ui
+```
+
+Then manually run `/reload`, `/webui` and refresh the browser. This update does not automatically reload an already-running Pi session. See [installation/release checks](docs/releasing.md) for the maintainer workflow.
 
 The upstream version is also available from npm (it does not include this fork's unpublished changes):
 
@@ -149,8 +159,9 @@ Project documentation lives under [`docs/`](docs/README.md), including the [deve
 ```bash
 git clone https://github.com/swordfate3/pi-web-ui.git
 cd pi-web-ui
-npm install
+npm ci --legacy-peer-deps
 npm run build:web
+npm run verify:dist
 PI_WEB_UI_STATIC_DIR=$(pwd)/dist pi
 ```
 
@@ -159,6 +170,8 @@ For frontend development, run Pi in one terminal, then:
 ```bash
 npm run dev:web
 ```
+
+After source changes, run `npm run build:web` and commit the corresponding `dist/` and manifest. Development dependencies are needed for maintainer builds/tests, not for Git package consumers.
 
 Open `http://localhost:4444`; Vite serves the React UI and proxies `/api` and `/ws` to the extension on `localhost:3001`.
 

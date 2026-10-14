@@ -68,14 +68,48 @@ Then("deployment materials are pending and login management never requests a pas
   await expect(page.locator('input[type="password"]')).toHaveCount(0);
   await page.getByTestId("material-select").selectOption("connect.sh");
   await expect(page.getByTestId("material-preview")).toContainText("ExitOnForwardFailure=yes");
-  await page.screenshot({ path: $testInfo.outputPath("remote-access-materials.png"), fullPage: true });
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+  });
+  await page.screenshot({
+    path: $testInfo.outputPath("remote-access-materials.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
   const downloadPromise = page.waitForEvent("download");
   await page.getByTestId("download-material").click();
   expect((await downloadPromise).suggestedFilename()).toBe("connect.sh");
   await page.getByRole("button", { name: chinese ? "登录管理" : "Login management", exact: true }).click();
   await expect(page.getByTestId("login-management")).toContainText("Caddy");
   await expect(page.locator('input[type="password"]')).toHaveCount(0);
-  await page.screenshot({ path: $testInfo.outputPath("remote-access-login.png"), fullPage: true });
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+  });
+  await page.screenshot({
+    path: $testInfo.outputPath("remote-access-login.png"),
+    fullPage: true,
+    animations: "disabled",
+  });
+});
+
+When("I change the Pi listener port to {int}", async ({ page: _fixturePage }, port: number) => {
+  await page.getByRole("button", { name: chinese ? "远程访问" : "Remote access", exact: true }).click();
+  await page.getByTestId("remote-local-port").fill(String(port));
+});
+
+Then("generated materials are invalidated", async () => {
+  await expect(page.getByTestId("material-preview")).toHaveCount(0);
+  await expect(page.getByTestId("deployment-status")).toHaveCount(0);
+});
+
+When("I generate materials again", async () => {
+  await page.getByTestId("generate-materials").click();
+  await expect(page.getByTestId("material-preview")).toBeVisible();
+});
+
+Then("the generated connection plan uses Pi listener port {int}", async ({ page: _fixturePage }, port: number) => {
+  await page.getByTestId("material-select").selectOption("connection-plan.json");
+  await expect(page.getByTestId("material-preview")).toContainText(`"localPort": ${port}`);
 });
 
 After(async () => {

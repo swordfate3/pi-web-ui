@@ -157,7 +157,17 @@
 - 发布前 Biome/build/diff 检查和 55 项单测通过；此前 36 个真实 E2E 结果仍作为功能证据，本次仅元数据/文档/忽略规则变更未重跑浏览器套件。
 - 本节记录发布准备，不预先宣称 push 成功；最终提交与远端状态以 Git 为准。
 
-## 09 · 可移植连接管理（2026-10-14）
+## 09 · Git 安装无需开发工具
+
+- 修正旧 prepare 在生产依赖安装时调用 Vite/TypeScript 的问题；安装不再构建或另行下载资产。
+- 前端完整 `dist/` 随安装 ref 提交，新增确定性 source/output manifest；prepare 使用 Node 内建校验，完整源码与产物不同步时拒绝安装。安装时仅豁免 npm 可能写回的 lock 字节，CI/default 仍验证 lock。
+- 生产依赖缩减为 `ws`；React/diff/Zustand 归为构建依赖，Pi 1.1 仅作为开发测试 runner，不在消费包中嵌套安装。
+- CI 增加提交产物检查、重建一致性、72 项单测、真实 Pi 生产安装/更新及生产安装版 E2E。
+- 本地验证：真实 install/update/tarball 通过；真实 Pi 安装过期源码 commit 被 prepare 拒绝；仅 1 个运行依赖；36 项真实 E2E 通过。干净 dev install 重建一致，正常 npm pack 完成（685 文件/约 4.8 MB 压缩包）。
+- 不修改用户 package settings、不升级现有启用包、不自动 reload 会话。维护者已授权将本批源码与产物一起发布到远程 main；实际发布提交以 Git 历史为准，GitHub CI 运行结果另行核对。
+- 详见 [ADR 0007](adr/0007-npm-publish-distribution-strategy.md)、[安装验证](validation/git-install-validation.md)。
+
+## 10 · 可移植连接管理（2026-10-14）
 
 ### 改动原因与实现
 
@@ -176,7 +186,7 @@
 
 详见 [connection.md](connection.md)、[ADR 0012](adr/0012-portable-web-connection.md) 和 [验证报告](validation/2026-10-14-portable-web-connection.md)。
 
-## 10 · 远程访问引导与登录信息管理（2026-10-14）
+## 11 · 远程访问引导与登录信息管理（2026-10-14）
 
 - 将已批准设计实现为中英双语向导：可跳过首访提示、设置入口及 `/webui-setup` 本地入口，不依赖公网先可用。
 - 非敏感计划严格校验，显式保存浏览器草稿，预览／下载部署材料。只读连接 RPC 使用 typed store intent，返回实际监听端口，不泄露登记凭据。
@@ -191,7 +201,20 @@
 
 详见 [使用指南](remote-access.md)、[验证报告](validation/remote-access-onboarding.md)。
 
-## 11 · 包内独立多会话总管（2026-10-14，本地实现）
+## 12 · 连接分支集成与审查修复
+
+- 在独立 worktree 将 main 的预构建安装改造集成到连接分支；保留 main 的 Node-only prepare、`ws` 单运行依赖和 tracked dist，不把旧安装编译流程带回主线。
+- `package.json` 合并安装校验文件、许可证／图片和远程操作指南；开发日志保留两侧记录并统一编号。
+- 登记能力不可用或未启用时，带代理路由标识的 HTTP／WS 请求失败关闭；无路由标识的本地访问仍可用。能力文件严格拒绝非字符串字段。
+- 网关原子替换在非 root 路径保留并复核 UID/GID/mode，失败拒绝；前端 reducer 保护用户端口编辑，自动端口变化使材料失效，不应用旧计划的结果。
+- 构建清单纳入连接模块和位于 extension 目录的浏览器 plan／gateway 输入；真实生产安装负例扩大到外部浏览器输入，避免源码改变而产物校验仍通过。
+- 默认 E2E harness 统一消费 `PI_E2E_RUNTIME_DIR`，新增向导／子路径场景也可验证生产安装副本，而非意外回退开发源码。
+- CI 补连接模块类型检查、真实 Pi 后端集成及 Python 事务测试；真实 Caddy 检查仍按文档显式提供 binary，在没有 binary 的环境不冒充已执行。
+- 最终验证：109 单测、8 项生产安装真实 Pi 后端集成、42 浏览器 E2E 通过；Python 19 项中 18 执行通过、1 因不同组权限缺失跳过。普通 install/update/tarball 和三种真实 prepare 负例通过；正常 pack 重建与已验证安装产物一致。
+- 独立复审指出的测试运行时选择／页面对象问题已修；完整 E2E 的 Markdown 弹窗历史同步竞态改为等待真实 settled snapshot，保留失败证据、不跳过断言。
+- 验证完成后维护者授权提交候选、合入 main 并发布 GitHub；实际提交／远端状态以 Git 历史为准。不更新共享 Pi 包，不修改 WSL／公网隧道。详见 [集成验证](validation/portable-merge-validation.md)。
+
+## 13 · 包内独立多会话总管（2026-10-14，本地实现）
 
 - 同一扩展包新增 `pi-web-hub` CLI 与独立总管：初始化、按会话签发／撤销凭据、登记续租、会话列表、HTTP／WebSocket 路由和中文响应式入口。普通单 Pi 仍无需启动总管。
 - 原生登记协议与现有扩展复用，不依赖个人 WSL 路径、宿主服务或源码注入。总管不负责启动 Pi、容器或 SSH，不需要 Docker socket。
@@ -200,9 +223,16 @@
 - 聚焦复审先复现并修复四处生命周期问题：拒绝 WS 升级的半关闭连接阻碍退出、陈旧 socket 并发启动竞争、证明等待跨租约后错误续期、未登记 generation 的注销未封禁。修复后 11 项定向测试通过，复审未发现这些修改的残留重要问题。
 - 最终本地验证：78 项 Node 单元／真实 Pi 集成、44 项完整浏览器 E2E；TypeScript、Biome、构建、diff 和 npm 打包清单通过。生产依赖审计为 0；Python 网关 10 项通过、3 项可选真实 Caddy 检查跳过。
 - 已核验桌面 1440×900 与手机尺寸 390×844 的入口截图。本次未部署 Docker 示例、未验证实体手机／阿里云；未修改真实 pirun、WSL 服务、共享 Pi 卷或服务器密码。
-- 保留 `codex/portable-web-connection` 的未提交本地修改，不提交、不推送、不发布。实际迁移需要另行确认，不能仅 `/reload` 就宣称已替换现有会话路由。
+- 本地实现阶段曾保留未提交修改；随后用户授权提交并推送 `codex/portable-web-connection`，整合验证见下方记录。实际迁移仍需另行确认，不能仅 `/reload` 就宣称已替换现有会话路由。
 
 详见 [总管操作指南](hub.md)、[ADR 0013](adr/0013-package-owned-session-hub.md) 与 [验证报告](validation/2026-10-14-package-session-hub.md)。
+
+### 用户授权的分支交付与安装修复
+
+- 保留旧 WSL 服务和实际部署，整合远程 `847079e` 的预构建资源、生产依赖安装与失败关闭路由修复。
+- 真实 npm 安装暴露 Node 无法加载 node_modules 内 TypeScript 的 CLI 问题；先复现再将总管预构建为 JavaScript，package bin 和 Docker 示例均使用构建产物。
+- 新鲜回归：132 项 Node 单元／真实 Pi 集成、45 项源码浏览器、9 项生产安装后端及 45 项生产安装浏览器通过；普通 install/update/tarball 以及六类过期源码拒绝通过。细节、失败尝试和实际部署边界见总管验证报告。
+- 此次只交付 `codex/portable-web-connection` 分支，不合并 main、不发布 npm、不更新共享 Pi 包，不自动启动总管或改变 pirun 挂载。
 
 ## 后续工作与已知限制
 

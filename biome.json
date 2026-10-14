@@ -28,9 +28,11 @@
       "tests/remote-access.test.ts",
       "tests/session-hub.test.ts",
       "tests/hub-cli.test.ts",
+      "tests/remote-access-draft-state.test.ts",
       "tsconfig.json",
       "tsconfig.connection.json",
-      "vite.config.ts"
+      "vite.config.ts",
+      "vite.hub.config.ts"
     ]
   },
   "formatter": {

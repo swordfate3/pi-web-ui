@@ -25,7 +25,7 @@ import {
 import { WebSocket, WebSocketServer } from "ws";
 import { type ConnectionSettings, localWebUrl, resolveConnectionConfig } from "./connection-config.ts";
 import { listenWithFallback } from "./connection-listener.ts";
-import { createSessionRegistration, type SessionRegistration } from "./session-registration.ts";
+import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 
 type BrowserImage = {
   data?: string;
@@ -2487,13 +2487,13 @@ export default function (pi: ExtensionAPI) {
     const controller = new AbortController();
     listenController = controller;
     const activeServer = http.createServer((request, response) => {
-      if (!activeRegistration || activeRegistration.guard(request, response)) serveStaticFile(request, response);
+      if (guardSessionRequest(activeRegistration, request, response)) serveStaticFile(request, response);
     });
     server = activeServer;
     wss = new WebSocketServer({ noServer: true });
 
     activeServer.on("upgrade", (request, socket, head) => {
-      if (activeRegistration && !activeRegistration.guard(request)) {
+      if (!guardSessionRequest(activeRegistration, request)) {
         socket.end("HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n");
         return;
       }

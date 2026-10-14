@@ -9,6 +9,7 @@ let harness: PiWebUiHarness | null = null;
 let context: import("@playwright/test").BrowserContext | null = null;
 let languagePage: import("@playwright/test").Page | null = null;
 let expectedSessionId: string | undefined;
+let markdownHistorySynced = false;
 
 function page() {
   if (!languagePage) throw new Error("Language E2E browser page is not initialized");
@@ -27,6 +28,26 @@ async function start(
     ...(mobile ? { ...({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } as const) } : {}),
   });
   languagePage = await context.newPage();
+  markdownHistorySynced = false;
+  if (fixture === "language-markdown") {
+    // Observe the real transport: the live row is replaced by the settled
+    // history snapshot. Opening its modal before that replacement loses it.
+    page().on("websocket", (socket) => {
+      const syncIds = new Set<string>();
+      socket.on("framesent", ({ payload }) => {
+        const message = JSON.parse(String(payload));
+        if (message.type === "req" && message.method === "sync_request") syncIds.add(message.id);
+      });
+      socket.on("framereceived", ({ payload }) => {
+        const message = JSON.parse(String(payload));
+        if (message.type !== "res" || !syncIds.delete(message.id) || !message.ok) return;
+        const result = message.result;
+        if (result?.isStreaming === false && JSON.stringify(result.entries).includes("MARKDOWN_RAW_CONTENT_42")) {
+          markdownHistorySynced = true;
+        }
+      });
+    });
+  }
   await page().goto(harness.pageUrl);
   await expect(page().getByTestId("message-input")).toBeVisible();
 }
@@ -43,6 +64,7 @@ When("我接收 Markdown 原文回复", async () => {
   await page().getByTestId("message-input").fill("Please provide the original markdown.");
   await page().getByTestId("submit-message").click();
   await expect(page().getByRole("log")).toContainText("MARKDOWN_RAW_CONTENT_42");
+  await expect.poll(() => markdownHistorySynced).toBe(true);
   await expect(page().getByRole("log").getByRole("button", { name: "Copy Code", exact: true })).toBeVisible();
 });
 

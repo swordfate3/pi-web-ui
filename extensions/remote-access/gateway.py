@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -89,17 +90,67 @@ def update_account(text, domain, old_user, new_user, password_hash, keep_old=Fal
 def atomic_write(target, text, previous_stat=None):
     fd, filename = tempfile.mkstemp(prefix=".pi-web-", dir=target.parent)
     try:
-        os.fchmod(fd, previous_stat.st_mode & 0o777 if previous_stat else 0o640)
-        if previous_stat and os.geteuid() == 0:
-            os.fchown(fd, previous_stat.st_uid, previous_stat.st_gid)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None  # fdopen now owns the descriptor, including exceptional exits.
+        with stream:
+            descriptor = stream.fileno()
+            if previous_stat:
+                expected_owner = (previous_stat.st_uid, previous_stat.st_gid)
+                actual = os.fstat(descriptor)
+                chown_error = None
+                if (actual.st_uid, actual.st_gid) != expected_owner:
+                    try:
+                        # Attempt this regardless of effective UID: an unprivileged
+                        # writer may still be able to restore a group it belongs to.
+                        os.fchown(descriptor, *expected_owner)
+                    except (OSError, AttributeError, NotImplementedError) as error:
+                        chown_error = error
+                actual = os.fstat(descriptor)
+                if (actual.st_uid, actual.st_gid) != expected_owner:
+                    raise PermissionError(
+                        "Cannot preserve site file UID/GID; refusing to replace it"
+                    ) from chown_error
+                expected_mode = stat.S_IMODE(previous_stat.st_mode)
+            else:
+                expected_mode = 0o640
             stream.write(text)
             stream.flush()
-            os.fsync(stream.fileno())
+            # Writing can clear special permission bits; apply the exact mode
+            # only after content is complete, then verify before replacement.
+            os.fchmod(descriptor, expected_mode)
+            actual = os.fstat(descriptor)
+            if stat.S_IMODE(actual.st_mode) != expected_mode:
+                raise PermissionError("Cannot preserve site file mode; refusing to replace it")
+            os.fsync(descriptor)
+            # Check once more immediately before the atomic replacement.
+            actual = os.fstat(descriptor)
+            if previous_stat and (actual.st_uid, actual.st_gid) != expected_owner:
+                raise PermissionError(
+                    "Site file UID/GID changed before replacement; refusing to replace it"
+                )
+            if stat.S_IMODE(actual.st_mode) != expected_mode:
+                raise PermissionError(
+                    "Site file mode changed before replacement; refusing to replace it"
+                )
+        # Recheck after close and immediately before replacing; closed temporary
+        # files can be atomically replaced on platforms that forbid open-file renames.
+        actual = os.stat(filename)
+        if previous_stat and (actual.st_uid, actual.st_gid) != expected_owner:
+            raise PermissionError(
+                "Site file UID/GID changed before replacement; refusing to replace it"
+            )
+        if stat.S_IMODE(actual.st_mode) != expected_mode:
+            raise PermissionError(
+                "Site file mode changed before replacement; refusing to replace it"
+            )
         os.replace(filename, target)
     finally:
-        if os.path.exists(filename):
-            os.unlink(filename)
+        try:
+            if fd is not None:
+                os.close(fd)
+        finally:
+            if os.path.exists(filename):
+                os.unlink(filename)
 
 
 def apply_config(site_file, candidate, validate, reload, expected_original=UNSPECIFIED):

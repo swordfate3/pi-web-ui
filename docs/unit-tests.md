@@ -42,6 +42,29 @@ It checks native registration, HTTP/WS proofs, stop/start/reload/shutdown,
 unavailable registry and port conflicts. It is **backend integration**, not
 browser E2E.
 
+## Remote gateway transaction and real Caddy checks
+
+Python standard-library tests cover strict account parsing, preservation, backup,
+rollback, effective full-config account proof and concurrent-edit refusal:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_gateway.py'
+```
+
+For the optional real gateway integration, explicitly select a temporary Caddy
+2.8+ binary (this does not install or modify a system service):
+
+```sh
+CADDY_TEST_BIN=/path/to/caddy python3 -m unittest discover -s tests -p 'test_gateway*.py'
+```
+
+The integration uses loopback ports, a temporary private CA trusted only by the
+test client, dummy credentials and a controlling PTY. System certificate trust
+is not modified. It checks TLS/auth, foreign WebSocket Origin rejection, real
+validation/reload/rollback and password recovery without terminal echo. Without
+`CADDY_TEST_BIN`, the optional integration is skipped. All fixture resources are
+cleaned up. This is not an Alibaba deployment or physical-phone test.
+
 ## Real Pi browser E2E
 
 ```sh

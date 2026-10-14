@@ -1,3 +1,4 @@
+import type { WebConnectionInfo } from "../types";
 import { UiError, uiText } from "../ui-text";
 import type { ConnectionSlice, StoreSlice } from "./types";
 
@@ -17,6 +18,7 @@ export const createConnectionSlice: StoreSlice<ConnectionSlice> = (set, get) => 
   },
 
   setConnection: (connection) => set({ connection }),
+  getWebConnection: async () => (await get().send("get_web_connection")) as WebConnectionInfo,
   setError: (error) => set({ error }),
 
   applyWebUiState: (payload) => {

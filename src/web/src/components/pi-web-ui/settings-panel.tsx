@@ -12,6 +12,7 @@ export function SettingsPanel(props: {
   authEnabled: boolean;
   autoCompaction: boolean;
   onClose: () => void;
+  onRemoteAccess: (tab: "access" | "login") => void;
   onRenameSession: (name: string) => void;
   onSetAutoCompaction: (enabled: boolean) => Promise<void>;
   onSetTheme: (theme: ThemeMode) => void;
@@ -30,6 +31,17 @@ export function SettingsPanel(props: {
   return (
     <Modal onClose={props.onClose} title={t("Settings")}>
       <div className="space-y-5">
+        <section className="space-y-2">
+          <h3 className="font-medium text-sm">{t("Phone connection")}</h3>
+          <div className="grid grid-cols-2 gap-2">
+            <Button variant="outline" onClick={() => props.onRemoteAccess("access")}>
+              {t("Remote access")}
+            </Button>
+            <Button variant="outline" onClick={() => props.onRemoteAccess("login")}>
+              {t("Login management")}
+            </Button>
+          </div>
+        </section>
         <section className="space-y-2" aria-label={t("Language")}>
           <h3 className="font-medium text-sm">{t("Language")}</h3>
           <div className="grid grid-cols-2 gap-2">

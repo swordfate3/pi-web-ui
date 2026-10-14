@@ -1,5 +1,73 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "Remote access": "远程访问",
+  "Login management": "登录管理",
+  "Phone connection": "手机连接",
+  "Connect your phone to Pi": "用手机连接 Pi",
+  "Skip for now": "暂时跳过",
+  "Passwords and SSH keys never belong in this form. Nothing runs on your server automatically.":
+    "不要在此表单填写密码或 SSH 私钥。任何操作都不会在服务器上自动执行。",
+  "Access mode": "访问方式",
+  "This computer only": "仅本机",
+  "Trusted LAN (no authentication)": "可信局域网（无登录认证）",
+  "Remote server with HTTPS and login": "远程服务器（HTTPS 与登录认证）",
+  "LAN access is unauthenticated. Use only a trusted network; never expose raw Pi to the internet.":
+    "局域网模式没有认证，仅用于可信网络。不要把原始 Pi 监听端口暴露到公网。",
+  Deployment: "部署方式",
+  "New single-session gateway": "新建单会话网关",
+  "Connect an existing gateway": "接入已有网关",
+  "New deployment supports one Pi process, Linux, OpenSSH and Caddy. No WSL or Docker is required. It does not install a multi-session router.":
+    "新部署支持一个 Pi 进程，使用 Linux、OpenSSH 和 Caddy。不依赖 WSL 或 Docker，也不安装多会话路由器。",
+  "Keep your existing login. Multi-session access requires your compatible registry and container mounts; this wizard does not install that router.":
+    "保留现有登录信息。多会话访问需要已有兼容登记服务与容器挂载；本向导不会安装该路由器。",
+  "Server hostname or IPv4": "服务器主机名或 IPv4",
+  "SSH user (not web login)": "SSH 用户（不是网页登录账号）",
+  "HTTPS domain": "HTTPS 域名",
+  "Phone entry (HTTPS, ending in /)": "手机入口（HTTPS，以 / 结尾）",
+  "Gateway environment": "网关环境",
+  "Other (installation not supported)": "其他（不支持自动部署材料）",
+  "Pi listener port": "Pi 监听端口",
+  "SSH port": "SSH 端口",
+  "Server loopback port": "服务器回环端口",
+  "Authentication is managed by Caddy, not Pi": "登录认证由 Caddy 管理，不由 Pi 管理",
+  "First setup asks you to choose a username and confirm a password in your own terminal. There are no default login credentials.":
+    "首次设置在你自己的终端里选择账号并确认密码，没有默认账号密码。",
+  "Change or recover: run gateway.py on the server with the exact site file and full Caddy config. Only one account is replaced; other accounts stay. Rename removes the old account unless --keep-old is explicitly selected.":
+    "修改或恢复：在服务器运行 gateway.py，指定准确的站点文件与完整 Caddy 配置。只替换选定账号，保留其他账号。改名会移除旧账号，除非显式指定 --keep-old。",
+  "Forgot your password? Use server administrator access and the standalone recover command. Web login is not required; authentication is never disabled for recovery.":
+    "忘记密码？通过服务器管理权限执行独立 recover 命令，无需先登录网页，也不会临时关闭认证。",
+  "The script backs up, validates and reloads Caddy, and restores the file on failure. Shared gateway login changes can affect every Pi session.":
+    "脚本会备份、校验并重载 Caddy，失败则恢复文件。共享网关的账号变更可能影响所有 Pi 会话。",
+  "Generate materials in Remote access first, then download gateway.py and README.txt. Complex/shared Caddy site files are refused for safety.":
+    "先在远程访问中生成材料，再下载 gateway.py 和 README.txt。为安全起见，复杂或混合站点的 Caddy 文件会被拒绝修改。",
+  "An applied script is not a verified login. Run gateway.py verify, test the old login separately, and check chat/WebSocket in the phone browser.":
+    "执行脚本不等于登录已验证。运行 gateway.py verify，单独检查旧凭据是否失效，再在手机浏览器检查聊天与 WebSocket。",
+  "Configured target (not verified)": "配置目标（未验证）",
+  "Not configured": "未配置",
+  "Generate materials": "生成部署材料",
+  "Save nonsecret draft": "保存非敏感草稿",
+  "Browser storage is unavailable. The draft was not saved; download the materials instead.":
+    "浏览器无法存储。草稿未保存，请下载材料保留配置。",
+  "Draft saved in this browser. Pi settings and server credentials are unchanged.":
+    "草稿已保存在此浏览器中，Pi 设置和服务器凭据均未修改。",
+  "Pending execution — generated only, not deployed or verified": "待执行——仅生成材料，尚未部署或验证",
+  "Preview file": "预览文件",
+  "Download selected file": "下载选中文件",
+  "Check the server, SSH user, domain, HTTPS URL and integer ports. No credentials or command text are accepted.":
+    "请检查服务器、SSH 用户、域名、HTTPS 地址及整数端口。不接受凭据或命令文本。",
+  "Complete and validate the nonsecret fields before saving.": "保存前请填写并验证非敏感配置字段。",
+  "Current page checks (not a remote deployment test)": "当前页面检查（不是远程部署验证）",
+  "Static assets": "静态资源",
+  "This page loaded": "当前页面已加载",
+  "Local HTTP; remote TLS not verified": "本地 HTTP，未验证远程 TLS",
+  Login: "登录",
+  "External gateway; not verified here": "外部网关，此处未验证",
+  "Session registration": "会话登记",
+  "Configured; check actual generation URL and lease with your router": "已配置；请在路由器检查实际会话地址与租约",
+  "No registry configured": "未配置登记服务",
+  Unavailable: "不可用",
+  "Actual Pi listener": "实际 Pi 监听地址",
+  "Current browser entry": "当前浏览器入口",
   "Copy full parameters": "复制完整参数",
   "Copy full tool result": "复制完整工具结果",
   "Large content is shown as plain text in pages. Copy includes the full content.":

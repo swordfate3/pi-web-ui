@@ -204,6 +204,7 @@ All current commands become methods under the unified `req`/`res` pattern:
 | `export_html` | `export_html` | `{ outputPath? }` |
 | `mirror_sync_request` | `sync_request` | — |
 | `get_auth` | `get_auth` | — |
+| New | `get_web_connection` | — (read-only actual listener / advertised entry / registry configuration) |
 | `set_auth` | `set_auth` | `{ enabled }` |
 | `navigate_tree` | `navigate_tree` | `{ entryId }` |
 | `extension_ui_response` | `extension_ui_response` | `{ id, ...response }` |
@@ -219,6 +220,12 @@ All current commands become methods under the unified `req`/`res` pattern:
 | `GET /api/search` | Deleted (ADR 0007) | — |
 | `GET /api/sessions/:dir/:file` | Deleted (ADR 0007) | — |
 | `POST /api/sessions/switch` | Deleted (ADR 0007) | — |
+
+`get_web_connection` returns the typed `WebConnectionInfo` used by the store's
+`getWebConnection()` intent: actual `port`, local URL, optional advertised URL,
+and `registrationConfigured`. It does not expose registry paths or credentials,
+probe the gateway, prove a lease, or change connection settings. Account management
+remains an independently executed server-terminal operation, not an RPC method.
 
 ### Frontend Changes
 

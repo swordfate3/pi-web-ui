@@ -4,6 +4,7 @@ dist/
 e2e/.features-gen/
 playwright-report/
 test-results/
+__pycache__/
 
 # Pi session exports
 pi-session-*.html

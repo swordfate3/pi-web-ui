@@ -18,6 +18,7 @@ import type {
   SystemTone,
   ThemeMode,
   Usage,
+  WebConnectionInfo,
   WorkspaceArtifact,
 } from "../types";
 import type { UiText } from "../ui-text";
@@ -30,6 +31,7 @@ export type ConnectionSlice = {
   archAvailable: boolean;
   setClient: (client: PiClient | null) => void;
   send: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+  getWebConnection: () => Promise<WebConnectionInfo>;
   setConnection: (connection: ConnectionState) => void;
   setError: (error: UiText | null) => void;
   applyWebUiState: (payload: Record<string, unknown>) => void;

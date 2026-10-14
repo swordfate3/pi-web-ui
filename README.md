@@ -38,6 +38,12 @@ pi install npm:@kkkiio/pi-web-ui
 
 The server starts automatically when a Pi session begins and shuts down when the session ends.
 
+For phone access, type `/webui-setup` locally or open **Settings → Remote access / Login management**.
+The bilingual wizard generates reviewable connection and Caddy account-management materials;
+it never accepts passwords or executes server administration in the browser. New remote
+templates support Linux/OpenSSH/Caddy with one Pi session, not a multi-session router.
+See [remote setup, password changes and recovery](docs/remote-access.md).
+
 ## Features
 
 ### Chat

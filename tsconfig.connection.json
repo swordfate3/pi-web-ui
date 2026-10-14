@@ -5,9 +5,11 @@
     "extensions/connection-config.ts",
     "extensions/connection-listener.ts",
     "extensions/session-registration.ts",
+    "extensions/remote-access/plan.ts",
     "tests/web-connection.test.ts",
     "tests/session-registration.test.ts",
     "tests/connection-path.test.ts",
-    "tests/service-worker-scope.test.ts"
+    "tests/service-worker-scope.test.ts",
+    "tests/remote-access.test.ts"
   ]
 }

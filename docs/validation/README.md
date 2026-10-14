@@ -2,6 +2,8 @@
 
 人工报告集中在此目录：
 
+- [远程引导与登录管理](remote-access-onboarding.md)：79 个单测、3 个真实 Pi 集成、41 个浏览器 E2E 和隔离真实 Caddy；包含桌面／手机尺寸视觉证据及未部署边界。
+
 - [可移植连接](2026-10-14-portable-web-connection.md)：77 个单测、3 个真实 Pi 后端集成、39 个浏览器 E2E；包含代理子路径与 Chromium 桌面/手机尺寸截图，未测试实际阿里云部署。
 - [简约布局](minimal-validation.md)：27 个真实 E2E 及桌面/手机检查。
 - [双语](i18n-validation.md)：32 个真实 E2E、38 个单测及翻译边界。

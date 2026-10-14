@@ -18,6 +18,7 @@ import {
   WorkspaceStatusFloat,
 } from "./components/pi-web-ui";
 import { ChatList } from "./components/pi-web-ui/chat-list";
+import { RemoteAccessPanel } from "./components/pi-web-ui/remote-access-panel";
 import { ResumeSessionPicker } from "./components/pi-web-ui/resume-session-picker";
 import { SessionDetails, sessionStatsSummary } from "./components/pi-web-ui/session-details";
 import { extractText, processPromptFiles } from "./core/chat-conversion";
@@ -148,6 +149,16 @@ export function App() {
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [remoteAccess, setRemoteAccess] = useState<"access" | "login" | null>(() =>
+    location.hash === "#remote-access" ? "access" : null,
+  );
+  const [remoteHint, setRemoteHint] = useState(() => !readPreference("pi-web-ui-remote-hint-seen"));
+  const closeRemoteAccess = () => {
+    setRemoteAccess(null);
+    setRemoteHint(false);
+    writePreference("pi-web-ui-remote-hint-seen", "1");
+    if (location.hash === "#remote-access") history.replaceState(null, "", location.pathname + location.search);
+  };
   const [commandOpen, setCommandOpen] = useState(false);
   const [statusOverlay, setStatusOverlay] = useState<"context" | "workspace" | null>(null);
   const contextOpen = statusOverlay === "context";
@@ -1020,6 +1031,17 @@ export function App() {
           totalCost={totalCost}
         />
 
+        {remoteHint && !remoteAccess && !settingsOpen && (
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-muted/40 px-4 py-2">
+            <button type="button" className="text-sm underline" onClick={() => setRemoteAccess("access")}>
+              {t("Connect your phone to Pi")}
+            </button>
+            <button type="button" className="text-muted-foreground text-xs" onClick={closeRemoteAccess}>
+              {t("Skip for now")}
+            </button>
+          </div>
+        )}
+
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="relative min-h-0 flex-1">
@@ -1145,12 +1167,17 @@ export function App() {
             setQuery={setModelSearch}
           />
         )}
+        {remoteAccess && <RemoteAccessPanel initialTab={remoteAccess} onClose={closeRemoteAccess} />}
         {settingsOpen && (
           <SettingsPanel
             authConfigured={authConfigured}
             authEnabled={authEnabled}
             autoCompaction={autoCompaction}
             onClose={() => setSettingsOpen(false)}
+            onRemoteAccess={(tab) => {
+              setSettingsOpen(false);
+              setRemoteAccess(tab);
+            }}
             onRenameSession={renameActiveSession}
             onSetAutoCompaction={setAutoCompactionRemote}
             onSetTheme={setThemeMode}

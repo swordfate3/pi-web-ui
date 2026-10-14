@@ -905,6 +905,27 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   // /webui command — open Pi Web UI in browser
   // ═══════════════════════════════════════
+  pi.registerCommand("webui-setup", {
+    description: "Open local remote-access and login-management setup (no server changes)",
+    handler: async (_args, ctx) => {
+      latestCtx = ctx;
+      const address = server?.address();
+      if (!address || typeof address === "string") {
+        ctx.ui.notify("Start Pi Web with /webui-start first", "warning");
+        return;
+      }
+      const url = `${localWebUrl(HOST, address.port)}#remote-access`;
+      const command =
+        process.platform === "darwin" ? "open" : process.platform === "win32" ? "rundll32.exe" : "xdg-open";
+      const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
+      execFile(command, args, (error) => {
+        if (error)
+          latestCtx?.ui.notify("Open the local setup URL shown in Pi; Docker may need a host browser", "warning");
+      });
+      ctx.ui.notify(`Pi Web setup (local, no server changes): ${url}`, "info");
+    },
+  });
+
   pi.registerCommand("webui", {
     description: "Open Pi Web UI in browser",
     handler: async (_args, ctx) => {
@@ -1925,6 +1946,21 @@ export default function (pi: ExtensionAPI) {
             if (err) latestCtx?.ui.notify(`Failed to open file: ${err.message}`, "warning");
           });
           sendTo(ws, success({ ok: true }));
+          break;
+        }
+
+        case "get_web_connection": {
+          const address = server?.address();
+          if (!address || typeof address === "string") throw new Error("Pi Web listener unavailable");
+          sendTo(
+            ws,
+            success({
+              port: address.port,
+              localUrl: localWebUrl(HOST, address.port),
+              advertisedUrl: mirrorUrl,
+              registrationConfigured: Boolean(SETTINGS.registration),
+            }),
+          );
           break;
         }
 

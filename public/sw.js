@@ -1,13 +1,13 @@
 // Pi Web UI Service Worker — minimal, just enables PWA install
 // No aggressive caching since Pi Web UI connects to a live local server
 
-const CACHE_NAME = "pi-web-ui-v1";
+const CACHE_NAME = "pi-web-ui-v2";
 
 // Cache only the app shell on install
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(["/", "/manifest.json", "/icons/tau-192.png", "/icons/tau-512.png"]);
+      return cache.addAll(["/", "/manifest.json", "/icons/pi-web-ui-192.png", "/icons/pi-web-ui-512.png"]);
     }),
   );
   self.skipWaiting();
@@ -17,7 +17,9 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((names) => {
-      return Promise.all(names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name)));
+      return Promise.all(
+        names.filter((name) => name.startsWith("pi-web-ui-") && name !== CACHE_NAME).map((name) => caches.delete(name)),
+      );
     }),
   );
   self.clients.claim();
@@ -27,8 +29,16 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
-  // Don't cache API/WebSocket requests
-  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws")) {
+  // Root PWA owns only its app shell, never proxied sessions or other apps.
+  if (
+    url.origin !== self.location.origin ||
+    event.request.method !== "GET" ||
+    !(
+      ["/", "/index.html", "/manifest.json"].includes(url.pathname) ||
+      url.pathname.startsWith("/assets/") ||
+      url.pathname.startsWith("/icons/")
+    )
+  ) {
     return;
   }
 

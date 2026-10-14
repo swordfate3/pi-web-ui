@@ -24,13 +24,14 @@ We explored introducing a daemon server to manage multiple Pi agent sessions fro
 | Session history | Browse and search past session files |
 | Interactive control | Send prompts, switch models, trigger compaction from the browser |
 | File browser | Browse and open project files from the web UI |
+| External registration client | Optionally advertise this process to a trusted gateway; no process pool or daemon (ADR 0012) |
 
 ### Out of scope
 
 | Non-scope | Why |
 |-----------|-----|
 | Multi-session daemon | Process management belongs in Pi itself |
-| Instance registry | No multi-instance discovery needed |
+| Instance registry server | Discovery/launch/orchestration remain external; an optional client is allowed (ADR 0012) |
 | HTTP Basic Auth | Insecure over cleartext, localhost-only by default |
 
 ## Rationale

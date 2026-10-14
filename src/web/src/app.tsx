@@ -230,7 +230,12 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if ("serviceWorker" in navigator && import.meta.env.PROD) {
+    // Generation-scoped gateway pages must not cache a former live session.
+    if (
+      "serviceWorker" in navigator &&
+      import.meta.env.PROD &&
+      (window.location.pathname === "/" || window.location.pathname === "/index.html")
+    ) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
   }, []);

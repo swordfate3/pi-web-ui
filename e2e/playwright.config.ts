@@ -18,6 +18,9 @@ export default defineConfig({
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
     trace: "retain-on-failure",
+    launchOptions: process.env.PI_E2E_BROWSER_EXECUTABLE
+      ? { executablePath: process.env.PI_E2E_BROWSER_EXECUTABLE }
+      : undefined,
   },
   projects: [
     {

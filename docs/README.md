@@ -6,9 +6,10 @@
 
 - [开发日志](development-log.md)：项目自身的阶段性改动、验证、运行快照和待办。
 - [斜杠命令支持矩阵](slash-command-support.md)：Pi 1.1.0 命令与浏览器边界。
+- [连接配置](connection.md)：无需 WSL 的本地使用、手机访问、代理子路径及可选原生登记。
 - [发布指南](releasing.md)：npm 发布流程；本地未提交快照不等于 npm 发布。
 - [许可证来源](license-provenance.md)：MIT 上游归属、fork 初始化许可证与包名边界。
-- [单测指南](unit-tests.md)：纯逻辑测试及运行命令，命令均从仓库根运行。
+- [单测指南](unit-tests.md)：纯逻辑、临时 IPC/TCP 及真实 Pi 测试，命令均从仓库根运行。
 - [移动端历史说明](mobile.md)：旧移动布局记录，当前行为以 PRD 和验证报告为准。
 - [验证报告索引](validation/README.md)：布局、双语、性能及证据局限。
 

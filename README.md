@@ -72,6 +72,9 @@ Environment variables (set before starting Pi):
 | `PI_WEB_UI_PORT` | `3001` | Server port |
 | `PI_WEB_UI_HOST` | `127.0.0.1` | Bind address |
 | `PI_WEB_UI_DISABLED` | `0` | Set to `1` to disable |
+| `PI_WEB_UI_PUBLIC_URL` | *(none)* | Advertised HTTPS entry; does not create a tunnel |
+| `PI_WEB_UI_REGISTRY_SOCKET` | *(none)* | Optional external registry IPC path |
+| `PI_WEB_UI_REGISTRY_CREDENTIAL_FILE` | *(none)* | Capability file; required together with IPC path |
 | `PI_WEB_UI_STATIC_DIR` | *(bundled)* | Override static files path |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Override Pi config directory |
 | `PI_CODING_AGENT_SESSION_DIR` | *(derived)* | Override Pi session storage directory |
@@ -89,6 +92,12 @@ Or in `~/.pi/agent/settings.json`:
 
 Pi Web UI follows Pi's `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`
 overrides when reading settings and current session state.
+
+Local use does not require WSL or Docker. Explicit environment values override
+settings. Occupied ports advance within a time/range bound, not a fixed instance
+count. Reverse-proxy subpaths are supported natively. See the
+[connection guide](docs/connection.md) for LAN/mobile access, public URLs, optional
+registration, Docker mount requirements and authentication boundaries.
 
 ### Start / Stop
 

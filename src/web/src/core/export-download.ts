@@ -1,8 +1,9 @@
+import { webRoute } from "./connection-path";
 import type { ExportHtmlResult } from "./types";
 import { UiError, uiText } from "./ui-text";
 
 /** Only accept the exact server-owned attachment route, never arbitrary HTML/URLs. */
-export function exportDownloadUrl(result: ExportHtmlResult, origin: string): string {
+export function exportDownloadUrl(result: ExportHtmlResult, origin: string, pathname = "/"): string {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (
     !result ||
@@ -14,8 +15,9 @@ export function exportDownloadUrl(result: ExportHtmlResult, origin: string): str
   ) {
     throw new UiError(uiText("Invalid export download response"));
   }
-  const url = new URL(result.downloadUrl, origin);
-  if (url.origin !== origin || url.pathname !== result.downloadUrl || url.search || url.hash) {
+  const route = webRoute(result.downloadUrl, pathname);
+  const url = new URL(route, origin);
+  if (url.origin !== origin || url.pathname !== route || url.search || url.hash) {
     throw new UiError(uiText("Export download must use the same-origin attachment endpoint"));
   }
   return url.href;
@@ -23,7 +25,7 @@ export function exportDownloadUrl(result: ExportHtmlResult, origin: string): str
 
 export function downloadExport(result: ExportHtmlResult) {
   const anchor = document.createElement("a");
-  anchor.href = exportDownloadUrl(result, window.location.origin);
+  anchor.href = exportDownloadUrl(result, window.location.origin, window.location.pathname);
   anchor.download = result.filename;
   anchor.rel = "noopener";
   document.body.append(anchor);

@@ -14,7 +14,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import {
   type ExtensionAPI,
@@ -23,12 +23,9 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { WebSocket, WebSocketServer } from "ws";
-
-type SettingsData = {
-  port?: string | number;
-  host?: string;
-  disabled?: boolean;
-};
+import { type ConnectionSettings, localWebUrl, resolveConnectionConfig } from "./connection-config.ts";
+import { listenWithFallback } from "./connection-listener.ts";
+import { createSessionRegistration, type SessionRegistration } from "./session-registration.ts";
 
 type BrowserImage = {
   data?: string;
@@ -193,42 +190,28 @@ type AliveWebSocket = WebSocket & {
 
 type WritableSocket = Pick<WebSocket, "readyState" | "send">;
 
-type NodeError = Error & {
-  code?: string;
-};
-
 const AGENT_DIR = path.resolve(
-  (process.env.PI_CODING_AGENT_DIR || path.join(process.env.HOME || "~", ".pi/agent")).replace(
-    /^~(?=$|\/)/,
-    process.env.HOME || "~",
-  ),
+  (process.env.PI_CODING_AGENT_DIR || path.join(homedir(), ".pi/agent")).replace(/^~(?=$|\/)/, homedir()),
 );
 
 // Load pi-web-ui settings from the Pi agent directory (falls back to env vars)
-function loadSettings(): {
-  port: number;
-  host: string;
-  autoStart: boolean;
-} {
-  let settings: SettingsData = {};
+function loadSettings() {
+  let settings: ConnectionSettings = {};
   try {
     const settingsPath = path.join(AGENT_DIR, "settings.json");
     settings =
       (
         JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
-          "pi-web-ui"?: SettingsData;
+          "pi-web-ui"?: ConnectionSettings;
         }
       )["pi-web-ui"] || {};
   } catch {}
-  return {
-    port: parseInt(String(process.env.PI_WEB_UI_PORT || settings.port || "3001"), 10),
-    host: process.env.PI_WEB_UI_HOST || settings.host || "127.0.0.1",
-    autoStart: !(
-      process.env.PI_WEB_UI_DISABLED === "1" ||
-      process.env.PI_WEB_UI_DISABLED === "true" ||
-      settings.disabled === true
-    ),
-  };
+  try {
+    return { ...resolveConnectionConfig(settings), error: undefined };
+  } catch {
+    // Invalid bind configuration must not crash other extensions or silently expose a server.
+    return { ...resolveConnectionConfig({}, {}), autoStart: false, error: "Invalid Pi Web connection settings" };
+  }
 }
 
 const SETTINGS = loadSettings();
@@ -366,6 +349,8 @@ const MIME_TYPES: Record<string, string> = {
 
 export default function (pi: ExtensionAPI) {
   let server: http.Server | null = null;
+  let listenController: AbortController | null = null;
+  let registration: SessionRegistration | null = null;
   let wss: WebSocketServer | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   const clients = new Set<WebSocket>();
@@ -849,6 +834,11 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   async function stopServer() {
     // Fence synchronously, before any server-close or child-process await.
+    listenController?.abort();
+    listenController = null;
+    const closingRegistration = registration;
+    registration = null;
+    const unregistered = closingRegistration?.stop();
     exportGeneration++;
     const closingExport = activeExport;
     closingExport?.controller.abort();
@@ -879,6 +869,7 @@ export default function (pi: ExtensionAPI) {
       });
     }
     if (closingExport) await closingExport.done.catch(() => {});
+    await unregistered;
   }
 
   // ═══════════════════════════════════════
@@ -917,13 +908,23 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("webui", {
     description: "Open Pi Web UI in browser",
     handler: async (_args, ctx) => {
+      latestCtx = ctx;
       if (!mirrorUrl) {
         ctx.ui.notify("pi-web-ui server not running yet", "warning");
         return;
       }
-      const { exec } = require("node:child_process");
-      exec(`open "${mirrorUrl}"`);
-      ctx.ui.notify(`Opened ${mirrorUrl}`, "info");
+      const command =
+        process.platform === "darwin" ? "open" : process.platform === "win32" ? "rundll32.exe" : "xdg-open";
+      const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", mirrorUrl] : [mirrorUrl];
+      // No shell interpolation; configured public URLs are untrusted input.
+      execFile(command, args, (error) => {
+        if (error)
+          latestCtx?.ui.notify(
+            "Could not open a browser automatically; use the Pi Web URL shown in the status",
+            "warning",
+          );
+      });
+      ctx.ui.notify(`pi-web-ui: ${mirrorUrl}`, "info");
       advancedFeaturesEnabled = true;
       // Capture full ExtensionCommandContext for session-control methods (navigateTree, fork, etc.).
       // Cleared on session_start/session_shutdown; user must re-run /webui after session replacement.
@@ -2430,11 +2431,36 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   function startServer() {
     if (server) return; // Already running
-
-    server = http.createServer(serveStaticFile);
+    if (SETTINGS.error) {
+      latestCtx?.ui.notify(SETTINGS.error, "error");
+      return;
+    }
+    for (const warning of SETTINGS.warnings) latestCtx?.ui.notify(warning, "warning");
+    let activeRegistration: SessionRegistration | null = null;
+    if (SETTINGS.registration) {
+      try {
+        activeRegistration = createSessionRegistration(SETTINGS.registration);
+      } catch {
+        latestCtx?.ui.notify(
+          "Pi Web registration unavailable: check the capability file; local Web is still enabled",
+          "warning",
+        );
+      }
+    }
+    registration = activeRegistration;
+    const controller = new AbortController();
+    listenController = controller;
+    const activeServer = http.createServer((request, response) => {
+      if (!activeRegistration || activeRegistration.guard(request, response)) serveStaticFile(request, response);
+    });
+    server = activeServer;
     wss = new WebSocketServer({ noServer: true });
 
-    server.on("upgrade", (request, socket, head) => {
+    activeServer.on("upgrade", (request, socket, head) => {
+      if (activeRegistration && !activeRegistration.guard(request)) {
+        socket.end("HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n");
+        return;
+      }
       if (request.url === "/ws") {
         const activeWss = wss;
         if (!activeWss) {
@@ -2538,34 +2564,41 @@ export default function (pi: ExtensionAPI) {
       if (changed) updateMirrorStatus();
     }, 20000);
 
-    const tryListen = (port: number, maxAttempts = 10) => {
-      const activeServer = server;
-      if (!activeServer) return;
-      activeServer.listen(port, HOST, () => {
-        onListening(port);
-      });
-      activeServer.once("error", (err: NodeError) => {
-        if (err.code === "EADDRINUSE" && port < PORT + maxAttempts) {
-          latestCtx?.ui.setStatus("webui", `pi-web-ui: trying port ${port + 1}`);
-          activeServer.removeAllListeners("error");
-          tryListen(port + 1, maxAttempts);
-        } else {
-          latestCtx?.ui.setStatus("webui", "");
-          latestCtx?.ui.notify(`pi-web-ui failed to start: ${err.message}`, "error");
-          stopServer();
-        }
-      });
-    };
-
     const onListening = (port: number) => {
-      mirrorUrl = `http://${HOST}:${port}`;
-      mirrorStatusBase = `pi-web-ui: ${HOST}:${port}`;
+      if (server !== activeServer || controller.signal.aborted) return;
+      const localUrl = localWebUrl(HOST, port);
+      mirrorUrl = SETTINGS.publicUrl || localUrl;
+      mirrorStatusBase = `pi-web-ui: ${mirrorUrl}`;
       updateMirrorStatus();
-
-      latestCtx?.ui.notify(`pi-web-ui: ${mirrorUrl}`, "info");
+      latestCtx?.ui.notify(
+        `pi-web-ui local: ${localUrl}${SETTINGS.publicUrl ? ` • public: ${SETTINGS.publicUrl}` : ""}`,
+        "info",
+      );
+      if (activeRegistration) {
+        let unavailableNotified = false;
+        void activeRegistration.start(port, (url) => {
+          if (server !== activeServer || controller.signal.aborted) return;
+          const previousUrl = mirrorUrl;
+          mirrorUrl = url || SETTINGS.publicUrl || localUrl;
+          mirrorStatusBase = `pi-web-ui: ${mirrorUrl}${url ? "" : " • registration unavailable"}`;
+          updateMirrorStatus();
+          if (url && url !== previousUrl) latestCtx?.ui.notify(`pi-web-ui public: ${url}`, "info");
+          if (!url && !unavailableNotified) {
+            unavailableNotified = true;
+            latestCtx?.ui.notify("Pi Web registration unavailable; local Web is still running", "warning");
+          }
+        });
+      }
     };
 
-    tryListen(PORT);
+    void listenWithFallback(activeServer, { port: PORT, host: HOST }, controller.signal)
+      .then(onListening)
+      .catch(() => {
+        if (server !== activeServer || controller.signal.aborted) return;
+        latestCtx?.ui.setStatus("webui", "");
+        latestCtx?.ui.notify("Pi Web could not obtain a listening port; check host and port settings", "error");
+        void stopServer();
+      });
   }
 
   // ═══════════════════════════════════════
@@ -2575,6 +2608,7 @@ export default function (pi: ExtensionAPI) {
     latestCtx = ctx;
 
     if (!AUTO_START) {
+      if (SETTINGS.error) latestCtx?.ui.notify(SETTINGS.error, "error");
       return;
     }
 

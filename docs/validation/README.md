@@ -2,6 +2,7 @@
 
 人工报告集中在此目录：
 
+- [可移植连接](2026-10-14-portable-web-connection.md)：77 个单测、3 个真实 Pi 后端集成、39 个浏览器 E2E；包含代理子路径与 Chromium 桌面/手机尺寸截图，未测试实际阿里云部署。
 - [简约布局](minimal-validation.md)：27 个真实 E2E 及桌面/手机检查。
 - [双语](i18n-validation.md)：32 个真实 E2E、38 个单测及翻译边界。
 - [性能优化最终验证](perf-validation.md)：36 个真实 E2E、55 个单测、可比样本与局限。
@@ -9,7 +10,7 @@
 
 ## 原始产物位置
 
-原始测试日志、截图、JSONL 性能数据保留在工作区独立产物目录：
+旧阶段原始测试日志、截图、JSONL 性能数据保留在工作区独立产物目录；2026-10-14 连接验证的截图在报告所列的忽略目录 `test-results/`：
 
 ```text
 ../../../../downloads/pi-web-ui-visual-check/

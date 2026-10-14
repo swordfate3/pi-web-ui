@@ -3,11 +3,10 @@
 Run all commands from the repository root with the supported Node 22.19+ (verified with Node 24). Full suite (tree, i18n, rendering/cache and sidebar logic):
 
 ```sh
-node --import ./tests/register-ts.mjs --test \
-  tests/*.test.ts \
-  src/web/src/core/i18n.test.ts \
-  src/web/src/components/pi-web-ui/sidebar-tree.test.ts
+npm run test:unit
 ```
+
+This includes TypeScript frontend tests and `tests/*.test.mjs` prebuilt-distribution integrity tests. Production install/update lifecycle checks are separate: `node scripts/test-git-install.mjs`.
 
 Only session-tree tests:
 
@@ -39,8 +38,12 @@ node --import ./tests/register-ts.mjs --test e2e/portable-connection.integration
 ```
 
 It checks native registration, HTTP/WS proofs, stop/start/reload/shutdown,
-unavailable registry and port conflicts. It is **backend integration**, not
-browser E2E.
+unavailable registry and port conflicts. Missing/malformed/non-string capabilities
+and disabled registration must reject stale proxy requests while retaining
+header-free local HTTP/WS access. `PI_E2E_RUNTIME_DIR` selects the product
+extension and assets from an installed snapshot; faux/lifecycle fixtures remain
+in the test repository. CI runs these scenarios after obtaining its
+production-only installation. It is **backend integration**, not browser E2E.
 
 ## Remote gateway transaction and real Caddy checks
 

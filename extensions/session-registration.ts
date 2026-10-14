@@ -145,11 +145,37 @@ export class SessionRegistration {
   }
 }
 
+/** Route claims must never fall back to unguarded local access when registration is unavailable. */
+export function guardSessionRequest(
+  registration: SessionRegistration | null,
+  request: IncomingMessage,
+  response?: ServerResponse,
+): boolean {
+  if (registration) return registration.guard(request, response);
+  const identity = request.url?.split("?")[0] === "/.pi-web-identity";
+  if (
+    identity ||
+    request.headers["x-pi-web-generation"] !== undefined ||
+    request.headers["x-pi-web-proof"] !== undefined
+  ) {
+    response?.writeHead(identity ? 403 : 409, { "Cache-Control": "no-store" }).end();
+    return false;
+  }
+  return true;
+}
+
 export function createSessionRegistration(config: RegistrationConfig): SessionRegistration {
   try {
     if (statSync(config.credentialFile).size > 4096) throw new Error();
     const credential = JSON.parse(readFileSync(config.credentialFile, "utf8"));
-    if (!/^[0-9a-f]{32}$/.test(credential?.run_id) || !/^[0-9a-f]{64}$/.test(credential?.token)) throw new Error();
+    if (
+      typeof credential?.run_id !== "string" ||
+      typeof credential?.token !== "string" ||
+      !/^[0-9a-f]{32}$/.test(credential.run_id) ||
+      !/^[0-9a-f]{64}$/.test(credential.token)
+    ) {
+      throw new Error();
+    }
     return new SessionRegistration({ run_id: credential.run_id, token: credential.token }, config.socketPath);
   } catch {
     throw new Error("Invalid Pi Web registration credentials");

@@ -132,7 +132,7 @@ class RealCaddyTests(unittest.TestCase):
             env = {**os.environ, "XDG_DATA_HOME": str(root / "data"), "XDG_CONFIG_HOME": str(root / "config")}
             def caddy(*args, stdin=None):
                 return subprocess.run([os.environ["CADDY_TEST_BIN"], *args], input=stdin, text=True, capture_output=True, check=True, timeout=30, env=env)
-            old_password, new_password = "fixture-old-password", "fixture-new-password"
+            old_password, new_password = "fixture-old-password", "  fixture-密码  "
             old_hash = caddy("hash-password", "--algorithm", "bcrypt", stdin=old_password + "\n").stdout.strip()
             new_hash = caddy("hash-password", "--algorithm", "bcrypt", stdin=new_password + "\n").stdout.strip()
             upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)

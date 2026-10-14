@@ -21,19 +21,49 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Verify committed source and prebuilt assets
+        run: node scripts/web-dist.mjs
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
       - name: Check
         run: |
           npx tsc --noEmit
+          npx tsc --noEmit -p tsconfig.connection.json
           npm run check
 
-      - name: Build
-        run: npm run build:web
+      - name: Build and verify checked-in output parity
+        run: |
+          npm run build:web
+          npm run verify:dist
+          git diff --exit-code -- dist/
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Gateway transaction unit tests
+        run: python3 -m unittest discover -s tests -p 'test_gateway.py'
+
+      - name: Production-only Pi Git install and update
+        env:
+          PI_INSTALL_TEST_BIN: ${{ github.workspace }}/node_modules/.bin/pi
+          PI_INSTALL_TEST_ROOT: ${{ runner.temp }}/pi-web-ui-install-tests
+        run: |
+          node scripts/test-git-install.mjs --keep > "$RUNNER_TEMP/pi-web-ui-install-result.json"
+          cat "$RUNNER_TEMP/pi-web-ui-install-result.json"
+          node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/pi-web-ui-install-result.json"));console.log("PI_E2E_RUNTIME_DIR="+r.installedRuntime)' >> "$GITHUB_ENV"
+          echo "PI_E2E_BIN=$GITHUB_WORKSPACE/node_modules/.bin/pi" >> "$GITHUB_ENV"
+
+      - name: Real Pi connection backend integration against the installed runtime
+        run: node --import ./tests/register-ts.mjs --test e2e/portable-connection.integration.ts
 
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
-      - name: Run real Pi E2E
+      - name: Run real Pi E2E against the production-only installed runtime
         run: npm run e2e
+
+      - name: Clean isolated installation fixtures
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/pi-web-ui-install-tests"

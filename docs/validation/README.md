@@ -2,12 +2,15 @@
 
 人工报告集中在此目录：
 
+- [连接分支集成与审查修复](portable-merge-validation.md)：109 单测、8 项生产安装后端集成、42 浏览器 E2E、Caddy 权限／认证检查及桌面／手机 Browser 视觉；包含失败尝试和跳过项。
+
 - [远程引导与登录管理](remote-access-onboarding.md)：79 个单测、3 个真实 Pi 集成、41 个浏览器 E2E 和隔离真实 Caddy；包含桌面／手机尺寸视觉证据及未部署边界。
 
 - [可移植连接](2026-10-14-portable-web-connection.md)：77 个单测、3 个真实 Pi 后端集成、39 个浏览器 E2E；包含代理子路径与 Chromium 桌面/手机尺寸截图，未测试实际阿里云部署。
 - [简约布局](minimal-validation.md)：27 个真实 E2E 及桌面/手机检查。
 - [双语](i18n-validation.md)：32 个真实 E2E、38 个单测及翻译边界。
 - [性能优化最终验证](perf-validation.md)：36 个真实 E2E、55 个单测、可比样本与局限。
+- [预构建 Git 安装验证](git-install-validation.md)：普通生产依赖安装/更新、真实 prepare 拒绝与正常 pack。
 - [早期基线尝试](perf-baseline-report.md)：包含首次历史加载干扰，仅为历史追溯，不能作为最终性能对比。
 
 ## 原始产物位置

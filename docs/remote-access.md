@@ -58,7 +58,7 @@ python3 gateway.py recover --site-file /path/to/sites/pi.caddy --main-config /pa
 
 脚本仅支持独立、未加引号的单域名文件，且有一个直接、不带 matcher 的 `basic_auth` 块。有效执行路径必须是简单的直接认证、可选 Origin 拒绝及最终代理，认证／Origin 保护不得被全局顺序或前置共享路由绕过。复杂共享文件、额外处理链、认证导入、多个认证块等会拒绝自动修改，需要管理员拆分或手动审查。维护时不要同时使用其他配置编辑器。
 
-脚本使用维护锁、原子替换、原权限／属主保留、`0600` 备份、完整配置校验和有效配置账号检查，再重载现有 Caddy。校验／重载失败恢复原文件；回滚重载也失败会明确要求管理员检查，不报告成功。文件备份是敏感哈希资料，应限制访问和保留期限。
+脚本使用维护锁、原子替换、原权限／属主／属组保留、`0600` 备份、完整配置校验和有效配置账号检查，再重载现有 Caddy。非 root 维护也会在替换前尝试并复核原 UID/GID；无法保留则明确拒绝，不静默改变 Caddy 的读取权限。校验／重载失败恢复原文件；回滚重载也失败会明确要求管理员检查，不报告成功。文件备份是敏感哈希资料，应限制访问和保留期限。
 
 完整配置中的其他监听器必须只使用与目标域名不相交的普通 host 匹配。catch-all、通配或复杂匹配可能绕过认证，脚本会保守拒绝（即使监听端口不同），要求管理员审查；不会仅凭一个受保护站点就断言所有公共入口安全。
 
@@ -86,4 +86,4 @@ Open `/webui-setup` locally or Settings → Remote access / Login management. Ge
 
 Run `gateway.py setup/change/recover` in your trusted server terminal with explicit site/main-config paths. Choose your own account and password; no defaults or browser password fields. Recovery uses your server administration access, not the old web password. A dedicated single-site Caddyfile is required; ambiguous/shared authentication is refused. Docker Caddy requires a directory bind mount. Other accounts are preserved, and failures roll back.
 
-Use `gateway.py verify` for actual anonymous-401/authenticated-200 checks over validated HTTPS. This does not verify WebSockets, leases, mobile reachability, or old-credential revocation. Keep Pi and the SSH tunnel running and use the actual Pi port, regenerating after a port change. Existing gateways keep their existing authentication and need their own compatible registry and mounts.
+Use `gateway.py verify` for actual anonymous-401/authenticated-200 checks over validated HTTPS. This does not verify WebSockets, leases, mobile reachability, or old-credential revocation. Keep Pi and the SSH tunnel running and use the actual Pi port, regenerating after a port change. Maintenance preserves the site's mode, owner and group; if these cannot be preserved, replacement is refused rather than silently changing Caddy's read permissions. Existing gateways keep their existing authentication and need their own compatible registry and mounts.

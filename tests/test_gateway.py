@@ -1,7 +1,10 @@
 import importlib.util
+import os
 import pathlib
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 
 class GatewayTests(unittest.TestCase):
@@ -30,12 +33,155 @@ class GatewayTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 target = pathlib.Path(directory) / "site.caddy"
                 target.write_text(self.original)
+                target.chmod(0o604)
+                original_stat = target.stat()
                 def fail():
                     raise RuntimeError("isolated failure")
                 with self.assertRaises(RuntimeError):
                     self.gateway.apply_config(target, "candidate", fail if step == "validate" else lambda: None, fail if step == "reload" else lambda: None)
                 self.assertEqual(target.read_text(), self.original)
+                restored_stat = target.stat()
+                self.assertEqual((restored_stat.st_uid, restored_stat.st_gid), (original_stat.st_uid, original_stat.st_gid))
+                self.assertEqual(restored_stat.st_mode & 0o7777, original_stat.st_mode & 0o7777)
                 self.assertEqual(len(list(pathlib.Path(directory).glob("site.caddy.backup-*"))), 1)
+
+    def test_atomic_write_skips_chown_when_temporary_file_already_matches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "site.caddy"
+            target.write_text("original")
+            previous_stat = target.stat()
+            self.assertEqual(previous_stat.st_uid, os.geteuid())
+            self.assertEqual(previous_stat.st_gid, os.getegid())
+            with mock.patch.object(self.gateway.os, "fchown") as fchown:
+                self.gateway.atomic_write(target, "replacement", previous_stat)
+            fchown.assert_not_called()
+            self.assertEqual(target.read_text(), "replacement")
+            replaced_stat = target.stat()
+            self.assertEqual((replaced_stat.st_uid, replaced_stat.st_gid), (previous_stat.st_uid, previous_stat.st_gid))
+            self.assertEqual(replaced_stat.st_mode & 0o7777, previous_stat.st_mode & 0o7777)
+
+    def test_unpreservable_owner_refuses_replacement_and_closes_fd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "site.caddy"
+            target.write_text("original")
+            original_stat = target.stat()
+            requested_stat = types.SimpleNamespace(
+                st_uid=original_stat.st_uid,
+                st_gid=original_stat.st_gid + 1,
+                st_mode=original_stat.st_mode,
+            )
+            real_mkstemp = self.gateway.tempfile.mkstemp
+            created = {}
+            def capture_mkstemp(*args, **kwargs):
+                created["fd"], created["path"] = real_mkstemp(*args, **kwargs)
+                return created["fd"], created["path"]
+            with mock.patch.object(self.gateway.tempfile, "mkstemp", side_effect=capture_mkstemp), mock.patch.object(
+                self.gateway.os, "geteuid", return_value=1000
+            ), mock.patch.object(
+                self.gateway.os, "fchown", side_effect=PermissionError("synthetic permission denial")
+            ) as fchown:
+                with self.assertRaisesRegex(PermissionError, "Cannot preserve site file UID/GID"):
+                    self.gateway.atomic_write(target, "replacement", requested_stat)
+            fchown.assert_called_once_with(created["fd"], requested_stat.st_uid, requested_stat.st_gid)
+            self.assertEqual(target.read_text(), "original")
+            self.assertEqual((target.stat().st_uid, target.stat().st_gid), (original_stat.st_uid, original_stat.st_gid))
+            self.assertFalse(pathlib.Path(created["path"]).exists())
+            with self.assertRaises(OSError):
+                os.fstat(created["fd"])
+
+    def test_unverified_owner_change_refuses_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "site.caddy"
+            target.write_text("original")
+            original_stat = target.stat()
+            requested_stat = types.SimpleNamespace(
+                st_uid=original_stat.st_uid,
+                st_gid=original_stat.st_gid + 1,
+                st_mode=original_stat.st_mode,
+            )
+            with mock.patch.object(self.gateway.os, "fchown") as fchown:
+                with self.assertRaisesRegex(PermissionError, "Cannot preserve site file UID/GID"):
+                    self.gateway.atomic_write(target, "replacement", requested_stat)
+            fchown.assert_called_once()
+            self.assertEqual(target.read_text(), "original")
+            self.assertEqual((target.stat().st_uid, target.stat().st_gid), (original_stat.st_uid, original_stat.st_gid))
+
+    def test_rollback_owner_failure_keeps_candidate_and_reports_refusal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "site.caddy"
+            target.write_text(self.original)
+            real_fstat = self.gateway.os.fstat
+            fstat_calls = 0
+            def report_unexpected_rollback_gid(fd):
+                nonlocal fstat_calls
+                fstat_calls += 1
+                result = real_fstat(fd)
+                if fstat_calls >= 5:
+                    return types.SimpleNamespace(st_uid=result.st_uid, st_gid=result.st_gid + 1, st_mode=result.st_mode)
+                return result
+            def fail_validation():
+                raise RuntimeError("isolated rollback trigger")
+            with mock.patch.object(self.gateway.os, "fstat", side_effect=report_unexpected_rollback_gid), mock.patch.object(
+                self.gateway.os, "fchown", side_effect=PermissionError("synthetic rollback permission denial")
+            ) as fchown:
+                with self.assertRaisesRegex(PermissionError, "Cannot preserve site file UID/GID"):
+                    self.gateway.apply_config(target, "candidate", fail_validation, lambda: None)
+            fchown.assert_called_once()
+            self.assertEqual(target.read_text(), "candidate")
+            self.assertEqual((target.stat().st_uid, target.stat().st_gid), (os.geteuid(), os.getegid()))
+
+    def test_atomic_write_mode_failure_closes_fd_and_keeps_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "site.caddy"
+            target.write_text("original")
+            previous_stat = target.stat()
+            real_mkstemp = self.gateway.tempfile.mkstemp
+            created = {}
+            def capture_mkstemp(*args, **kwargs):
+                created["fd"], created["path"] = real_mkstemp(*args, **kwargs)
+                return created["fd"], created["path"]
+            with mock.patch.object(self.gateway.tempfile, "mkstemp", side_effect=capture_mkstemp), mock.patch.object(
+                self.gateway.os, "fchmod", side_effect=PermissionError("synthetic mode denial")
+            ):
+                with self.assertRaises(PermissionError):
+                    self.gateway.atomic_write(target, "replacement", previous_stat)
+            self.assertEqual(target.read_text(), "original")
+            self.assertFalse(pathlib.Path(created["path"]).exists())
+            with self.assertRaises(OSError):
+                os.fstat(created["fd"])
+
+    def test_atomic_write_and_rollback_preserve_distinct_group_when_available(self):
+        if not hasattr(os, "chown") or not hasattr(os, "getgroups"):
+            self.skipTest("POSIX chown and supplementary group APIs are unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory) / "site.caddy"
+            target.write_text(self.original)
+            original_gid = target.stat().st_gid
+            candidate_gids = sorted(set(os.getgroups() + [os.getegid()]) - {original_gid})
+            if not candidate_gids and os.geteuid() == 0 and original_gid < 2**31 - 1:
+                # Root can safely assign an arbitrary distinct GID to this
+                # throwaway file; no system account/group is created or changed.
+                candidate_gids = [original_gid + 1]
+            if not candidate_gids:
+                self.skipTest("No different current/supplementary GID is available to a non-root process")
+            try:
+                os.chown(target, -1, candidate_gids[0])
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f"Filesystem/process cannot assign an already-held group to a temporary test file: {type(error).__name__}")
+            original_stat = target.stat()
+            target.chmod(0o4604)
+            original_stat = target.stat()
+            def fail_validation():
+                candidate_stat = target.stat()
+                self.assertEqual((candidate_stat.st_uid, candidate_stat.st_gid), (original_stat.st_uid, original_stat.st_gid))
+                self.assertEqual(candidate_stat.st_mode & 0o7777, original_stat.st_mode & 0o7777)
+                raise RuntimeError("isolated rollback trigger")
+            with self.assertRaisesRegex(RuntimeError, "isolated rollback trigger"):
+                self.gateway.apply_config(target, "candidate", fail_validation, lambda: None)
+            self.assertEqual(target.read_text(), self.original)
+            restored_stat = target.stat()
+            self.assertEqual((restored_stat.st_uid, restored_stat.st_gid), (original_stat.st_uid, original_stat.st_gid))
+            self.assertEqual(restored_stat.st_mode & 0o7777, original_stat.st_mode & 0o7777)
 
     def test_new_site_failure_removes_only_candidate(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -156,6 +156,9 @@ HMAC uses the token's literal string as its key, not decoded hex bytes.
 For proxied HTTP/WS, the gateway supplies `x-pi-web-generation` and
 `x-pi-web-proof = HMAC-SHA256(token, generation)`. Missing/incorrect pairs are
 rejected with 409; direct local requests with neither header remain allowed.
+Routing headers are also rejected when native registration is disabled or its
+capability cannot be loaded. In that state identity requests fail with 403,
+rather than silently treating a stale proxy route as direct local access.
 These proofs fence stale process routes; **they are not human authentication**.
 The gateway must authenticate users, strip untrusted client-supplied routing
 headers, add its own proofs, use TLS and enforce its own lease expiry.

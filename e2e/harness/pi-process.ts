@@ -21,7 +21,8 @@ export type PiWebUiHarnessOptions = {
 
 export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessOptions = {}): Promise<PiWebUiHarness> {
   const repoRoot = path.resolve(__dirname, "../..");
-  const runtimeDir = options.runtimeDir ? path.resolve(options.runtimeDir) : repoRoot;
+  const selectedRuntime = options.runtimeDir ?? process.env.PI_E2E_RUNTIME_DIR;
+  const runtimeDir = selectedRuntime ? path.resolve(selectedRuntime) : repoRoot;
   const tempRoot = mkdtempSync(path.join(tmpdir(), "pi-web-ui-e2e-"));
   const workspaceDir = path.join(tempRoot, "workspace");
   const externalDir = path.join(tempRoot, "external");

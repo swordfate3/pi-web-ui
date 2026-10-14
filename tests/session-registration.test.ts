@@ -6,7 +6,11 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createSessionRegistration, SessionRegistration } from "../extensions/session-registration.ts";
+import {
+  createSessionRegistration,
+  guardSessionRequest,
+  SessionRegistration,
+} from "../extensions/session-registration.ts";
 
 const credential = { run_id: "a".repeat(32), token: "b".repeat(64) };
 const proof = (text: string) => createHmac("sha256", credential.token).update(text).digest("hex");
@@ -71,7 +75,7 @@ test("identity requires a signed challenge and gateway generation proofs protect
   await lifecycle.start(43210, () => {});
   t.after(() => lifecycle.stop());
   const server = http.createServer((req, res) => {
-    if (lifecycle.guard(req, res)) res.writeHead(200).end("local");
+    if (guardSessionRequest(lifecycle, req, res)) res.writeHead(200).end("local");
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(
@@ -201,8 +205,66 @@ test("an ended generation is replaced on renewal rather than reused", async (t) 
   await lifecycle.stop();
 });
 
-test("malformed capability file fails with a generic error", async (t) => {
-  const fixture = await registry(t, (_request, socket) => socket.end());
-  writeFileSync(fixture.credentialFile, '{"run_id":"secret"}');
-  assert.throws(() => createSessionRegistration(fixture), /Invalid Pi Web registration credentials$/);
+test("missing and malformed capability files fail with a generic error, without coercing fields", (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "pi-capability-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const config = { credentialFile: path.join(dir, "capability.json"), socketPath: path.join(dir, "r.sock") };
+  const rejected = () =>
+    assert.throws(() => createSessionRegistration(config), {
+      name: "Error",
+      message: "Invalid Pi Web registration credentials",
+    });
+  rejected();
+  for (const contents of ["not-json", "null", "[]", "{}", '"secret"', "x".repeat(4097)]) {
+    writeFileSync(config.credentialFile, contents);
+    rejected();
+  }
+  for (const field of ["run_id", "token"] as const) {
+    for (const value of [[credential[field]], [[credential[field]]], null, {}, 123, true, "invalid"]) {
+      writeFileSync(config.credentialFile, JSON.stringify({ ...credential, [field]: value }));
+      rejected();
+    }
+  }
+});
+
+test("no registration denies route claims and identity but preserves headerless local access", async (t) => {
+  const server = http.createServer((req, res) => {
+    if (guardSessionRequest(null, req, res)) res.writeHead(200).end("local");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(
+    () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  );
+  const url = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
+  const generation = "d".repeat(32);
+  const claims: Record<string, string>[] = [
+    { "x-pi-web-generation": generation, "x-pi-web-proof": proof(generation) },
+    { "x-pi-web-generation": generation },
+    { "x-pi-web-proof": proof(generation) },
+    { "x-pi-web-generation": "" },
+    { "x-pi-web-proof": "" },
+  ];
+  for (const headers of claims) {
+    const response = await fetch(url, { headers });
+    assert.equal(response.status, 409);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(await response.text(), "");
+    // Upgrade requests use the same guard without a ServerResponse.
+    assert.equal(guardSessionRequest(null, { url: "/ws", headers } as http.IncomingMessage), false);
+  }
+  const challenge = "c".repeat(48);
+  for (const suffix of ["/.pi-web-identity", "/.pi-web-identity?probe=1"]) {
+    const response = await fetch(`${url}${suffix}`, {
+      headers: { "x-pi-web-challenge": challenge, "x-pi-web-challenge-proof": proof(challenge) },
+    });
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(await response.text(), "");
+  }
+  assert.equal(await (await fetch(url)).text(), "local");
+  assert.equal(guardSessionRequest(null, { url: "/ws", headers: {} } as http.IncomingMessage), true);
 });

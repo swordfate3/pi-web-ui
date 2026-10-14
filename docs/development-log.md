@@ -157,7 +157,17 @@
 - 发布前 Biome/build/diff 检查和 55 项单测通过；此前 36 个真实 E2E 结果仍作为功能证据，本次仅元数据/文档/忽略规则变更未重跑浏览器套件。
 - 本节记录发布准备，不预先宣称 push 成功；最终提交与远端状态以 Git 为准。
 
-## 09 · 可移植连接管理（2026-10-14）
+## 09 · Git 安装无需开发工具
+
+- 修正旧 prepare 在生产依赖安装时调用 Vite/TypeScript 的问题；安装不再构建或另行下载资产。
+- 前端完整 `dist/` 随安装 ref 提交，新增确定性 source/output manifest；prepare 使用 Node 内建校验，完整源码与产物不同步时拒绝安装。安装时仅豁免 npm 可能写回的 lock 字节，CI/default 仍验证 lock。
+- 生产依赖缩减为 `ws`；React/diff/Zustand 归为构建依赖，Pi 1.1 仅作为开发测试 runner，不在消费包中嵌套安装。
+- CI 增加提交产物检查、重建一致性、72 项单测、真实 Pi 生产安装/更新及生产安装版 E2E。
+- 本地验证：真实 install/update/tarball 通过；真实 Pi 安装过期源码 commit 被 prepare 拒绝；仅 1 个运行依赖；36 项真实 E2E 通过。干净 dev install 重建一致，正常 npm pack 完成（685 文件/约 4.8 MB 压缩包）。
+- 不修改用户 package settings、不升级现有启用包、不自动 reload 会话。维护者已授权将本批源码与产物一起发布到远程 main；实际发布提交以 Git 历史为准，GitHub CI 运行结果另行核对。
+- 详见 [ADR 0007](adr/0007-npm-publish-distribution-strategy.md)、[安装验证](validation/git-install-validation.md)。
+
+## 10 · 可移植连接管理（2026-10-14）
 
 ### 改动原因与实现
 
@@ -176,7 +186,7 @@
 
 详见 [connection.md](connection.md)、[ADR 0012](adr/0012-portable-web-connection.md) 和 [验证报告](validation/2026-10-14-portable-web-connection.md)。
 
-## 10 · 远程访问引导与登录信息管理（2026-10-14）
+## 11 · 远程访问引导与登录信息管理（2026-10-14）
 
 - 将已批准设计实现为中英双语向导：可跳过首访提示、设置入口及 `/webui-setup` 本地入口，不依赖公网先可用。
 - 非敏感计划严格校验，显式保存浏览器草稿，预览／下载部署材料。只读连接 RPC 使用 typed store intent，返回实际监听端口，不泄露登记凭据。
@@ -190,6 +200,19 @@
 - 本次交付既有功能分支，不合并 main，不发布 npm，不安装到共享 Pi 卷，不修改现有密码、容器或隧道。远端提交状态以交付时 Git 验证为准。
 
 详见 [使用指南](remote-access.md)、[验证报告](validation/remote-access-onboarding.md)。
+
+## 12 · 连接分支集成与审查修复
+
+- 在独立 worktree 将 main 的预构建安装改造集成到连接分支；保留 main 的 Node-only prepare、`ws` 单运行依赖和 tracked dist，不把旧安装编译流程带回主线。
+- `package.json` 合并安装校验文件、许可证／图片和远程操作指南；开发日志保留两侧记录并统一编号。
+- 登记能力不可用或未启用时，带代理路由标识的 HTTP／WS 请求失败关闭；无路由标识的本地访问仍可用。能力文件严格拒绝非字符串字段。
+- 网关原子替换在非 root 路径保留并复核 UID/GID/mode，失败拒绝；前端 reducer 保护用户端口编辑，自动端口变化使材料失效，不应用旧计划的结果。
+- 构建清单纳入连接模块和位于 extension 目录的浏览器 plan／gateway 输入；真实生产安装负例扩大到外部浏览器输入，避免源码改变而产物校验仍通过。
+- 默认 E2E harness 统一消费 `PI_E2E_RUNTIME_DIR`，新增向导／子路径场景也可验证生产安装副本，而非意外回退开发源码。
+- CI 补连接模块类型检查、真实 Pi 后端集成及 Python 事务测试；真实 Caddy 检查仍按文档显式提供 binary，在没有 binary 的环境不冒充已执行。
+- 最终验证：109 单测、8 项生产安装真实 Pi 后端集成、42 浏览器 E2E 通过；Python 19 项中 18 执行通过、1 因不同组权限缺失跳过。普通 install/update/tarball 和三种真实 prepare 负例通过；正常 pack 重建与已验证安装产物一致。
+- 独立复审指出的测试运行时选择／页面对象问题已修；完整 E2E 的 Markdown 弹窗历史同步竞态改为等待真实 settled snapshot，保留失败证据、不跳过断言。
+- 验证完成后维护者授权提交候选、合入 main 并发布 GitHub；实际提交／远端状态以 Git 历史为准。不更新共享 Pi 包，不修改 WSL／公网隧道。详见 [集成验证](validation/portable-merge-validation.md)。
 
 ## 后续工作与已知限制
 

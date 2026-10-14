@@ -23,6 +23,7 @@
       "tests/connection-path.test.ts",
       "tests/service-worker-scope.test.ts",
       "tests/remote-access.test.ts",
+      "tests/remote-access-draft-state.test.ts",
       "tsconfig.json",
       "tsconfig.connection.json",
       "vite.config.ts"

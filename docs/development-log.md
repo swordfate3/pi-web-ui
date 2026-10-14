@@ -234,6 +234,15 @@
 - 新鲜回归：132 项 Node 单元／真实 Pi 集成、45 项源码浏览器、9 项生产安装后端及 45 项生产安装浏览器通过；普通 install/update/tarball 以及六类过期源码拒绝通过。细节、失败尝试和实际部署边界见总管验证报告。
 - 此次只交付 `codex/portable-web-connection` 分支，不合并 main、不发布 npm、不更新共享 Pi 包，不自动启动总管或改变 pirun 挂载。
 
+## 14 · 总管分支二次集成审查
+
+- 拉取 `22ba8c7`；候选已包含 `847079e`，main 可快进，无机械冲突。保留独立可选 hub、生产 `ws` 单依赖和预构建安装策略，不替换实际 WSL 服务或共享 Pi 设置。
+- 修复分发清单未强制包含预构建 hub，以及继承属性名未知命令可能误启动总管；分别补缺失输出和 CLI 失败回归。
+- 总管 browser/backend fixture 改为执行选定 runtime 的构建 CLI，不再直接导入源码 server；Git update／tarball 内实际 init/issue/serve/HTTP/revoke/SIGTERM 通过，无源码回退。
+- 本轮 132 单测、9 生产安装后端、45 完整生产安装浏览器通过；Python/Caddy 19 项中 18 执行通过、1 权限条件不足跳过。正常 pack 重建与已测 runtime manifest 一致；Browser MCP 实看桌面／手机总入口截图。
+- 独立服务端审查无确认问题；CLI／分发审查发现修后复核无剩余必须修项。仅本地集成验证，不预先宣称远程发布；最终分支状态以 Git 为准。
+- 详见 [本轮验证](validation/hub-merge-validation.md)。没有自动更新运行中 Pi、启动生产总管或改公网隧道。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。

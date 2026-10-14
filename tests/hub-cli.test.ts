@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { startHubCli } from "../e2e/harness/hub-cli.ts";
 
 const cli = fileURLToPath(new URL("../dist/hub/pi-web-hub.mjs", import.meta.url));
 test("CLI initializes once and issues private individual credentials without printing tokens", (t) => {
@@ -38,8 +39,13 @@ test("standalone hub serves a portal and shuts down cleanly on SIGTERM", { timeo
   t.after(async () => {
     if (child.exitCode === null && child.signalCode === null) {
       const closed = new Promise((resolve) => child.once("exit", resolve));
+      const timer = setTimeout(() => child.kill("SIGKILL"), 2000);
       child.kill("SIGTERM");
-      await closed;
+      try {
+        await closed;
+      } finally {
+        clearTimeout(timer);
+      }
     }
     rmSync(dir, { recursive: true, force: true });
   });
@@ -84,5 +90,65 @@ test("standalone hub serves a portal and shuts down cleanly on SIGTERM", { timeo
   } finally {
     clearTimeout(timer);
     peer.destroy();
+  }
+});
+
+test("unknown and inherited-object command names never start a hub through the default config", async (t) => {
+  for (const command of ["toString", "constructor", "__proto__", "hasOwnProperty", "not-a-command"]) {
+    await t.test(command, () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "pi-hub-cli-command-"));
+      try {
+        const config = path.join(dir, "config.json");
+        assert.equal(spawnSync(process.execPath, [cli, "init", "--config", config, "--port", "0"]).status, 0);
+        // No remaining arguments: the old inherited-property lookup skipped parsing and fell through to serve.
+        const result = spawnSync(process.execPath, [cli, command], {
+          env: { ...process.env, PI_WEB_UI_HUB_CONFIG: config },
+          encoding: "utf8",
+          timeout: 2000,
+          killSignal: "SIGKILL",
+        });
+        assert.equal(result.error, undefined, "unknown command must exit rather than listen until killed");
+        assert.equal(result.status, 1);
+        assert.equal(result.stdout, "");
+        assert.match(result.stderr, /Pi Web Hub failed/);
+        assert.equal(existsSync(path.join(dir, "runtime", "registry.sock")), false);
+        assert.equal(existsSync(path.join(dir, "runtime", "hub.lock")), false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("E2E hub helper runs packaged CLI lifecycle without exposing capability tokens", { timeout: 15000 }, async () => {
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const hub = await startHubCli({ repositoryRoot, runtimeDir: repositoryRoot });
+  try {
+    const capability = hub.issue("Synthetic CLI fixture");
+    assert.deepEqual(Object.keys(capability).sort(), ["credentialFile", "runId", "socketPath"]);
+    assert.equal((await fetch(`${hub.url}sessions/`)).status, 200);
+    hub.revoke(capability);
+    const grantFile = path.join(path.dirname(capability.credentialFile), "state", "grants", `${capability.runId}.json`);
+    assert.equal(JSON.parse(readFileSync(grantFile, "utf8")).revoked, true);
+    await hub.restart();
+    assert.equal((await fetch(`${hub.url}sessions/`)).status, 200);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("E2E hub helper honors PI_E2E_RUNTIME_DIR without falling back to repository sources", async () => {
+  const runtimeDir = mkdtempSync(path.join(tmpdir(), "pi-hub-missing-runtime-"));
+  const previousRuntime = process.env.PI_E2E_RUNTIME_DIR;
+  process.env.PI_E2E_RUNTIME_DIR = runtimeDir;
+  try {
+    await assert.rejects(
+      startHubCli({ repositoryRoot: fileURLToPath(new URL("..", import.meta.url)) }),
+      /selected runtime's Hub CLI/,
+    );
+  } finally {
+    if (previousRuntime === undefined) delete process.env.PI_E2E_RUNTIME_DIR;
+    else process.env.PI_E2E_RUNTIME_DIR = previousRuntime;
+    rmSync(runtimeDir, { recursive: true, force: true });
   }
 });

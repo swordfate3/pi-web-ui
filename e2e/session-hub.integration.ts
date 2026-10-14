@@ -1,12 +1,8 @@
 // Backend integration: independent hub and real Pi processes, without browser mocks.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { initializeHub, issueSession, readHubConfig } from "../hub/config.ts";
-import { startHub } from "../hub/server.ts";
+import { type HubCapability, startHubCli } from "./harness/hub-cli.ts";
 import { type PiWebUiHarness, startPiWebUi } from "./harness/pi-process.ts";
 
 async function eventually<T>(read: () => Promise<T>, accepts: (value: T) => boolean, timeout = 10000): Promise<T> {
@@ -22,24 +18,26 @@ async function eventually<T>(read: () => Promise<T>, accepts: (value: T) => bool
 test("two real Pi processes register; one exit leaves the second reachable; hub restart fences old links", {
   timeout: 65000,
 }, async (t) => {
-  const dir = mkdtempSync(path.join(tmpdir(), "pi-hub-real-"));
-  const file = path.join(dir, "config.json");
-  initializeHub(file, { port: 0 });
-  const config = readHubConfig(file);
-  let hub = await startHub(config);
+  const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+  const hub = await startHubCli({ repositoryRoot });
   const agents: PiWebUiHarness[] = [];
+  const capabilities: HubCapability[] = [];
   t.after(async () => {
-    for (const agent of agents) await agent.stop();
-    await hub.close();
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      const results = await Promise.allSettled(agents.map((agent) => agent.stop()));
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+    } finally {
+      await hub.close();
+    }
   });
   for (const label of ["A", "B"]) {
-    const credentialFile = path.join(dir, `${label}.json`);
-    issueSession(config, credentialFile, { label });
+    const capability = hub.issue(label);
+    capabilities.push(capability);
     agents.push(
       await startPiWebUi("chat-lifecycle", {
-        repositoryRoot: fileURLToPath(new URL("..", import.meta.url)),
-        registration: { socketPath: hub.socketPath, credentialFile },
+        repositoryRoot,
+        registration: capability,
       }),
     );
   }
@@ -58,11 +56,13 @@ test("two real Pi processes register; one exit leaves the second reachable; hub 
   await eventually(list, (value) => value.sessions.length === 1);
   assert.equal((await fetch(`${hub.url.slice(0, -1)}${oldA}`)).status, 410);
   assert.equal((await fetch(`${hub.url.slice(0, -1)}${oldB}`)).status, 200);
-  await hub.close();
-  hub = await startHub(config);
+  await hub.restart();
   assert.equal((await list()).sessions.length, 0);
   assert.equal((await fetch(`${hub.url.slice(0, -1)}${oldB}`)).status, 410);
   const renewed = await eventually(list, (value) => value.sessions.length === 1, 40000);
   assert.notEqual(renewed.sessions[0].path, oldB);
   assert.equal((await fetch(`${hub.url.slice(0, -1)}${renewed.sessions[0].path}`)).status, 200);
+  hub.revoke(capabilities[1]);
+  assert.equal((await fetch(`${hub.url.slice(0, -1)}${renewed.sessions[0].path}`)).status, 410);
+  await eventually(list, (value) => value.sessions.length === 0);
 });

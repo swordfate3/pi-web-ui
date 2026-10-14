@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const DEFAULT_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MANIFEST_NAME = "build-manifest.json";
 const SCHEMA_VERSION = 1;
+const REQUIRED_OUTPUTS = ["index.html", "hub/pi-web-hub.mjs"];
 const SOURCE_DIRECTORIES = ["src/web", "public", "hub", "bin"];
 const SOURCE_FILES = [
   "vite.config.ts",
@@ -170,8 +171,8 @@ async function inventoryOutputs(root) {
   const distDirectory = await checkedDirectory(root, "dist");
   await walkOutputDirectory(root, distDirectory, "dist", records);
   const inventory = makeInventory(records);
-  if (!inventory.files.some((entry) => entry.path === "index.html")) {
-    fail("Build output is incomplete: dist/index.html is missing");
+  for (const key of REQUIRED_OUTPUTS) {
+    if (!inventory.files.some((entry) => entry.path === key)) fail(`Build output is incomplete: dist/${key} is missing`);
   }
   await validateHtmlReferences(root, inventory);
   return inventory;
@@ -306,8 +307,8 @@ function validateManifest(manifest) {
   }
   validateInventory(manifest.source, "source");
   validateInventory(manifest.outputs, "outputs");
-  if (!manifest.outputs.files.some((entry) => entry.path === "index.html")) {
-    fail("Invalid manifest: outputs must include index.html");
+  for (const key of REQUIRED_OUTPUTS) {
+    if (!manifest.outputs.files.some((entry) => entry.path === key)) fail(`Invalid manifest: outputs must include ${key}`);
   }
 }
 

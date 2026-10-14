@@ -23,12 +23,13 @@ async function main(args) {
     process.stdout.write(help);
     return;
   }
-  const permitted = {
-    init: ["--config", "--port", "--public-url"],
-    serve: ["--config"],
-    issue: ["--config", "--label", "--output", "--backend-host"],
-    revoke: ["--config", "--run-id"],
-  }[command];
+  const commands = new Map([
+    ["init", ["--config", "--port", "--public-url"]],
+    ["serve", ["--config"]],
+    ["issue", ["--config", "--label", "--output", "--backend-host"]],
+    ["revoke", ["--config", "--run-id"]],
+  ]);
+  const permitted = commands.get(command);
   if (!permitted) throw new Error("Unknown hub command; use --help");
   const options = new Map();
   while (args.length) {
@@ -70,7 +71,7 @@ async function main(args) {
     if (!options.has("--run-id")) throw new Error("revoke requires --run-id");
     revokeSession(config, options.get("--run-id"));
     process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
-  } else {
+  } else if (command === "serve") {
     const hub = await startHub(config);
     process.stdout.write(
       `${JSON.stringify({ localUrl: hub.url, portalUrl: `${config.publicUrl ?? hub.url}sessions/`, socketPath: hub.socketPath })}\n`,
@@ -90,6 +91,8 @@ async function main(args) {
     };
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
+  } else {
+    throw new Error("Unknown hub command; use --help");
   }
 }
 

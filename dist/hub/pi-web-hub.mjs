@@ -748,21 +748,21 @@ async function main(args) {
 		process.stdout.write(help);
 		return;
 	}
-	const permitted = {
-		init: [
+	const permitted = new Map([
+		["init", [
 			"--config",
 			"--port",
 			"--public-url"
-		],
-		serve: ["--config"],
-		issue: [
+		]],
+		["serve", ["--config"]],
+		["issue", [
 			"--config",
 			"--label",
 			"--output",
 			"--backend-host"
-		],
-		revoke: ["--config", "--run-id"]
-	}[command];
+		]],
+		["revoke", ["--config", "--run-id"]]
+	]).get(command);
 	if (!permitted) throw new Error("Unknown hub command; use --help");
 	const options = /* @__PURE__ */ new Map();
 	while (args.length) {
@@ -807,7 +807,7 @@ async function main(args) {
 		if (!options.has("--run-id")) throw new Error("revoke requires --run-id");
 		revokeSession(config, options.get("--run-id"));
 		process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
-	} else {
+	} else if (command === "serve") {
 		const hub = await startHub(config);
 		process.stdout.write(`${JSON.stringify({
 			localUrl: hub.url,
@@ -826,7 +826,7 @@ async function main(args) {
 		};
 		process.on("SIGINT", stop);
 		process.on("SIGTERM", stop);
-	}
+	} else throw new Error("Unknown hub command; use --help");
 }
 main(process.argv.slice(2)).catch(() => {
 	process.stderr.write("Pi Web Hub failed. Check arguments, private file permissions, configuration and port/socket availability. Use --help.\n");

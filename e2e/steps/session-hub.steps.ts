@@ -1,15 +1,12 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { type BrowserContext, expect, type Page } from "@playwright/test";
 import { createBdd } from "playwright-bdd";
-import { initializeHub, issueSession, readHubConfig } from "../../hub/config";
-import { startHub } from "../../hub/server";
+import { type HubCapability, type HubCliHarness, startHubCli } from "../harness/hub-cli";
 import { type PiWebUiHarness, startPiWebUi } from "../harness/pi-process";
 
 const { When, Then, After } = createBdd();
-let dir: string | undefined;
-let hub: Awaited<ReturnType<typeof startHub>> | undefined;
+let hub: HubCliHarness | undefined;
+let capabilities: HubCapability[] = [];
 let context: BrowserContext | undefined;
 let browserPage: Page | undefined;
 let agents: PiWebUiHarness[] = [];
@@ -21,23 +18,17 @@ function page() {
   return browserPage;
 }
 async function manager() {
-  dir = mkdtempSync(path.join(tmpdir(), "pi-hub-browser-"));
-  const configFile = path.join(dir, "config.json");
-  initializeHub(configFile, { port: 0 });
-  const config = readHubConfig(configFile);
-  hub = await startHub(config);
-  return config;
+  hub = await startHubCli({ repositoryRoot: path.resolve(__dirname, "../..") });
+  return hub;
 }
 
 When("我在 {string} 打开有两个真实 Pi 的总管首页", async ({ browser }, viewport: string) => {
   screen = viewport;
-  const config = await manager();
+  const managerCli = await manager();
   for (const label of ["工作项目 Alpha", "移动端 Beta"]) {
-    const credentialFile = path.join(dir ?? "", `${label}.json`);
-    issueSession(config, credentialFile, { label });
-    agents.push(
-      await startPiWebUi("chat-lifecycle", { registration: { socketPath: config.socketPath, credentialFile } }),
-    );
+    const capability = managerCli.issue(label);
+    capabilities.push(capability);
+    agents.push(await startPiWebUi("chat-lifecycle", { registration: capability }));
   }
   context = await browser.newContext({
     locale: "zh-CN",
@@ -107,13 +98,22 @@ Then("首页显示无会话提示而不是空白页面", async () => {
 });
 
 After(async () => {
-  await context?.close();
-  context = undefined;
-  browserPage = undefined;
-  for (const agent of agents) await agent.stop();
-  agents = [];
-  await hub?.close();
-  hub = undefined;
-  if (dir) rmSync(dir, { recursive: true, force: true });
-  dir = undefined;
+  const results = await Promise.allSettled([context?.close()]);
+  try {
+    results.push(...(await Promise.allSettled(agents.map(async (agent) => agent.stop()))));
+    results.push(...(await Promise.allSettled(capabilities.map(async (capability) => hub?.revoke(capability)))));
+  } finally {
+    results.push(...(await Promise.allSettled([hub?.close()])));
+    context = undefined;
+    browserPage = undefined;
+    agents = [];
+    capabilities = [];
+    hub = undefined;
+  }
+  const failures = results.filter((result) => result.status === "rejected");
+  if (failures.length)
+    throw new AggregateError(
+      failures.map((result) => result.reason),
+      "Hub scenario cleanup failed",
+    );
 });

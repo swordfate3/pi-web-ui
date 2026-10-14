@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "source": {
     "count": 118,
-    "sha256": "8fea1047e9e5a96ad4ebd91e5c444ec8c864ebd07059e21668ffc67254d6aa32",
+    "sha256": "26b953f5aa3514b73980d298854285f1305059952c7b84d46c1f0b5dd8409749",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
-        "sha256": "f289be6783ed139242efcff788098ee6cff2657529665f452848daebf299ce3f"
+        "sha256": "baca3e510878e01e8aedb020325e5b3219ddafde9c4ff1a378ebd80ca0e377c8"
       },
       {
         "path": "extensions/connection-config.ts",
@@ -78,7 +78,7 @@
       },
       {
         "path": "scripts/web-dist.mjs",
-        "sha256": "3dfc879f479a3c8eea1c5d64c4cf0eab408298e2861f5d8d77d80f7b5315bc9d"
+        "sha256": "e94175e378c348dceccc3e06a73943059e97bc49d3340d83e28f3b1c53c2c5fc"
       },
       {
         "path": "src/web/components/ai-elements/code-block.tsx",
@@ -480,7 +480,7 @@
   },
   "outputs": {
     "count": 673,
-    "sha256": "8a44e8807272fbaf1923cc71f486db8eba49a8e549e82aa1293818e0923cab40",
+    "sha256": "2fcf21c1cf7af8e694b2ab672a34a057f4e1b573a0c4dcd211c38c29fd7e0a06",
     "files": [
       {
         "path": "assets/abap-BF8NL95m.js",
@@ -3148,7 +3148,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "d13dacec2a494ab1b26d78b75c9f3336b7eeccf369901383f8827a761ace6bc3"
+        "sha256": "0d0116dfb2586c7d5c8dc043eb681d92f60209a0e9c1d5dd6f614bbe4ea14909"
       },
       {
         "path": "icons/pi-web-ui-192.png",

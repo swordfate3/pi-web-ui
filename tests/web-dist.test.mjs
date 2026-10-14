@@ -45,6 +45,8 @@ async function fixture({ dist = true } = {}) {
   await writeFile(path.join(root, "bin/pi-web-hub.mjs"), "console.log('hub');\n");
   if (dist) {
     await mkdir(path.join(root, "dist/assets"), { recursive: true });
+    await mkdir(path.join(root, "dist/hub"), { recursive: true });
+    await writeFile(path.join(root, "dist/hub/pi-web-hub.mjs"), "#!/usr/bin/env node\nconsole.log('hub fixture');\n");
     await writeFile(path.join(root, "dist/index.html"), '<script type="module" src="/assets/app.js?v=1#x"></script>\n');
     await writeFile(path.join(root, "dist/assets/app.js"), "console.log('fixture');\n");
   }
@@ -104,7 +106,7 @@ test("creates and verifies deterministic source and output inventories", async (
   );
   assert.deepEqual(
     first.outputs.files.map(({ path: file }) => file),
-    ["assets/app.js", "index.html"],
+    ["assets/app.js", "hub/pi-web-hub.mjs", "index.html"],
   );
 
   const written = await writeManifest(root);
@@ -125,6 +127,25 @@ test("requires an existing complete Vite dist and never creates it while writing
   const incomplete = await fixture();
   await rm(path.join(incomplete, "dist/index.html"));
   await assert.rejects(createManifest(incomplete), /dist\/index.html is missing/);
+});
+
+test("refuses missing prebuilt hub in write, verify, install and assets-only", async () => {
+  const root = await fixture();
+  await writeManifest(root);
+  await rm(path.join(root, "dist/hub/pi-web-hub.mjs"));
+  await assert.rejects(writeManifest(root), /dist\/hub\/pi-web-hub\.mjs is missing/);
+  for (const options of [{}, { install: true }, { assetsOnly: true }]) {
+    await assert.rejects(verifyManifest(root, options), /dist\/hub\/pi-web-hub\.mjs is missing/);
+  }
+  // A manifest with a freshly recomputed inventory digest must not redefine
+  // the package contract by omitting the bin, even when no source is checked.
+  const manifest = await loadManifest(root);
+  manifest.outputs.files = manifest.outputs.files.filter((entry) => entry.path !== "hub/pi-web-hub.mjs");
+  refreshInventory(manifest.outputs);
+  await saveManifest(root, manifest);
+  for (const options of [{}, { install: true }, { assetsOnly: true }]) {
+    await assert.rejects(verifyManifest(root, options), /outputs must include hub\/pi-web-hub\.mjs/);
+  }
 });
 
 test("detects changed, missing, and extra output files", async () => {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -105,6 +105,58 @@ async function packageCount(dir) {
   await walk(dir);
   return count;
 }
+async function assertHubLifecycle(installed, label) {
+  const pkg = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
+  const cli = path.join(installed, pkg.bin["pi-web-hub"]);
+  const privateRoot = path.join(root, `hub-${label}`);
+  await mkdir(privateRoot, { mode: 0o700 });
+  const config = path.join(privateRoot, "config.json");
+  checked(process.execPath, [cli, "init", "--config", config, "--port", "0"], { cwd: privateRoot, env: safeEnv() });
+  const credentialFile = path.join(privateRoot, "session.json");
+  const issued = checked(process.execPath, [cli, "issue", "--config", config, "--label", "Install fixture", "--output", credentialFile], { cwd: privateRoot, env: safeEnv() });
+  const credential = JSON.parse(await readFile(credentialFile, "utf8"));
+  assert.ok(!`${issued.stdout}${issued.stderr}`.includes(credential.token), "CLI must not print session token");
+  assert.equal((await stat(credentialFile)).mode & 0o077, 0);
+  const child = spawn(process.execPath, [cli, "serve", "--config", config], { cwd: privateRoot, env: safeEnv(), stdio: ["ignore", "pipe", "pipe"] });
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  child.stderr.resume();
+  let timer;
+  try {
+    const ready = await new Promise((resolve, reject) => {
+      let output = "";
+      timer = setTimeout(() => reject(new Error("Installed hub readiness timed out")), 10000);
+      child.once("error", () => reject(new Error("Installed hub failed to spawn")));
+      child.once("close", () => reject(new Error("Installed hub closed before ready")));
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+        if (output.length > 8192) return reject(new Error("Installed hub readiness output exceeded limit"));
+        if (!output.includes("\n")) return;
+        try { resolve(JSON.parse(output.split("\n")[0])); } catch { reject(new Error("Installed hub readiness is invalid")); }
+      });
+    });
+    clearTimeout(timer);
+    const page = await fetch(`${ready.localUrl}sessions/`, { signal: AbortSignal.timeout(5000) });
+    assert.equal(page.status, 200, "installed CLI must serve portal");
+    assert.match(await page.text(), /<title>Pi/);
+    const list = await fetch(`${ready.localUrl}api/sessions`, { signal: AbortSignal.timeout(5000) });
+    assert.equal(list.status, 200);
+    assert.deepEqual((await list.json()).sessions, []);
+    checked(process.execPath, [cli, "revoke", "--config", config, "--run-id", credential.run_id], { cwd: privateRoot, env: safeEnv() });
+    const grant = JSON.parse(await readFile(path.join(privateRoot, "state/grants", `${credential.run_id}.json`), "utf8"));
+    assert.equal(grant.revoked, true);
+    child.kill("SIGTERM");
+    const result = await Promise.race([closed, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Installed hub did not shut down")), 5000);
+    })]);
+    assert.equal(result, 0, "installed hub must exit successfully");
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await closed;
+    await rm(privateRoot, { recursive: true, force: true });
+  }
+}
+
 async function assertProductionInstall(agentDir, expectedHash) {
   const installed = path.join(agentDir, "git", "github.com", "pi-web-ui-install-test", "pi-web-ui");
   assert.equal(await distHash(installed), expectedHash, "installed dist integrity check");
@@ -159,6 +211,7 @@ try {
   });
   assert.equal(update.status, 0, `Pi git update failed (${update.status}):\n${update.stderr}`);
   const second = await assertProductionInstall(agent, initialHash);
+  await assertHubLifecycle(second.installed, "git-update");
   await assert.rejects(stat(path.join(second.installed, "dist", "stale-sentinel")), { code: "ENOENT" });
   const actualHead = git(second.installed, ["rev-parse", "HEAD"]).stdout.trim();
   const fixtureHead = git(fixture, ["rev-parse", "HEAD"]).stdout.trim();
@@ -227,6 +280,7 @@ try {
     await stat(path.join(packed, required));
   }
   const packedManifest = JSON.parse(await readFile(path.join(packed, "dist/build-manifest.json"), "utf8"));
+  await assertHubLifecycle(packed, "tarball");
   const packedPkg = JSON.parse(await readFile(path.join(packed, "package.json"), "utf8"));
   assert.match(
     checked(process.execPath, [path.join(packed, packedPkg.bin["pi-web-hub"]), "--help"]).stdout,
@@ -248,6 +302,7 @@ try {
       sourceMismatch: "rejected by real Pi install prepare",
       rejectedStaleInputs: staleInputs,
       tarball: "passed",
+      installedHubLifecycle: "init/issue/serve/HTTP/revoke/SIGTERM passed for Git update and tarball",
       productionPackages: second.packageCount,
       tarballConsumerPackages: count,
       npmRewroteLock: lockChanged,

@@ -27,7 +27,7 @@ This dual-channel design has several problems:
 
 ## Decision
 
-**WebSocket is the channel for server-client application commands and events.** HTTP remains for initial page load, WebSocket upgrade, and explicit binary attachment streaming. File downloads are prepared over WebSocket using session/runtime identity; only the resulting short-lived capability is used by `GET`/`HEAD /api/downloads/<token>`. File bytes must not be base64-encoded into application frames. See [file downloads](../prd/file-downloads.md) and [workspace uploads](../prd/file-uploads.md). Uploads are prepared over WebSocket, then streamed as same-origin `PUT /api/uploads/<uploadId>`; completed receipt IDs are bound to the current session/runtime and supplied with `prompt`, never arbitrary client paths.
+**WebSocket is the channel for server-client application commands and events.** HTTP remains for initial page load, WebSocket upgrade, and explicit binary attachment streaming. File downloads are prepared over WebSocket using session/runtime identity; only the resulting short-lived capability is used by `GET`/`HEAD /api/downloads/<token>`. File bytes must not be base64-encoded into application frames. See [file downloads](../prd/file-downloads.md) and [workspace uploads](../prd/file-uploads.md). Uploads are prepared over WebSocket, then streamed as same-origin 8 MiB `PUT /api/uploads/<uploadId>/chunks/<index>` requests and finalized by `complete_upload`; completed receipt IDs are bound to the current session/runtime and supplied with `prompt`, never arbitrary client paths. Legacy single-PUT upload remains available within its original 50 MiB limit. See [ADR 0016](0016-resumable-workspace-uploads.md).
 
 ### Unified Envelope
 
@@ -224,7 +224,8 @@ All current commands become methods under the unified `req`/`res` pattern:
 | New | `get_git_status` | — |
 | New | `get_git_diff` | `{ path? }` optional file-specific diff |
 | New | `get_file_content` | `{ path }` |
-| New | `prepare_upload` | `{ filename, size, sessionId, runtimeId }` → `{ uploadId, url, relativePath, maxBytes }`; current-workspace 50 MiB raw HTTP upload, not a model-content frame |
+| New | `prepare_upload` | `{ protocol: 2, filename, size, sha256, chunkHashes, sessionId, runtimeId }` → `{ protocol: 2, uploadId, url, relativePath, maxBytes, chunkSize, nextChunk, complete }`; default 1 GiB file limit, 8 MiB HTTP chunks, resume by matching file identity. Omitting protocol retains legacy 50 MiB single PUT. |
+| New | `complete_upload` | `{ uploadId, sessionId, runtimeId }` → `{ uploadId, relativePath, filename, size }`; verify full size/digest and atomically publish before prompt handoff |
 | New | `prepare_file_download` | `{ path, sessionId, runtimeId }` → `{ token, filename, size, downloadUrl }`; current-workspace ordinary files only |
 | `GET /api/projects` | Deleted (unused in current UI) | — |
 | `POST /api/projects/launch` | Deleted (iTerm2-specific) | — |

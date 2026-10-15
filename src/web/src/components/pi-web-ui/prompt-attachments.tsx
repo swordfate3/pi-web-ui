@@ -1,6 +1,6 @@
-import { FileIcon, ImageIcon, XIcon } from "lucide-react";
+import { FileIcon, PaperclipIcon, XIcon } from "lucide-react";
 import { PromptInputButton, PromptInputHeader, usePromptInputAttachments } from "@/components/ai-elements/prompt-input";
-import { getLanguage, t, useLanguage } from "../../core/i18n";
+import { getLanguage, t, useLanguage, workspaceUploadText } from "../../core/i18n";
 import type { WorkspaceUploadProgress } from "../../core/workspace-uploads";
 
 function formatAttachmentSize(size: number) {
@@ -21,14 +21,16 @@ export function PromptAttachmentButton({ disabled = false }: { disabled?: boolea
 
   return (
     <PromptInputButton
-      aria-label={t("Add photos or files")}
+      aria-label={t("Upload files")}
+      className="shrink-0"
       data-testid="attachment-add"
       disabled={disabled}
       onClick={attachments.openFileDialog}
       tooltip={t("Add photos or files")}
       type="button"
     >
-      <ImageIcon className="size-4" />
+      <PaperclipIcon aria-hidden="true" className="size-4" />
+      <span>{t("Upload files")}</span>
     </PromptInputButton>
   );
 }
@@ -69,13 +71,22 @@ export function PromptAttachmentPreview({
               </span>
               <span className="block text-muted-foreground text-[10px]">{formatAttachmentSize(file.file.size)}</span>
             </span>
-            {uploadProgress.find((progress) => progress.id === file.id)?.status === "saved" && (
+            {uploadProgress.find((progress) => progress.id === file.id)?.status === "saved" ? (
               <span
                 className="max-w-24 truncate text-[10px] text-muted-foreground"
                 title={uploadProgress.find((progress) => progress.id === file.id)?.relativePath}
               >
                 {uploadProgress.find((progress) => progress.id === file.id)?.relativePath}
               </span>
+            ) : (
+              (() => {
+                const progress = uploadProgress.find((item) => item.id === file.id);
+                return progress && progress.status !== "waiting" && progress.status !== "saved" ? (
+                  <span className="text-[10px] text-muted-foreground">
+                    {workspaceUploadText(progress.status)} {progress.percent ?? 0}%
+                  </span>
+                ) : null;
+              })()
             )}
             <button
               aria-label={t("Remove attachment")}

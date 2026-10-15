@@ -1,6 +1,17 @@
 // Real Pi + optional packaged Hub, isolated workspaces and faux LLM only.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  createReadStream,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,11 +30,104 @@ import { startHubCli } from "./harness/hub-cli.ts";
 import { type PiWebUiHarness, startPiWebUi } from "./harness/pi-process.ts";
 
 type Prepared = { uploadId: string; url: string; relativePath: string; maxBytes: number };
+type PreparedV2 = Prepared & {
+  protocol: 2;
+  chunkSize: number;
+  nextChunk: number;
+  complete: boolean;
+};
+const MIB = 1024 * 1024;
+const CHUNK_SIZE = 8 * MIB;
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+
+function createSyntheticFile(filename: string, size: number) {
+  const fd = openSync(filename, "wx", 0o600);
+  const fileHash = createHash("sha256");
+  const chunkHashes: string[] = [];
+  let offset = 0;
+  try {
+    while (offset < size) {
+      const length = Math.min(CHUNK_SIZE, size - offset);
+      const bytes = Buffer.allocUnsafe(length);
+      for (let index = 0; index < length; index++) bytes[index] = (offset + index) % 251;
+      fileHash.update(bytes);
+      chunkHashes.push(createHash("sha256").update(bytes).digest("hex"));
+      let written = 0;
+      while (written < bytes.length) written += writeSync(fd, bytes, written, bytes.length - written, offset + written);
+      offset += length;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return { sha256: fileHash.digest("hex"), chunkHashes };
+}
+
+async function hashFile(filename: string) {
+  const hash = createHash("sha256");
+  for await (const bytes of createReadStream(filename)) hash.update(bytes);
+  return hash.digest("hex");
+}
+
+function interruptChunk(target: URL, length: number, origin: string) {
+  return new Promise<void>((resolve) => {
+    const request = http.request(target, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(length),
+        Origin: origin,
+      },
+    });
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    request.on("error", finish);
+    request.on("response", (response) => {
+      response.resume();
+      response.on("end", finish);
+    });
+    const timer = setTimeout(() => {
+      request.destroy();
+      finish();
+    }, 50);
+    request.write(Buffer.alloc(Math.max(1, Math.min(64 * 1024, length - 1)), 0x6b));
+  });
+}
+
+function putFileChunk(target: URL, filename: string, start: number, length: number, origin: string) {
+  return new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const request = http.request(
+      target,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(length),
+          Origin: origin,
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () =>
+          resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") }),
+        );
+      },
+    );
+    request.on("error", reject);
+    const source = createReadStream(filename, { start, end: start + length - 1 });
+    source.on("error", (error) => request.destroy(error));
+    source.pipe(request);
+  });
+}
 const runtimeRoot = path.resolve(process.env.PI_E2E_RUNTIME_DIR ?? repositoryRoot);
 for (const mode of ["direct", "hub"]) {
   test(`${mode}: HTTP file upload preserves binary bytes; prompt carries only verified workspace paths`, {
-    timeout: 45000,
+    timeout: 180000,
   }, async (t) => {
     const hub = mode === "hub" ? await startHubCli({ repositoryRoot }) : undefined;
     let agent: PiWebUiHarness | undefined;
@@ -44,19 +148,19 @@ for (const mode of ["direct", "hub"]) {
         await hub?.close();
       }
     });
-    agent = await startPiWebUi("chat-lifecycle", {
+    agent = await startPiWebUi("file-upload", {
       repositoryRoot,
       git: false,
       registration: hub?.issue("upload-integration"),
     });
     let base = `${agent.pageUrl}/`;
     if (hub) {
-      const deadline = Date.now() + 10000;
+      const routeDeadline = Date.now() + 10000;
       let route: string | undefined;
       do {
         route = (await (await fetch(`${hub.url}api/sessions`)).json()).sessions[0]?.path;
         if (!route) await new Promise((resolve) => setTimeout(resolve, 100));
-      } while (!route && Date.now() < deadline);
+      } while (!route && Date.now() < routeDeadline);
       assert.ok(route);
       base = new URL(route, hub.url).href;
     }
@@ -99,6 +203,15 @@ for (const mode of ["direct", "hub"]) {
       });
     const prepare = (filename: string, size: number, identity = scope) =>
       request("prepare_upload", { ...identity, filename, size }) as Promise<Prepared>;
+    const prepareV2 = (filename: string, size: number, sha256: string, chunkHashes: string[], identity = scope) =>
+      request("prepare_upload", {
+        ...identity,
+        protocol: 2,
+        filename,
+        size,
+        sha256,
+        chunkHashes,
+      }) as Promise<PreparedV2>;
     // Exercise the exact configured ceiling through both real HTTP paths.
     const bytes = Buffer.alloc(50 * 1024 * 1024);
     for (let n = 0; n < bytes.length; n++) bytes[n] = n % 251;
@@ -160,8 +273,9 @@ for (const mode of ["direct", "hub"]) {
       message: "UPLOAD_INTEGRATION_MARKER",
       path: "/untrusted-client-path",
     });
-    const deadline = Date.now() + 10000;
-    while (!userMessages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    const firstMessageDeadline = Date.now() + 10000;
+    while (!userMessages.length && Date.now() < firstMessageDeadline)
+      await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(userMessages.length, 1);
     assert.ok(userMessages[0].includes(file.relativePath));
     assert.ok(userMessages[0].includes(empty.relativePath));
@@ -170,6 +284,220 @@ for (const mode of ["direct", "hub"]) {
     assert.ok(userMessages[0].length < 4096);
     await assert.rejects(request("prompt", { ...scope, uploads: [file.uploadId], message: "Already consumed" }));
     assert.deepEqual(readFileSync(path.join(agent.workspaceDir, file.relativePath)), bytes);
+
+    // Exercise the real v2 transport with a synthetic file strictly larger
+    // than the legacy 50 MiB single-PUT ceiling, streamed in bounded chunks.
+    const largePath = path.join(agent.sessionDir, "resumable-large.bin");
+    const largeSize = 65 * MIB;
+    const digest = createSyntheticFile(largePath, largeSize);
+    const large = await prepareV2("resumable-large.bin", largeSize, digest.sha256, digest.chunkHashes);
+    assert.equal(large.protocol, 2);
+    assert.equal(large.chunkSize, CHUNK_SIZE);
+    assert.equal(large.maxBytes, MIB * 1024);
+    assert.equal(large.nextChunk, 0);
+    assert.equal(large.complete, false);
+    assert.equal(digest.chunkHashes.length, 9);
+    const chunkUrl = (upload: PreparedV2, index: number) => new URL(`${upload.url.slice(1)}/chunks/${index}`, base);
+    assert.equal(
+      (
+        await fetch(`${chunkUrl(large, 1)}?unexpected=query`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+            Origin: new URL(base).origin,
+          },
+        })
+      ).status,
+      404,
+    );
+    assert.equal(
+      (await putFileChunk(chunkUrl(large, 1), largePath, CHUNK_SIZE, CHUNK_SIZE, new URL(base).origin)).status,
+      400,
+    );
+    assert.equal(
+      (await putFileChunk(chunkUrl(large, 0), largePath, 0, CHUNK_SIZE - 1, new URL(base).origin)).status,
+      400,
+    );
+    const wrongFirstChunk = Buffer.alloc(CHUNK_SIZE, 0x5a);
+    const wrongHashResponse = await fetch(chunkUrl(large, 0), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(wrongFirstChunk.length),
+        Origin: new URL(base).origin,
+      },
+      body: new Uint8Array(wrongFirstChunk),
+    });
+    assert.equal(wrongHashResponse.status, 400);
+    assert.equal((await prepareV2("resumable-large.bin", largeSize, digest.sha256, digest.chunkHashes)).nextChunk, 0);
+    const firstChunk = await putFileChunk(chunkUrl(large, 0), largePath, 0, CHUNK_SIZE, new URL(base).origin);
+    assert.equal(firstChunk.status, 200);
+    assert.deepEqual(JSON.parse(firstChunk.body), { uploadId: large.uploadId, nextChunk: 1 });
+    const duplicateChunk = await putFileChunk(chunkUrl(large, 0), largePath, 0, CHUNK_SIZE, new URL(base).origin);
+    assert.equal(duplicateChunk.status, 200);
+    assert.equal(JSON.parse(duplicateChunk.body).nextChunk, 1);
+    const changedChunk = Buffer.alloc(CHUNK_SIZE, 0x5a);
+    const wrongDuplicate = await fetch(chunkUrl(large, 0), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(changedChunk.length),
+        Origin: new URL(base).origin,
+      },
+      body: new Uint8Array(changedChunk),
+    });
+    assert.equal(wrongDuplicate.status, 400);
+    const resumed = await prepareV2("resumable-large.bin", largeSize, digest.sha256, digest.chunkHashes);
+    assert.equal(resumed.uploadId, large.uploadId);
+    assert.equal(resumed.nextChunk, 1);
+    await assert.rejects(
+      prepareV2("resumable-large.bin", largeSize, digest.sha256, digest.chunkHashes, {
+        ...scope,
+        sessionId: "stale",
+      }),
+    );
+    for (let index = resumed.nextChunk; index < digest.chunkHashes.length; index++) {
+      const start = index * CHUNK_SIZE;
+      const length = Math.min(CHUNK_SIZE, largeSize - start);
+      const chunk = await putFileChunk(chunkUrl(large, index), largePath, start, length, new URL(base).origin);
+      assert.equal(chunk.status, 200, `chunk ${index}: ${chunk.body}`);
+      assert.deepEqual(JSON.parse(chunk.body), { uploadId: large.uploadId, nextChunk: index + 1 });
+    }
+    const completed = await request("complete_upload", {
+      ...scope,
+      uploadId: large.uploadId,
+    });
+    assert.deepEqual(completed, {
+      uploadId: large.uploadId,
+      relativePath: large.relativePath,
+      filename: "resumable-large.bin",
+      size: largeSize,
+    });
+    assert.equal(await hashFile(path.join(agent.workspaceDir, large.relativePath)), digest.sha256);
+
+    // Complete and attach a separate original-text fixture. The real Pi read
+    // tool must consume only its verified workspace path, not client bytes.
+    const uploadedText = Buffer.from("UPLOAD_TEXT_CONTENT_MARKER：续传协议原始文本。\n", "utf8");
+    const textHash = createHash("sha256").update(uploadedText).digest("hex");
+    const uploadedTextFile = await prepareV2("中文说明.txt", uploadedText.length, textHash, [textHash]);
+    const textChunk = await fetch(chunkUrl(uploadedTextFile, 0), {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(uploadedText.length),
+        Origin: new URL(base).origin,
+      },
+      body: new Uint8Array(uploadedText),
+    });
+    assert.equal(textChunk.status, 200);
+    const textReceipt = await request("complete_upload", { ...scope, uploadId: uploadedTextFile.uploadId });
+    assert.deepEqual(textReceipt, {
+      uploadId: uploadedTextFile.uploadId,
+      relativePath: uploadedTextFile.relativePath,
+      filename: "中文说明.txt",
+      size: uploadedText.length,
+    });
+    await request("prompt", {
+      ...scope,
+      uploads: [large.uploadId, uploadedTextFile.uploadId],
+      message: "V2_UPLOAD_INTEGRATION_MARKER",
+    });
+    const secondMessageDeadline = Date.now() + 10000;
+    while (userMessages.length < 2 && Date.now() < secondMessageDeadline)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(userMessages.length, 2);
+    assert.ok(userMessages[1].includes(large.relativePath));
+    assert.ok(userMessages[1].includes(uploadedTextFile.relativePath));
+    assert.ok(userMessages[1].includes("V2_UPLOAD_INTEGRATION_MARKER"));
+    const readDeadline = Date.now() + 15000;
+    let sessionLog = "";
+    do {
+      const sessionFiles = (await import("node:fs"))
+        .readdirSync(agent.sessionDir)
+        .filter((name) => name.endsWith(".jsonl"));
+      sessionLog = sessionFiles
+        .map((name) => readFileSync(path.join(agent?.sessionDir ?? "", name), "utf8"))
+        .join("\n");
+      if (sessionLog.includes('"name":"read"') && sessionLog.includes("UPLOAD_TEXT_CONTENT_MARKER")) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } while (Date.now() < readDeadline);
+    assert.ok(sessionLog.includes('"name":"read"'), "Pi should call the real read tool for the uploaded text path");
+    assert.ok(sessionLog.includes("UPLOAD_TEXT_CONTENT_MARKER"));
+    assert.deepEqual(readFileSync(path.join(agent.workspaceDir, uploadedTextFile.relativePath)), uploadedText);
+
+    // Cancellation during a later chunk retains only previously confirmed data.
+    const recoveryPath = path.join(agent.sessionDir, "recover-after-disconnect.bin");
+    const recoverySize = CHUNK_SIZE + 257;
+    const recoveryDigest = createSyntheticFile(recoveryPath, recoverySize);
+    const recovery = await prepareV2(
+      "recover-after-disconnect.bin",
+      recoverySize,
+      recoveryDigest.sha256,
+      recoveryDigest.chunkHashes,
+    );
+    const confirmedChunk = await putFileChunk(chunkUrl(recovery, 0), recoveryPath, 0, CHUNK_SIZE, new URL(base).origin);
+    assert.equal(confirmedChunk.status, 200);
+    await interruptChunk(chunkUrl(recovery, 1), recoverySize - CHUNK_SIZE, new URL(base).origin);
+    // Socket destruction returns before the backend's async truncate/fsync
+    // cleanup necessarily settles. Query progress only after that busy lease
+    // is released; do not mistake connection close for a confirmed offset.
+    let afterInterrupt: PreparedV2 | undefined;
+    const recoveryDeadline = Date.now() + 10000;
+    while (!afterInterrupt && Date.now() < recoveryDeadline) {
+      try {
+        afterInterrupt = await prepareV2(
+          "recover-after-disconnect.bin",
+          recoverySize,
+          recoveryDigest.sha256,
+          recoveryDigest.chunkHashes,
+        );
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("busy")) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    assert.ok(afterInterrupt, "interrupted chunk must release its write lease");
+    assert.equal(afterInterrupt.uploadId, recovery.uploadId);
+    assert.equal(afterInterrupt.nextChunk, 1);
+    await assert.rejects(request("complete_upload", { ...scope, runtimeId: "stale", uploadId: recovery.uploadId }));
+    const finalChunk = await putFileChunk(
+      chunkUrl(recovery, 1),
+      recoveryPath,
+      CHUNK_SIZE,
+      recoverySize - CHUNK_SIZE,
+      new URL(base).origin,
+    );
+    assert.equal(finalChunk.status, 200);
+    const recoveryReceipt = await request("complete_upload", { ...scope, uploadId: recovery.uploadId });
+    assert.deepEqual(recoveryReceipt, {
+      uploadId: recovery.uploadId,
+      relativePath: recovery.relativePath,
+      filename: "recover-after-disconnect.bin",
+      size: recoverySize,
+    });
+    assert.equal(await hashFile(path.join(agent.workspaceDir, recovery.relativePath)), recoveryDigest.sha256);
+
+    // Exact declared maximum is accepted; the first byte above it is rejected
+    // before any 1 GiB payload is allocated or sent.
+    const declaredMaximum = 1024 * MIB;
+    const exactLimit = await prepareV2(
+      "declared-maximum.bin",
+      declaredMaximum,
+      "a".repeat(64),
+      Array.from({ length: declaredMaximum / CHUNK_SIZE }, () => "b".repeat(64)),
+    );
+    assert.equal(exactLimit.maxBytes, declaredMaximum);
+    assert.equal(exactLimit.chunkSize, CHUNK_SIZE);
+    await assert.rejects(
+      prepareV2(
+        "over-declared-maximum.bin",
+        declaredMaximum + 1,
+        "a".repeat(64),
+        Array.from({ length: Math.ceil((declaredMaximum + 1) / CHUNK_SIZE) }, () => "b".repeat(64)),
+      ),
+    );
+
     // Invalid Hub generation/proof cannot bypass the original transport guard.
     assert.equal(
       (

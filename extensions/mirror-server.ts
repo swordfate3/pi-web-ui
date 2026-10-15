@@ -1958,7 +1958,40 @@ export default function (pi: ExtensionAPI) {
         case "prepare_upload": {
           const uploadCtx = checkHistoryIdentity(params, true);
           if (params.runtimeId !== runtimeId) throw new Error("Invalid upload identity");
-          sendTo(ws, success(workspaceUploads.prepare(sessionScope(uploadCtx), params.filename, params.size)));
+          const scope = sessionScope(uploadCtx);
+          const isCurrent = () => scopeIsCurrent(scope) && !sessionReplacementPending;
+          if (params.protocol === 2) {
+            sendTo(
+              ws,
+              success(
+                workspaceUploads.prepareV2(
+                  scope,
+                  params.filename,
+                  params.size,
+                  params.sha256,
+                  params.chunkHashes,
+                  isCurrent,
+                ),
+              ),
+            );
+            break;
+          }
+          if (params.protocol !== undefined) throw new Error("Unsupported upload protocol");
+          sendTo(ws, success(workspaceUploads.prepare(scope, params.filename, params.size, isCurrent)));
+          break;
+        }
+
+        case "complete_upload": {
+          const uploadCtx = checkHistoryIdentity(params, true);
+          if (params.runtimeId !== runtimeId || typeof params.uploadId !== "string")
+            throw new Error("Invalid upload identity");
+          const scope = sessionScope(uploadCtx);
+          const result = await workspaceUploads.complete(
+            params.uploadId,
+            scope,
+            () => scopeIsCurrent(scope) && !sessionReplacementPending,
+          );
+          sendTo(ws, success(result));
           break;
         }
 

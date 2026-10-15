@@ -67,7 +67,7 @@ persistence, restart behavior and the authenticated-gateway boundary.
 ### Chat
 - Streaming text and thinking/reasoning blocks
 - Tool call display with expand/collapse
-- Workspace file attachments: choose/drop files or paste images, with progress and cancellation; up to five files, 50 MiB each, saved under `.pi-uploads/<session>/<upload>/` before sending paths to Pi. Original bytes stream over HTTP, including through Hub. Images are now file references for Pi to read on demand, not automatically inlined model images. See [upload behavior and limits](docs/prd/file-uploads.md).
+- Workspace file attachments: use **Upload files** (paperclip), drop files or paste images; up to five files, **1 GiB each by default**. Files stream in **8 MiB chunks**, with integrity checks, progress, cancellation and retry from confirmed chunks. After a page refresh, reselect the original file to resume within the same running session. Saved files live under `.pi-uploads/<session>/<upload>/` before paths are sent to Pi, directly or through Hub. Images are file references for Pi to read on demand, not automatically inlined model images. See [upload behavior, configuration and limits](docs/prd/file-uploads.md).
 - Click project-file paths in assistant replies to confirm a download, preserving the original filename (including Chinese); works directly or through Hub. See [download behavior and access limits](docs/prd/file-downloads.md).
 - Branch from user messages and continue from branch ends via `navigate_tree` in the current session tree (requires `/webui` command context)
 - Follow-up messages while the agent is streaming
@@ -104,6 +104,8 @@ Environment variables (set before starting Pi):
 | `PI_WEB_UI_REGISTRY_SOCKET` | *(none)* | Optional external registry IPC path |
 | `PI_WEB_UI_REGISTRY_CREDENTIAL_FILE` | *(none)* | Capability file; required together with IPC path |
 | `PI_WEB_UI_STATIC_DIR` | *(bundled)* | Override static files path |
+| `PI_WEB_UPLOAD_MAX_BYTES` | `1073741824` | Version-2 per-file upload limit in bytes; hard ceiling 8 GiB |
+| `PI_WEB_UPLOAD_MAX_PENDING_BYTES` | `2147483648` | Per-instance sum of incomplete uploads' declared sizes, not a quota on saved files |
 | `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Override Pi config directory |
 | `PI_CODING_AGENT_SESSION_DIR` | *(derived)* | Override Pi session storage directory |
 

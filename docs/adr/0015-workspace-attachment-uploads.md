@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented and locally validated; not committed, published or deployed by this task. Production rollout is separate.
+Implemented and locally validated. The original single-PUT behavior below is retained for compatibility; [ADR 0016](0016-resumable-workspace-uploads.md) extends the current browser workflow with 8 MiB chunks and resumability. Production rollout is separate.
 
 ## Decision
 

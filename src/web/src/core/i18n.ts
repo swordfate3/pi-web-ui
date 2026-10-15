@@ -20,11 +20,17 @@ export type WorkspaceUploadMessageKey =
   | "sameOriginRoute"
   | "invalidResponse"
   | "uploadProgress"
+  | "hashing"
+  | "uploading"
+  | "finalizing"
   | "savedPath";
 
 const workspaceUploadMessages: Record<WorkspaceUploadMessageKey, { en: string; "zh-CN": string }> = {
   filesLimit: { en: "Up to 5 attachments are allowed.", "zh-CN": "最多可添加 5 个附件。" },
-  sizeLimit: { en: "Files must be 50 MiB or smaller.", "zh-CN": "单个文件不得超过 50 MiB。" },
+  sizeLimit: {
+    en: "Files must be within the server limit (1 GiB by default, up to 8 GiB).",
+    "zh-CN": "单个文件不得超过服务端限制（默认 1 GiB，最高 8 GiB）。",
+  },
   tooManyFiles: { en: "Too many files. Some were not added.", "zh-CN": "文件过多，部分文件未添加。" },
   connectFirst: { en: "Connect to Pi before uploading attachments.", "zh-CN": "连接 Pi 后才能上传附件。" },
   waitForPi: {
@@ -33,14 +39,17 @@ const workspaceUploadMessages: Record<WorkspaceUploadMessageKey, { en: string; "
   },
   cancelUpload: { en: "Cancel upload", "zh-CN": "取消上传" },
   cancelledRetry: {
-    en: "Workspace upload cancelled. Attachments are still available to retry.",
-    "zh-CN": "已取消工作区上传。附件仍保留，可重试。",
+    en: "Workspace upload cancelled. Attachments remain selected; retry to resume verified chunks.",
+    "zh-CN": "已取消工作区上传。附件仍保留，重试时会续传已校验的分块。",
   },
   uploadFailedRetry: {
-    en: "Workspace upload failed. Check your connection and retry.",
-    "zh-CN": "工作区上传失败，请检查连接后重试。",
+    en: "Workspace upload failed. Check your connection and retry to resume verified chunks.",
+    "zh-CN": "工作区上传失败，请检查连接后重试，已校验的分块会续传。",
   },
-  uploadNotComplete: { en: "Workspace upload did not complete. Please retry.", "zh-CN": "工作区上传未完成，请重试。" },
+  uploadNotComplete: {
+    en: "Workspace upload did not complete. Retry to resume verified chunks.",
+    "zh-CN": "工作区上传未完成，请重试，已校验的分块会续传。",
+  },
   promptFailedRetry: {
     en: "Message acceptance was not confirmed. Files remain saved. Check the conversation before retrying.",
     "zh-CN": "消息接收尚未确认。文件仍已保存，请先检查会话再决定是否重试。",
@@ -55,6 +64,9 @@ const workspaceUploadMessages: Record<WorkspaceUploadMessageKey, { en: string; "
   },
   invalidResponse: { en: "Invalid workspace upload response.", "zh-CN": "工作区上传响应无效。" },
   uploadProgress: { en: "{filename}: {progress}", "zh-CN": "{filename}：{progress}" },
+  hashing: { en: "Preparing and hashing", "zh-CN": "正在校验文件" },
+  uploading: { en: "Uploading", "zh-CN": "正在上传" },
+  finalizing: { en: "Finalizing", "zh-CN": "正在完成上传" },
   savedPath: { en: "Saved: {path}", "zh-CN": "已保存：{path}" },
 };
 export const LANGUAGE_STORAGE_KEY = "pi-web-ui-language";

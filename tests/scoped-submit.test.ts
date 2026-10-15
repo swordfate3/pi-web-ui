@@ -95,10 +95,14 @@ test("a hanging old prepare cannot block a new scope or send a prompt after the 
   });
 
   resolvePrepare({
+    protocol: 2,
     uploadId: "123e4567-e89b-42d3-a456-426614174000",
     url: "/api/uploads/123e4567-e89b-42d3-a456-426614174000",
-    relativePath: ".pi-uploads/old-session/old.txt",
+    relativePath: ".pi-uploads/old-session/123e4567-e89b-42d3-a456-426614174000/old.txt",
     maxBytes: MAX_WORKSPACE_UPLOAD_BYTES,
+    chunkSize: 8 * 1024 * 1024,
+    nextChunk: 0,
+    complete: false,
   });
   await assert.rejects(oldUpload, /session changed/i);
   assert.equal(promptCalls, 1, "only the new prompt reaches the prompt RPC");

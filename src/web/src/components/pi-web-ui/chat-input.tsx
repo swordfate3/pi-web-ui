@@ -9,7 +9,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { t, useLanguage, workspaceUploadText } from "../../core/i18n";
 import type { BrowserCommandInfo, ChatSubmitStatus, ConnectionState } from "../../core/types";
-import type { WorkspaceUploadProgress } from "../../core/workspace-uploads";
+import { MAX_WORKSPACE_UPLOAD_BYTES, type WorkspaceUploadProgress } from "../../core/workspace-uploads";
 import { ArchModeToggle } from "./arch-mode-toggle";
 import { PromptAttachmentButton, PromptAttachmentPreview } from "./prompt-attachments";
 
@@ -158,7 +158,7 @@ export function ChatInput({
           className="chat-composer"
           globalDrop={!disabled && !attachmentsDisabled}
           maxFiles={5}
-          maxFileSize={50 * 1024 * 1024}
+          maxFileSize={MAX_WORKSPACE_UPLOAD_BYTES}
           multiple
           onError={(error) => setAttachmentError(error.code)}
           onSubmit={(message) => {
@@ -173,7 +173,9 @@ export function ChatInput({
                 const displayProgress =
                   progress.status === "saved"
                     ? workspaceUploadText("savedPath", { path: progress.relativePath || "" })
-                    : `${progress.percent ?? 0}%`;
+                    : progress.status === "waiting"
+                      ? `${progress.percent ?? 0}%`
+                      : `${workspaceUploadText(progress.status)} ${progress.percent ?? 0}%`;
                 return (
                   <span
                     className="block w-full min-w-0 max-w-full truncate text-muted-foreground text-xs"

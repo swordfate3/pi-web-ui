@@ -14,4 +14,13 @@ function readUploadedText(context: TranscriptContext) {
   return fauxAssistantMessage([fauxToolCall("read", { path: file[0] })], { stopReason: "toolUse" });
 }
 
-export default [readUploadedText, fauxAssistantMessage("已通过真实 read 工具读取上传的中文说明文件。")];
+function respondToUpload(context: TranscriptContext) {
+  if (context.messages.at(-1)?.role === "toolResult") {
+    return fauxAssistantMessage("已通过真实 read 工具读取上传的中文说明文件。");
+  }
+  return readUploadedText(context);
+}
+
+// Integration exercises a legacy prompt before the v2 file-read prompt; do
+// not consume the only read response on that earlier path-only submission.
+export default [respondToUpload, respondToUpload, respondToUpload, respondToUpload];

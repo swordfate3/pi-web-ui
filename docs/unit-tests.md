@@ -71,7 +71,10 @@ cleaned up. This is not an Alibaba deployment or physical-phone test.
 ## Workspace uploads
 
 ```sh
-node --import ./tests/register-ts.mjs --test tests/workspace-uploads.test.ts tests/workspace-upload-client.test.ts
+node --import ./tests/register-ts.mjs --test tests/workspace-uploads.test.ts tests/chunked-uploads.test.ts tests/workspace-upload-client.test.ts tests/incremental-sha256.test.ts
+# Optional physical 1 GiB filesystem verification (not a browser/public-network test):
+mkdir -p .tmp/chunk-test-tmp
+TMPDIR="$PWD/.tmp/chunk-test-tmp" PI_WEB_UPLOAD_TEST_1GIB=1 node --import ./tests/register-ts.mjs --test --test-name-pattern='1 GiB is streamed' tests/chunked-uploads.test.ts
 node --import ./tests/register-ts.mjs --test --test-timeout=70000 e2e/file-upload.integration.ts
 ```
 
@@ -79,7 +82,11 @@ Pure tests use disposable workspaces and HTTP fixtures or injectable browser
 transport. Backend integration starts real isolated Pi plus packaged Hub;
 browser E2E additionally uses the real picker, progress, cancellation/retry,
 symlink-directory failure/recovery, a second browser switching sessions during
-upload, and the real Pi `read` tool. No test uploads files to the live public deployment. See
+upload, refresh/reselection recovery, chunk integrity/order and the real Pi
+`read` tool. Chunked-upload tests must use reusable buffers or sparse-file
+metadata rather than allocating a whole GiB in memory; declared-size acceptance
+is distinct from physically writing and hashing the full boundary file.
+No test uploads files to the live public deployment. See
 [file uploads](prd/file-uploads.md) and its [validation report](validation/workspace-uploads.md).
 
 ## Real Pi browser E2E

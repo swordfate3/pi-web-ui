@@ -225,6 +225,7 @@ try {
     "bin/pi-web-hub.mjs",
     "vite.hub.config.ts",
     "extensions/workspace-uploads.ts",
+    "src/web/src/core/incremental-sha256.ts",
   ];
   for (const [index, input] of staleInputs.entries()) {
     const sourcePath = path.join(fixture, input);

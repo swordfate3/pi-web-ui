@@ -340,12 +340,17 @@ Pi and the packaged Hub CLI. Files include UTF-8 text, an original PNG and a
 17 MiB binary that cannot fit a base64 WebSocket prompt. The browser uses the
 real picker and HTTP PUT, observes progress/cancel, verifies exact local bytes
 under the session folder, and asks Pi's real `read` tool to open the text file.
-A 50 MiB + 1 byte file is rejected before preparation. Cancellation preserves
-the draft without sending a prompt. Synthetic files and private test processes
+The browser hard ceiling is checked using a sparse file, without loading its
+contents. Server-configured limits are enforced separately during preparation.
+Cancellation preserves the draft without sending a prompt. Version-2 cases also
+exercise 8 MiB chunking and page-refresh/reselection recovery using real HTTP,
+not mocked requests; a failure retransmits only unconfirmed chunks. Synthetic files and private test processes
 only; CDP upload throttling controls timing without mocking routes or sockets.
 `e2e/file-upload.integration.ts` separately covers real backend boundaries,
-including exact 50 MiB direct/Hub uploads and real compaction/authentication
-rejection. Browser regression also blocks `.pi-uploads` with a symlink, verifies
+including legacy exact 50 MiB direct/Hub uploads, version-2 files larger than
+50 MiB, checksum/order/size boundaries and real compaction/authentication
+rejection. A declared-size boundary is not evidence that an entire 1 GiB file
+was physically transferred; the validation report distinguishes those checks. Browser regression also blocks `.pi-uploads` with a symlink, verifies
 failure preserves the draft/files, then repairs and retries; a second real
 browser creates a new session during upload to prove old attachments are not
 resent and already saved files survive. Empty sessions defer JSONL creation,

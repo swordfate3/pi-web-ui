@@ -1,0 +1,1 @@
+import{An as e,jn as t}from"./index-CAA-YMwF.js";var n=(n,r)=>t.lang.round(e.parse(n)[r]);export{n as t};

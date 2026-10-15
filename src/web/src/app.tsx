@@ -552,11 +552,13 @@ export function App() {
           if (isScopeCurrent()) setError(workspaceUploadText("sessionChangedRetry"));
           throw new Error("Upload scope changed before prompt send");
         }
-        const uploadIds = attachments.flatMap(({ id }) => {
-          const receipt = uploadReceiptsRef.current.get(id);
-          return receipt ? [receipt.uploadId] : [];
-        });
-        if (uploadIds.length !== attachments.length) {
+        const receiptIds = attachments.map(({ id }) => uploadReceiptsRef.current.get(id)?.uploadId ?? null);
+        if (receiptIds.some((uploadId) => uploadId === null)) {
+          setError(workspaceUploadText("uploadNotComplete"));
+          throw new Error("Missing upload receipt");
+        }
+        const uploadIds = [...new Set(receiptIds as string[])];
+        if (uploadIds.length === 0 && attachments.length > 0) {
           setError(workspaceUploadText("uploadNotComplete"));
           throw new Error("Missing upload receipt");
         }

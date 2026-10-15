@@ -325,6 +325,33 @@ The fixture is a byte-integrity file, not a PDF-rendering test.
 headers/methods/Origin, path restrictions and stale identities with real Pi/Hub.
 Run with `node --import ./tests/register-ts.mjs --test e2e/file-download.integration.ts`.
 
+## Collapsible conversation date filters
+
+`date-history.feature` verifies desktop/mobile default collapse, keyboard expansion,
+unchanged history request count and selected history when collapsing, retained
+historical-view warning, reduced panel height, and preserved unapplied date edits.
+The saved-session picker remains expanded. These checks run through the real Pi
+history fixture; separate Browser screenshots verify visible space and controls.
+
+## Workspace-file upload regression
+
+`file-upload.feature` exercises direct desktop and Hub desktop/mobile with real
+Pi and the packaged Hub CLI. Files include UTF-8 text, an original PNG and a
+17 MiB binary that cannot fit a base64 WebSocket prompt. The browser uses the
+real picker and HTTP PUT, observes progress/cancel, verifies exact local bytes
+under the session folder, and asks Pi's real `read` tool to open the text file.
+A 50 MiB + 1 byte file is rejected before preparation. Cancellation preserves
+the draft without sending a prompt. Synthetic files and private test processes
+only; CDP upload throttling controls timing without mocking routes or sockets.
+`e2e/file-upload.integration.ts` separately covers real backend boundaries,
+including exact 50 MiB direct/Hub uploads and real compaction/authentication
+rejection. Browser regression also blocks `.pi-uploads` with a symlink, verifies
+failure preserves the draft/files, then repairs and retries; a second real
+browser creates a new session during upload to prove old attachments are not
+resent and already saved files survive. Empty sessions defer JSONL creation,
+so replacement assertions compare actual `state_sync` identities, not file counts.
+Desktop/mobile screenshots are inspected separately, not counted as E2E proof.
+
 ## References
 
 - `AGENTS.md`

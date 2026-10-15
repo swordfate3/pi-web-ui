@@ -22,13 +22,14 @@ import { HistoryControls } from "./components/pi-web-ui/history-controls";
 import { RemoteAccessPanel } from "./components/pi-web-ui/remote-access-panel";
 import { ResumeSessionPicker } from "./components/pi-web-ui/resume-session-picker";
 import { SessionDetails, sessionStatsSummary } from "./components/pi-web-ui/session-details";
-import { extractText, processPromptFiles } from "./core/chat-conversion";
+import { extractText } from "./core/chat-conversion";
 import { downloadExport } from "./core/export-download";
 import { copyText, isEditableTarget } from "./core/format";
 import { recentHistoryRange } from "./core/history-dates";
-import { t, useLanguage } from "./core/i18n";
+import { t, useLanguage, workspaceUploadText } from "./core/i18n";
 import { PiClient } from "./core/pi-client";
 import { cancelSavedSessionPicker } from "./core/saved-session-picker";
+import { createScopedSubmitLock } from "./core/scoped-submit";
 import { readPreference, writePreference } from "./core/storage";
 import { usePiWebUiStore } from "./core/store";
 import { dispatchPiEvent } from "./core/store/event-dispatch";
@@ -42,6 +43,13 @@ import type {
   SessionStatsResult,
 } from "./core/types";
 import { errorUiText, renderUiText, UiError, uiRelativeTime, uiText } from "./core/ui-text";
+import {
+  MAX_WORKSPACE_UPLOAD_BYTES,
+  MAX_WORKSPACE_UPLOAD_FILES,
+  uploadWorkspaceFiles,
+  type WorkspaceUploadProgress,
+  type WorkspaceUploadReceipt,
+} from "./core/workspace-uploads";
 
 const DEFAULT_LEFT_SIDEBAR_WIDTH = 320;
 const MIN_LEFT_SIDEBAR_WIDTH = 240;
@@ -147,6 +155,13 @@ export function App() {
   });
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
+  const [uploadProgress, setUploadProgress] = useState<WorkspaceUploadProgress[]>([]);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
+  const [attachmentHandoff, setAttachmentHandoff] = useState(false);
+  const uploadControllerRef = useRef<AbortController | null>(null);
+  const uploadReceiptsRef = useRef(new Map<string, WorkspaceUploadReceipt>());
+  const [routePath, setRoutePath] = useState(() => window.location.pathname);
+  const uploadScopeKey = `${sessionId ?? ""}\0${runtimeId ?? ""}\0${routePath}`;
 
   const [queuedMessages, setQueuedMessages] = useState<PromptCommand[]>([]);
 
@@ -186,6 +201,37 @@ export function App() {
     if (forkPickerSessionIdRef.current !== sessionId) setForkPickerMessages(null);
     setSessionDetails(null);
   }, [sessionId]);
+
+  useEffect(() => {
+    const updatePath = () => setRoutePath(window.location.pathname);
+    window.addEventListener("popstate", updatePath);
+    const timer = window.setInterval(updatePath, 100);
+    return () => {
+      window.removeEventListener("popstate", updatePath);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const activeUploadScopeRef = useRef(uploadScopeKey);
+  useEffect(() => {
+    if (activeUploadScopeRef.current === uploadScopeKey) return;
+    activeUploadScopeRef.current = uploadScopeKey;
+    uploadControllerRef.current?.abort();
+    uploadControllerRef.current = null;
+    uploadReceiptsRef.current.clear();
+    setUploadProgress([]);
+    setUploadingAttachments(false);
+    setAttachmentHandoff(false);
+  }, [uploadScopeKey]);
+
+  useEffect(() => () => uploadControllerRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (!sessionActionPending) return;
+    uploadControllerRef.current?.abort();
+    uploadControllerRef.current = null;
+    setUploadingAttachments(false);
+  }, [sessionActionPending]);
 
   useEffect(() => {
     if (resumeListing && (resumeListing.sessionId !== sessionId || resumeSourceRuntimeRef.current !== runtimeId)) {
@@ -341,7 +387,9 @@ export function App() {
     if (usePiWebUiStore.getState().sessionActionPending) return;
     const [next, ...rest] = queuedMessages;
     setQueuedMessages(rest);
-    sendPrompt(next);
+    void sendPrompt(next).catch(() => {
+      // sendPrompt has already exposed same-session failures through store state.
+    });
   }, [
     chatStatus,
     queuedMessages,
@@ -353,27 +401,66 @@ export function App() {
     forkPickerMessages,
   ]);
 
+  const submitLockRef = useRef<ReturnType<typeof createScopedSubmitLock> | null>(null);
+  if (!submitLockRef.current) submitLockRef.current = createScopedSubmitLock();
   const submitMessage = useCallback(
     async ({ text, files }: { text: string; files?: unknown[] }) => {
-      if (usePiWebUiStore.getState().sessionActionPending) return;
+      const store = usePiWebUiStore.getState();
+      if (store.sessionActionPending) throw new Error("A session change is in progress");
       const trimmed = text.trim();
-      let images: Awaited<ReturnType<typeof processPromptFiles>>;
-      try {
-        images = await processPromptFiles(files);
-      } catch (attachmentError) {
-        setError(errorUiText(attachmentError, uiText("Failed to read file")));
-        throw attachmentError; // Preserve attachments and draft so the user can retry.
+      const attachments = (files ?? []).flatMap((item) => {
+        if (item instanceof File) return [{ id: `file-${item.name}-${item.size}-${item.lastModified}`, file: item }];
+        if (typeof item === "object" && item !== null && "file" in item && item.file instanceof File) {
+          const candidate = item as { id?: unknown; file: File };
+          return [
+            {
+              id:
+                typeof candidate.id === "string"
+                  ? candidate.id
+                  : `file-${candidate.file.name}-${candidate.file.size}-${candidate.file.lastModified}`,
+              file: candidate.file,
+            },
+          ];
+        }
+        return [];
+      });
+      if (attachments.length > MAX_WORKSPACE_UPLOAD_FILES) {
+        setError(workspaceUploadText("filesLimit"));
+        throw new Error("Attachment count limit exceeded");
       }
-      if (usePiWebUiStore.getState().sessionActionPending) return;
-      if (!trimmed && images.length === 0) return;
+      if (attachments.some(({ file }) => file.size > MAX_WORKSPACE_UPLOAD_BYTES)) {
+        setError(workspaceUploadText("sizeLimit"));
+        throw new Error("Attachment size limit exceeded");
+      }
+      if (!trimmed && attachments.length === 0) return;
+      if (attachments.length && (chatStatus === "streaming" || chatStatus === "submitted")) {
+        setError(workspaceUploadText("waitForPi"));
+        throw new Error("Cannot queue attachments while Pi is streaming");
+      }
 
-      const command: PromptCommand = {
-        id: nextPromptId(),
-        message: trimmed || "(see attached image)",
-        images: images.length ? images : undefined,
+      const scopeSessionId = store.sessionId;
+      const scopeRuntimeId = store.runtimeId;
+      const scopePath = window.location.pathname;
+      const scopeKey = `${scopeSessionId ?? ""}\0${scopeRuntimeId ?? ""}\0${scopePath}`;
+      const isScopeCurrent = () => {
+        const current = usePiWebUiStore.getState();
+        return (
+          activeUploadScopeRef.current === scopeKey &&
+          window.location.pathname === scopePath &&
+          current.sessionId === scopeSessionId &&
+          current.runtimeId === scopeRuntimeId
+        );
       };
+      if (!isScopeCurrent()) {
+        setError(workspaceUploadText("sessionChangedRetry"));
+        throw new Error("Upload scope changed");
+      }
+      if (attachments.length && (!scopeSessionId || !scopeRuntimeId || store.connection !== "connected")) {
+        setError(workspaceUploadText("connectFirst"));
+        throw new Error("Upload requires an active session");
+      }
 
-      const isSlashCommand = images.length === 0 && /^\/[^\s]+(?:\s|$)/.test(trimmed);
+      const isSlashCommand = attachments.length === 0 && /^\/[^\s]+(?:\s|$)/.test(trimmed);
       if (isSlashCommand) {
         setError(null);
         try {
@@ -383,21 +470,119 @@ export function App() {
             return;
           }
           await compactSend("prompt", { message: trimmed });
+          setDraftText("");
         } catch (submitError) {
           setError(errorUiText(submitError, uiText("Command failed")));
+          throw submitError;
         }
+        return;
+      }
+      if (attachments.length === 0 && (chatStatus === "streaming" || chatStatus === "submitted")) {
+        setQueuedMessages((current) => [...current, { id: nextPromptId(), message: trimmed }]);
         setDraftText("");
         return;
       }
 
-      if (chatStatus === "streaming" || chatStatus === "submitted") {
-        setQueuedMessages((current) => [...current, command]);
-        setDraftText("");
-        return;
-      }
+      const attempt = submitLockRef.current?.acquire(scopeKey);
+      if (!attempt) throw new Error("A prompt submission is already in progress");
 
-      await sendPrompt(command);
-      setDraftText("");
+      try {
+        const pending = attachments.filter(({ id }) => !uploadReceiptsRef.current.has(id));
+        if (pending.length) {
+          const controller = new AbortController();
+          uploadControllerRef.current?.abort();
+          uploadControllerRef.current = controller;
+          setUploadingAttachments(true);
+          setError(null);
+          setUploadProgress((current) => [
+            ...current.filter((progress) => !pending.some(({ id }) => id === progress.id)),
+            ...pending.map(({ id, file }) => ({ id, filename: file.name, status: "waiting" as const, percent: 0 })),
+          ]);
+          try {
+            await uploadWorkspaceFiles(pending, {
+              scope: {
+                sessionId: scopeSessionId as string,
+                runtimeId: scopeRuntimeId as string,
+                generation: scopePath,
+              },
+              origin: window.location.origin,
+              pathname: scopePath,
+              signal: controller.signal,
+              send: (method, params) => usePiWebUiStore.getState().send(method, params),
+              isCurrent: () => isScopeCurrent() && !usePiWebUiStore.getState().sessionActionPending,
+              onProgress: (progress) => {
+                if (isScopeCurrent()) {
+                  setUploadProgress((current) => [...current.filter((item) => item.id !== progress.id), progress]);
+                }
+              },
+              onReceipt: (id, receipt) => {
+                if (isScopeCurrent()) {
+                  uploadReceiptsRef.current.set(id, receipt);
+                }
+              },
+            });
+          } catch (uploadError) {
+            if (isScopeCurrent()) {
+              if (uploadError instanceof Error && uploadError.name === "AbortError") {
+                setUploadProgress((current) => current.map((item) => ({ ...item, status: "waiting", percent: 0 })));
+                setError(workspaceUploadText("cancelledRetry"));
+              } else {
+                setError(errorUiText(uploadError, workspaceUploadText("uploadFailedRetry")));
+              }
+            }
+            if (isScopeCurrent()) {
+              setUploadProgress((current) =>
+                current.map((item) => {
+                  const receipt = uploadReceiptsRef.current.get(item.id);
+                  return receipt
+                    ? { ...item, status: "saved", percent: 100, relativePath: receipt.relativePath }
+                    : { ...item, status: "waiting", percent: 0 };
+                }),
+              );
+            }
+            throw uploadError;
+          } finally {
+            if (uploadControllerRef.current === controller) uploadControllerRef.current = null;
+            if (isScopeCurrent()) setUploadingAttachments(false);
+          }
+        }
+
+        const current = usePiWebUiStore.getState();
+        if (!isScopeCurrent() || current.sessionActionPending) {
+          if (isScopeCurrent()) setError(workspaceUploadText("sessionChangedRetry"));
+          throw new Error("Upload scope changed before prompt send");
+        }
+        const uploadIds = attachments.flatMap(({ id }) => {
+          const receipt = uploadReceiptsRef.current.get(id);
+          return receipt ? [receipt.uploadId] : [];
+        });
+        if (uploadIds.length !== attachments.length) {
+          setError(workspaceUploadText("uploadNotComplete"));
+          throw new Error("Missing upload receipt");
+        }
+        const command: PromptCommand = {
+          id: nextPromptId(),
+          message: trimmed,
+          ...(uploadIds.length ? { uploads: uploadIds } : {}),
+          ...(uploadIds.length
+            ? { scope: { sessionId: scopeSessionId as string, runtimeId: scopeRuntimeId as string } }
+            : {}),
+        };
+        if (uploadIds.length) setAttachmentHandoff(true);
+        await sendPrompt(command);
+        if (!isScopeCurrent()) return;
+        uploadReceiptsRef.current.clear();
+        setUploadProgress([]);
+        setDraftText("");
+      } catch (submitError) {
+        if (isScopeCurrent()) {
+          setError(errorUiText(submitError, workspaceUploadText("promptFailedRetry")));
+        }
+        throw submitError;
+      } finally {
+        if (isScopeCurrent()) setAttachmentHandoff(false);
+        submitLockRef.current?.release(attempt);
+      }
     },
     [chatStatus, compactSend, nextPromptId, sendPrompt, setError],
   );
@@ -1148,13 +1333,17 @@ export function App() {
             )}
 
             <ChatInput
+              key={uploadScopeKey}
               archAvailable={archAvailable}
               availableThinkingLevels={availableThinkingLevels}
               commands={commands}
               archModeEnabled={archModeEnabled}
               chatStatus={chatStatus}
               connection={connection}
-              disabled={sessionActionPending || resumeLoading}
+              disabled={sessionActionPending || resumeLoading || attachmentHandoff}
+              attachmentsDisabled={uploadingAttachments || attachmentHandoff}
+              uploadProgress={uploadProgress}
+              onCancelUpload={uploadingAttachments ? () => uploadControllerRef.current?.abort() : undefined}
               onAbort={abort}
               onSubmit={submitMessage}
               onToggleArchMode={toggleArchMode}

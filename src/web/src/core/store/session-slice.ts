@@ -7,6 +7,7 @@ import {
   syncToItems,
 } from "../chat-conversion";
 import { recentHistoryRange } from "../history-dates";
+import { workspaceUploadText } from "../i18n";
 import { decodeSessionTreeOrKeep } from "../session-tree-wire";
 import { isToolExpandable } from "../tool-summary";
 import type { ChatItem } from "../types";
@@ -278,14 +279,26 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
     setContextWindowSize: (contextWindowSize) => set({ contextWindowSize }),
 
     sendPrompt: async (command) => {
+      const source = identity();
+      if (
+        command.scope &&
+        (source.sessionId !== command.scope.sessionId || source.runtimeId !== command.scope.runtimeId)
+      ) {
+        throw new Error(workspaceUploadText("sessionChangedRetry"));
+      }
       set({ chatStatus: "submitted", error: null });
       try {
         await get().send("prompt", {
           message: command.message,
           ...(command.images?.length && { images: command.images }),
+          ...(command.uploads?.length && { uploads: command.uploads }),
+          ...(command.scope ? { sessionId: command.scope.sessionId, runtimeId: command.scope.runtimeId } : {}),
         });
       } catch (error) {
-        set({ chatStatus: "error", error: errorUiText(error, uiText("Prompt failed")) });
+        if (sameIdentity(source)) {
+          set({ chatStatus: "error", error: errorUiText(error, uiText("Prompt failed")) });
+        }
+        throw error;
       }
     },
 

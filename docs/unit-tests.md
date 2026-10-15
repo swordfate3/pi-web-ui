@@ -68,11 +68,30 @@ validation/reload/rollback and password recovery without terminal echo. Without
 `CADDY_TEST_BIN`, the optional integration is skipped. All fixture resources are
 cleaned up. This is not an Alibaba deployment or physical-phone test.
 
+## Workspace uploads
+
+```sh
+node --import ./tests/register-ts.mjs --test tests/workspace-uploads.test.ts tests/workspace-upload-client.test.ts
+node --import ./tests/register-ts.mjs --test --test-timeout=70000 e2e/file-upload.integration.ts
+```
+
+Pure tests use disposable workspaces and HTTP fixtures or injectable browser
+transport. Backend integration starts real isolated Pi plus packaged Hub;
+browser E2E additionally uses the real picker, progress, cancellation/retry,
+symlink-directory failure/recovery, a second browser switching sessions during
+upload, and the real Pi `read` tool. No test uploads files to the live public deployment. See
+[file uploads](prd/file-uploads.md) and its [validation report](validation/workspace-uploads.md).
+
 ## Real Pi browser E2E
 
 ```sh
-npm run e2e
+LC_CTYPE=C.UTF-8 npm run e2e
 ```
+
+Use an installed UTF-8 process locale for Chromium (CI sets `LC_CTYPE=C.UTF-8`).
+A POSIX/C process locale can reduce UTF-8 download names to `download` even when
+the HTTP disposition and original bytes are correct; browser context locale
+alone does not set the native process encoding.
 
 The portable connection feature covers root and strip-prefix proxy entries,
 desktop/mobile viewports, real prompt/reply, relative assets/WS and export

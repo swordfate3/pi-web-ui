@@ -26,6 +26,9 @@ export type PromptCommand = {
   id: string;
   message: string;
   images?: PromptImage[];
+  /** Opaque server receipts for files already uploaded in this exact browser session scope. */
+  uploads?: string[];
+  scope?: { sessionId: string; runtimeId: string };
 };
 
 export type ChatItem =

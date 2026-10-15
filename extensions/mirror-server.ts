@@ -28,6 +28,7 @@ import { listenWithFallback } from "./connection-listener.ts";
 import { attachmentDisposition, WorkspaceDownloads } from "./file-downloads.ts";
 import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
+import { serveWorkspaceUpload, WorkspaceUploads } from "./workspace-uploads.ts";
 
 type BrowserImage = {
   data?: string;
@@ -351,6 +352,7 @@ export default function (pi: ExtensionAPI) {
   const savedSelections = new Map<string, Readonly<SavedSelection>>();
   const exports = new Map<string, { path: string; directory: string; filename: string; expiresAt: number }>();
   const fileDownloads = new WorkspaceDownloads();
+  const workspaceUploads = new WorkspaceUploads();
   let activeExport: { controller: AbortController; done: Promise<unknown> } | null = null;
 
   function clearSessionAction() {
@@ -810,6 +812,7 @@ export default function (pi: ExtensionAPI) {
     closingExport?.controller.abort();
     for (const token of exports.keys()) removeExport(token);
     fileDownloads.clear();
+    workspaceUploads.clear();
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
@@ -1219,6 +1222,7 @@ export default function (pi: ExtensionAPI) {
     lifecycleEpoch++;
     savedSelections.clear();
     fileDownloads.clear();
+    workspaceUploads.clear();
     advancedFeaturesEnabled = false;
     latestExecuteCtx = null;
     clearSessionAction();
@@ -1232,6 +1236,22 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("turn_start", async (_event, _ctx) => {
     turnCount++;
+  });
+
+  // Pi's void sendUserMessage API does not expose runner.onError. Confirm the
+  // exact path-bearing user message, not input/agent_start or normal void return.
+  pi.on("message_start", (event, ctx) => {
+    latestCtx = ctx;
+    if (event.message.role !== "user") return;
+    const content = event.message.content;
+    const text =
+      typeof content === "string"
+        ? content
+        : content
+            .filter((block) => block.type === "text")
+            .map((block) => block.text)
+            .join("\n");
+    workspaceUploads.accept(sessionScope(ctx), text);
   });
 
   // Capture user messages for title generation via message_start
@@ -1401,6 +1421,51 @@ export default function (pi: ExtensionAPI) {
           if (sessionReplacementPending) {
             sendTo(ws, error("A session action is already in progress"));
             break;
+          }
+          if (params.uploads !== undefined) {
+            const uploadCtx = checkHistoryIdentity(params, true);
+            if (params.runtimeId !== runtimeId) throw new Error("Pi runtime changed. Select the files again.");
+            const scope = sessionScope(uploadCtx);
+            const paths = workspaceUploads.resolve(scope, params.uploads);
+            if (paths.length) {
+              if (Array.isArray(params.images) && params.images.length)
+                throw new Error("Upload images as files when using file attachments.");
+              if (params.executePiCommand === true) throw new Error("File attachments cannot execute Pi commands.");
+              const text = typeof params.message === "string" ? params.message : "";
+              const message = `${text}\n\nUploaded workspace files (saved, not yet analyzed):\n${paths.map((file) => `- ${JSON.stringify(file)}`).join("\n")}`;
+              const checkReady = () => {
+                if (!scopeIsCurrent(scope) || sessionReplacementPending || !latestCtx)
+                  throw new Error("Session changed. Select the files again.");
+                // Pi 1.1.0 isIdle includes manual/automatic compaction. Never
+                // queue attachments: queued/handled input is not acceptance.
+                if (!latestCtx.isIdle() || latestCtx.hasPendingMessages())
+                  throw new Error("Wait for Pi to finish its current turn or compaction before sending attachments.");
+                if (!latestCtx.model) throw new Error("Select a model before sending attachments.");
+                return latestCtx.model;
+              };
+              await workspaceUploads.send(
+                scope,
+                params.uploads as string[],
+                message,
+                async () => {
+                  const model = checkReady();
+                  // Resolve credentials before dispatch, including command/token
+                  // resolution errors. Never put auth details into WS errors.
+                  let authenticated = false;
+                  try {
+                    authenticated = (await latestCtx?.modelRegistry.getApiKeyAndHeaders(model))?.ok === true;
+                  } catch {}
+                  if (!authenticated) throw new Error("Model authentication failed. Check Pi credentials and retry.");
+                  if (checkReady() !== model) throw new Error("Model changed. Retry the attachment prompt.");
+                },
+                () => {
+                  checkReady();
+                  pi.sendUserMessage(message, { expandPromptTemplates: false });
+                },
+              );
+              sendTo(ws, success());
+              break;
+            }
           }
           const message = typeof params.message === "string" ? params.message : "";
           const images = Array.isArray(params.images) ? (params.images as BrowserImage[]) : [];
@@ -1890,6 +1955,13 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
+        case "prepare_upload": {
+          const uploadCtx = checkHistoryIdentity(params, true);
+          if (params.runtimeId !== runtimeId) throw new Error("Invalid upload identity");
+          sendTo(ws, success(workspaceUploads.prepare(sessionScope(uploadCtx), params.filename, params.size)));
+          break;
+        }
+
         case "prepare_file_download": {
           const downloadCtx = checkHistoryIdentity(params, true);
           if (typeof params.path !== "string" || params.runtimeId !== runtimeId)
@@ -2046,6 +2118,20 @@ export default function (pi: ExtensionAPI) {
 
     // Strip query params
     urlPath = urlPath.split("?")[0];
+
+    if (urlPath.startsWith("/api/uploads")) {
+      const scope = runtimeActive && latestCtx && !sessionReplacementPending ? sessionScope(latestCtx) : undefined;
+      void serveWorkspaceUpload(
+        req,
+        res,
+        workspaceUploads,
+        scope,
+        () => !!scope && !sessionReplacementPending && scopeIsCurrent(scope),
+        SETTINGS.publicUrl ? new URL(SETTINGS.publicUrl).origin : `http://${req.headers.host}`,
+        !!registration && typeof req.headers["x-pi-web-proof"] === "string",
+      );
+      return;
+    }
 
     if (urlPath.startsWith("/api/downloads")) {
       res.setHeader("Cache-Control", "no-store");

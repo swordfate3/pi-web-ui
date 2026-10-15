@@ -39,29 +39,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { t, useLanguage } from "../../src/core/i18n";
+import { runIfAttachmentsEnabled } from "../../src/core/scoped-submit";
 
 // ============================================================================
 // Helpers
 // ============================================================================
-
-const convertBlobUrlToDataUrl = async (url: string): Promise<string | null> => {
-  try {
-    const response = await fetch(url);
-    const blob = await response.blob();
-    // FileReader uses callback-based API, wrapping in Promise is necessary
-    // oxlint-disable-next-line eslint-plugin-promise(avoid-new)
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
-      reader.onloadend = () => resolve(reader.result as string);
-      // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
-      reader.onerror = () => resolve(null);
-      reader.readAsDataURL(blob);
-    });
-  } catch {
-    return null;
-  }
-};
 
 const captureScreenshot = async (): Promise<File | null> => {
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getDisplayMedia) {
@@ -137,8 +119,10 @@ const captureScreenshot = async (): Promise<File | null> => {
 // Provider Context & Types
 // ============================================================================
 
+export type PromptInputFile = FileUIPart & { id: string; file: File };
+
 export interface AttachmentsContext {
-  files: (FileUIPart & { id: string })[];
+  files: PromptInputFile[];
   add: (files: File[] | FileList) => void;
   remove: (id: string) => void;
   clear: () => void;
@@ -197,7 +181,7 @@ export const PromptInputProvider = ({ initialInput: initialTextInput = "", child
   const clearInput = useCallback(() => setTextInput(""), []);
 
   // ----- attachments state (global when wrapped)
-  const [attachmentFiles, setAttachmentFiles] = useState<(FileUIPart & { id: string })[]>([]);
+  const [attachmentFiles, setAttachmentFiles] = useState<PromptInputFile[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // oxlint-disable-next-line eslint(no-empty-function)
   const openRef = useRef<() => void>(() => {});
@@ -216,6 +200,7 @@ export const PromptInputProvider = ({ initialInput: initialTextInput = "", child
         mediaType: file.type,
         type: "file" as const,
         url: URL.createObjectURL(file),
+        file,
       })),
     ]);
   }, []);
@@ -409,7 +394,7 @@ export const PromptInputActionAddScreenshot = ({
 
 export interface PromptInputMessage {
   text: string;
-  files: FileUIPart[];
+  files: PromptInputFile[];
 }
 
 export type PromptInputProps = Omit<HTMLAttributes<HTMLFormElement>, "onSubmit" | "onError"> & {
@@ -424,6 +409,8 @@ export type PromptInputProps = Omit<HTMLAttributes<HTMLFormElement>, "onSubmit" 
   maxFiles?: number;
   // bytes
   maxFileSize?: number;
+  /** Prevent selection, removal, paste, and drop while an asynchronous file submit is running. */
+  attachmentsDisabled?: boolean;
   onError?: (err: { code: "max_files" | "max_file_size" | "accept"; message: string }) => void;
   onSubmit: (message: PromptInputMessage, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
 };
@@ -436,6 +423,7 @@ export const PromptInput = ({
   syncHiddenInput,
   maxFiles,
   maxFileSize,
+  attachmentsDisabled = false,
   onError,
   onSubmit,
   children,
@@ -451,7 +439,7 @@ export const PromptInput = ({
   const formRef = useRef<HTMLFormElement | null>(null);
 
   // ----- Local attachments (only used when no provider)
-  const [items, setItems] = useState<(FileUIPart & { id: string })[]>([]);
+  const [items, setItems] = useState<PromptInputFile[]>([]);
   const files = usingProvider ? controller.attachments.files : items;
 
   // ----- Local referenced sources (always local to PromptInput)
@@ -521,7 +509,7 @@ export const PromptInput = ({
             message: t("Too many files. Some were not added."),
           });
         }
-        const next: (FileUIPart & { id: string })[] = [];
+        const next: PromptInputFile[] = [];
         for (const file of capped) {
           next.push({
             filename: file.name,
@@ -529,6 +517,7 @@ export const PromptInput = ({
             mediaType: file.type,
             type: "file",
             url: URL.createObjectURL(file),
+            file,
           });
         }
         return [...prev, ...next];
@@ -605,9 +594,27 @@ export const PromptInput = ({
 
   const clearReferencedSources = useCallback(() => setReferencedSources([]), []);
 
-  const add = usingProvider ? addWithProviderValidation : addLocal;
-  const remove = usingProvider ? controller.attachments.remove : removeLocal;
-  const openFileDialog = usingProvider ? controller.attachments.openFileDialog : openFileDialogLocal;
+  const add = useCallback(
+    (incoming: File[] | FileList) =>
+      runIfAttachmentsEnabled(attachmentsDisabled, () => {
+        if (usingProvider) addWithProviderValidation(incoming);
+        else addLocal(incoming);
+      }),
+    [attachmentsDisabled, usingProvider, addWithProviderValidation, addLocal],
+  );
+  const remove = useCallback(
+    (id: string) =>
+      runIfAttachmentsEnabled(attachmentsDisabled, () => {
+        if (usingProvider) controller.attachments.remove(id);
+        else removeLocal(id);
+      }),
+    [attachmentsDisabled, usingProvider, controller, removeLocal],
+  );
+  const openFileDialog = useCallback(() => {
+    if (attachmentsDisabled) return;
+    if (usingProvider) controller.attachments.openFileDialog();
+    else openFileDialogLocal();
+  }, [attachmentsDisabled, usingProvider, controller, openFileDialogLocal]);
 
   const clear = useCallback(() => {
     clearAttachments();
@@ -739,9 +746,12 @@ export const PromptInput = ({
     [referencedSources, clearReferencedSources],
   );
 
+  const submittingRef = useRef(false);
   const handleSubmit: FormEventHandler<HTMLFormElement> = useCallback(
     async (event) => {
       event.preventDefault();
+      if (submittingRef.current) return;
+      submittingRef.current = true;
 
       const form = event.currentTarget;
       const text = usingProvider
@@ -751,50 +761,16 @@ export const PromptInput = ({
             return (formData.get("message") as string) || "";
           })();
 
-      // Reset form immediately after capturing text to avoid race condition
-      // where user input during async blob conversion would be lost
-      if (!usingProvider) {
-        form.reset();
-      }
-
       try {
-        // Convert blob URLs to data URLs asynchronously
-        const convertedFiles: FileUIPart[] = await Promise.all(
-          files.map(async ({ id: _id, ...item }) => {
-            if (item.url?.startsWith("blob:")) {
-              const dataUrl = await convertBlobUrlToDataUrl(item.url);
-              // If conversion failed, keep the original blob URL
-              return {
-                ...item,
-                url: dataUrl ?? item.url,
-              };
-            }
-            return item;
-          }),
-        );
-
-        const result = onSubmit({ files: convertedFiles, text }, event);
-
-        // Handle both sync and async onSubmit
-        if (result instanceof Promise) {
-          try {
-            await result;
-            clear();
-            if (usingProvider) {
-              controller.textInput.clear();
-            }
-          } catch {
-            // Don't clear on error - user may want to retry
-          }
-        } else {
-          // Sync function completed without throwing, clear inputs
-          clear();
-          if (usingProvider) {
-            controller.textInput.clear();
-          }
-        }
+        await onSubmit({ files, text }, event);
+        // Do not reset before an async upload: failure must preserve the draft.
+        if (!usingProvider) form.reset();
+        clear();
+        if (usingProvider) controller.textInput.clear();
       } catch {
-        // Don't clear on error - user may want to retry
+        // Preserve the original File objects and draft when upload or prompt send fails.
+      } finally {
+        submittingRef.current = false;
       }
     },
     [usingProvider, controller, files, onSubmit, clear],
@@ -809,6 +785,7 @@ export const PromptInput = ({
         className="hidden"
         multiple={multiple}
         onChange={handleChange}
+        disabled={attachmentsDisabled}
         ref={inputRef}
         title={t("Upload files")}
         type="file"

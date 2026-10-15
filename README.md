@@ -67,7 +67,7 @@ persistence, restart behavior and the authenticated-gateway boundary.
 ### Chat
 - Streaming text and thinking/reasoning blocks
 - Tool call display with expand/collapse
-- Image attachments with paste, drop, and preview
+- Workspace file attachments: choose/drop files or paste images, with progress and cancellation; up to five files, 50 MiB each, saved under `.pi-uploads/<session>/<upload>/` before sending paths to Pi. Original bytes stream over HTTP, including through Hub. Images are now file references for Pi to read on demand, not automatically inlined model images. See [upload behavior and limits](docs/prd/file-uploads.md).
 - Click project-file paths in assistant replies to confirm a download, preserving the original filename (including Chinese); works directly or through Hub. See [download behavior and access limits](docs/prd/file-downloads.md).
 - Branch from user messages and continue from branch ends via `navigate_tree` in the current session tree (requires `/webui` command context)
 - Follow-up messages while the agent is streaming

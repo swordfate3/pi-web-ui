@@ -20,6 +20,7 @@
 - [简约聊天](prd/minimal-chat.md)
 - [双语界面](prd/interface-language.md)
 - [交互性能](prd/interaction-performance.md)
+- [工作区附件上传](prd/file-uploads.md)、[确认后下载文件](prd/file-downloads.md)
 - [左侧栏](prd/left-sidebar.md)、[树导航](prd/tree-sidebar.md)、[分支消息](prd/branch-message.md)
 - [Workspace 入口](prd/workspace-status-float.md)、[产物](prd/workspace-artifacts.md)、[详情面板](prd/right-panel.md)
 

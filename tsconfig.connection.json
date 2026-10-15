@@ -10,6 +10,8 @@
     "extensions/session-registration.ts",
     "extensions/session-history.ts",
     "extensions/file-downloads.ts",
+    "extensions/workspace-uploads.ts",
+    "tests/workspace-uploads.test.ts",
     "tests/file-downloads.test.ts",
     "tests/file-download-store.test.ts",
     "tests/file-links.test.ts",

@@ -224,6 +224,7 @@ try {
     "hub/server.ts",
     "bin/pi-web-hub.mjs",
     "vite.hub.config.ts",
+    "extensions/workspace-uploads.ts",
   ];
   for (const [index, input] of staleInputs.entries()) {
     const sourcePath = path.join(fixture, input);
@@ -271,6 +272,7 @@ try {
     "hub/server.ts",
     "extensions/connection-config.ts",
     "extensions/connection-listener.ts",
+    "extensions/workspace-uploads.ts",
     "extensions/session-registration.ts",
     "extensions/remote-access/plan.ts",
     "extensions/remote-access/gateway.py",

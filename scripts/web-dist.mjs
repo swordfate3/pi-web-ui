@@ -21,6 +21,7 @@ const SOURCE_FILES = [
   "extensions/session-registration.ts",
   "extensions/session-history.ts",
   "extensions/file-downloads.ts",
+  "extensions/workspace-uploads.ts",
   "extensions/remote-access/plan.ts",
   "extensions/remote-access/gateway.py",
   "scripts/web-dist.mjs",

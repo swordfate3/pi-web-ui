@@ -7,8 +7,9 @@ import {
   PromptInputTextarea,
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
-import { t, useLanguage } from "../../core/i18n";
+import { t, useLanguage, workspaceUploadText } from "../../core/i18n";
 import type { BrowserCommandInfo, ChatSubmitStatus, ConnectionState } from "../../core/types";
+import type { WorkspaceUploadProgress } from "../../core/workspace-uploads";
 import { ArchModeToggle } from "./arch-mode-toggle";
 import { PromptAttachmentButton, PromptAttachmentPreview } from "./prompt-attachments";
 
@@ -22,7 +23,10 @@ type ChatInputProps = {
   commands: BrowserCommandInfo[];
   availableThinkingLevels: string[];
   disabled?: boolean;
-  onSubmit: (opts: { text: string; files?: unknown[] }) => void;
+  attachmentsDisabled?: boolean;
+  uploadProgress?: WorkspaceUploadProgress[];
+  onCancelUpload?: () => void;
+  onSubmit: (opts: { text: string; files?: unknown[] }) => void | Promise<void>;
   onAbort: () => void;
   onToggleArchMode: () => void;
   onValueChange: (value: string) => void;
@@ -38,6 +42,9 @@ export function ChatInput({
   commands,
   availableThinkingLevels,
   disabled = false,
+  attachmentsDisabled = false,
+  uploadProgress = [],
+  onCancelUpload,
   onSubmit,
   onAbort,
   onToggleArchMode,
@@ -140,19 +147,18 @@ export function ChatInput({
         )}
         {attachmentError && (
           <p role="alert" className="mb-2 text-sm text-destructive">
-            {t(
-              attachmentError === "accept"
-                ? "No files match the accepted types."
-                : attachmentError === "max_file_size"
-                  ? "All files exceed the maximum size."
-                  : "Too many files. Some were not added.",
-            )}
+            {attachmentError === "accept"
+              ? t("No files match the accepted types.")
+              : workspaceUploadText(attachmentError === "max_file_size" ? "sizeLimit" : "tooManyFiles")}
           </p>
         )}
         <PromptInput
-          accept="image/*"
+          accept={undefined}
+          attachmentsDisabled={attachmentsDisabled}
           className="chat-composer"
-          globalDrop={!disabled}
+          globalDrop={!disabled && !attachmentsDisabled}
+          maxFiles={5}
+          maxFileSize={50 * 1024 * 1024}
           multiple
           onError={(error) => setAttachmentError(error.code)}
           onSubmit={(message) => {
@@ -160,7 +166,40 @@ export function ChatInput({
             return onSubmit(message);
           }}
         >
-          <PromptAttachmentPreview />
+          <PromptAttachmentPreview disabled={attachmentsDisabled} uploadProgress={uploadProgress} />
+          {uploadProgress.length > 0 && (
+            <div className="flex w-full min-w-0 flex-col items-start gap-2 px-3 pt-2" aria-live="polite">
+              {uploadProgress.map((progress) => {
+                const displayProgress =
+                  progress.status === "saved"
+                    ? workspaceUploadText("savedPath", { path: progress.relativePath || "" })
+                    : `${progress.percent ?? 0}%`;
+                return (
+                  <span
+                    className="block w-full min-w-0 max-w-full truncate text-muted-foreground text-xs"
+                    data-testid="upload-progress"
+                    key={progress.id}
+                    title={`${progress.filename} — ${displayProgress}`}
+                  >
+                    {workspaceUploadText("uploadProgress", {
+                      filename: progress.filename,
+                      progress: displayProgress,
+                    })}
+                  </span>
+                );
+              })}
+              {onCancelUpload && (
+                <button
+                  className="shrink-0 text-xs underline"
+                  data-testid="upload-cancel"
+                  onClick={onCancelUpload}
+                  type="button"
+                >
+                  {workspaceUploadText("cancelUpload")}
+                </button>
+              )}
+            </div>
+          )}
           <PromptInputBody>
             <PromptInputTextarea
               data-testid="message-input"
@@ -186,7 +225,7 @@ export function ChatInput({
                   selectSuggestion(suggestions[selectedSuggestion].name);
                 }
               }}
-              disabled={disabled}
+              disabled={disabled || attachmentsDisabled}
               placeholder={t("Message Pi...")}
               value={value}
             />
@@ -200,12 +239,17 @@ export function ChatInput({
                   onToggle={onToggleArchMode}
                 />
               )}
-              <PromptAttachmentButton disabled={disabled} />
+              <PromptAttachmentButton disabled={disabled || attachmentsDisabled} />
               <div className="hidden items-center gap-1 px-2 text-muted-foreground text-xs sm:flex">
                 {t("Enter sends, Shift+Enter inserts a newline")}
               </div>
             </PromptInputTools>
-            <PromptInputSubmit data-testid="submit-message" disabled={disabled} onStop={onAbort} status={chatStatus} />
+            <PromptInputSubmit
+              data-testid="submit-message"
+              disabled={disabled || attachmentsDisabled}
+              onStop={onAbort}
+              status={chatStatus}
+            />
           </PromptInputFooter>
         </PromptInput>
       </div>

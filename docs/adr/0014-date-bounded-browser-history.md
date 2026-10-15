@@ -14,6 +14,7 @@ Browser history is a read-only window, not the model's context or the persisted 
 
 - Default to three calendar days. The browser supplies local-calendar half-open timestamp bounds; UTC is only the server bootstrap fallback.
 - `state_sync`, `sync_request` and explicit history reads return bounded pages. The visible page is replaced when changing dates or requesting an older page; it is not an unbounded in-memory accumulator.
+- The main conversation's date filter defaults to collapsed, showing the applied date range in a compact toggle. Expanding exposes the existing date controls and metadata; collapsing does not request history, change the applied range, or discard unapplied edits. Loading/error/historical-view warnings and pagination remain visible when collapsed. Saved-session picker date controls stay expanded.
 - Date selection and pagination happen on the server before transferring message bodies. History metadata declares the range, count, next entry-ID cursor, preview count and partial-tree status.
 - Tree navigation receives bounded previews rather than duplicate full tool outputs. IDs remain suitable for Pi navigation; the UI declares omitted nodes.
 - A single oversized record becomes an explicitly marked browser preview. Persisted originals remain unchanged. No query bypass may send its original unbounded body.

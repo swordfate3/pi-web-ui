@@ -8,10 +8,20 @@ const { Given, When, Then, After } = createBdd();
 let harness: PiWebUiHarness | undefined;
 let viewport = "desktop";
 let browserErrors: string[] = [];
+let expandedHeight = 0;
+let historyRequests = 0;
+let requestsBeforeCollapse = 0;
 
 Given("a large dated history conversation is running at {string} size", async ({ page }, size: string) => {
   viewport = size;
   browserErrors = [];
+  historyRequests = 0;
+  page.on("websocket", (socket) =>
+    socket.on("framesent", (frame) => {
+      const value = JSON.parse(String(frame.payload));
+      if (value.type === "req" && value.method === "get_history") historyRequests++;
+    }),
+  );
   page.on("pageerror", (error) => browserErrors.push(error.message));
   await page.setViewportSize(size === "mobile" ? { width: 390, height: 844 } : { width: 1440, height: 1000 });
   harness = await startPiWebUi("chat-lifecycle", { datedHistory: true });
@@ -21,6 +31,58 @@ When("I open the dated history web page", async ({ page }) => {
   if (!harness) throw new Error("Dated history harness is not running");
   await page.goto(harness.pageUrl);
   await expect(page.getByPlaceholder("Message Pi...")).toBeVisible();
+});
+
+Then("the history date filters are collapsed by default", async ({ page }) => {
+  const toggle = page.getByRole("button", { name: "Expand date filters", exact: true });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByLabel("History start date", { exact: true })).toBeHidden();
+  await expect(page.getByRole("log")).toContainText("DATED_RECENT_END_MARKER");
+  const box = await page.getByRole("region", { name: "Conversation history", exact: true }).boundingBox();
+  expect(box?.height).toBeLessThan(120);
+});
+
+When("I expand the history date filters", async ({ page }) => {
+  const toggle = page.getByRole("button", { name: "Expand date filters", exact: true });
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Collapse date filters", exact: true })).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect(page.getByLabel("History start date", { exact: true })).toBeVisible();
+});
+
+When("I collapse the history date filters", async ({ page }) => {
+  const region = page.getByRole("region", { name: "Conversation history", exact: true });
+  expandedHeight = (await region.boundingBox())?.height ?? 0;
+  requestsBeforeCollapse = historyRequests;
+  await page.getByRole("button", { name: "Collapse date filters", exact: true }).click();
+});
+
+Then("collapsing dates preserves the selected history and frees vertical space", async ({ page }) => {
+  const region = page.getByRole("region", { name: "Conversation history", exact: true });
+  await expect(page.getByLabel("History start date", { exact: true })).toBeHidden();
+  await expect(region).toContainText(await oldDate(page));
+  await expect(page.getByRole("log")).toContainText("DATED_OLD_ONLY_MARKER");
+  await expect(
+    region.getByText("Live messages are hidden while viewing past dates or an older page.", { exact: true }),
+  ).toBeVisible();
+  const height = (await region.boundingBox())?.height ?? expandedHeight;
+  expect(expandedHeight - height).toBeGreaterThan(60);
+  expect(historyRequests).toBe(requestsBeforeCollapse);
+  await page.screenshot({ path: `.tmp/history-collapsed-${viewport}.png`, fullPage: true });
+});
+
+Then("collapsing and reopening preserves unapplied date edits", async ({ page }) => {
+  const start = page.getByLabel("History start date", { exact: true });
+  await start.fill(await oldDate(page));
+  const requests = historyRequests;
+  await page.getByRole("button", { name: "Collapse date filters", exact: true }).click();
+  await page.getByRole("button", { name: "Expand date filters", exact: true }).click();
+  await expect(start).toHaveValue(await oldDate(page));
+  expect(historyRequests).toBe(requests);
+  await expect(page.getByRole("log")).toContainText("DATED_RECENT_END_MARKER");
 });
 
 Then("I see the recent history marker but not the old date marker", async ({ page }) => {

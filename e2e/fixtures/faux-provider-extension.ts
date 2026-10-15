@@ -6,6 +6,7 @@ import dailyCommandsResponses from "./responses/daily-commands.ts";
 import duplicateArtifactResponses from "./responses/duplicate-artifact.ts";
 import externalArtifactResponses from "./responses/external-artifact.ts";
 import fileDownloadResponses from "./responses/file-download.ts";
+import fileUploadResponses from "./responses/file-upload.ts";
 import languageMarkdownResponses from "./responses/language-markdown.ts";
 import largeToolOutputResponses from "./responses/large-tool-output.ts";
 import toolFailureResponses from "./responses/tool-failure.ts";
@@ -21,6 +22,7 @@ const responsesByName = {
   "duplicate-artifact": duplicateArtifactResponses,
   "external-artifact": externalArtifactResponses,
   "file-download": fileDownloadResponses,
+  "file-upload": fileUploadResponses,
   "tool-failure": toolFailureResponses,
   "workspace-artifact": workspaceArtifactResponses,
 };

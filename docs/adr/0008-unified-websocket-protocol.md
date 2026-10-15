@@ -339,3 +339,7 @@ Our custom envelope is isomorphic enough to JSON-RPC that migration later is tri
 - [ADR 0002: Raw Web UI Event Forwarding](./0002-web-ui-extension-event-protocol.md) — event forwarding principle preserved
 - [Conversation Tree Sidebar PRD](../prd/tree-sidebar.md) — current-session tree scope (the previously linked ADR 0007 tree document is not present in this repository)
 - [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification) — considered, not adopted
+
+## Read-only companion usage
+
+`get_usage_stats({sessionId,runtimeId})` requires both current identities and returns only bounded usage counters, USD known-cost subtotals, unknown-price counts and actual response-model labels. It does not return messages, paths, or credentials. `statisticsScope: "all_entries"` includes all branches of the current session, independent of history pagination. The browser exposes an intent-level `getUsageStats()` action and rejects stale/malformed results. See [ADR 0017](0017-web-whale-companion.md).

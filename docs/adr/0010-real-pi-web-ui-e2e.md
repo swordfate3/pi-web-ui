@@ -366,3 +366,7 @@ Desktop/mobile screenshots are inspected separately, not counted as E2E proof.
 - `docs/prd/workspace-status-float.md`
 - `docs/prd/workspace-artifacts.md`
 - `docs/prd/right-panel.md`
+
+## Companion usage fixture
+
+The companion browser scenarios and `e2e/whale-usage.integration.ts` run real Pi with an isolated synthetic saved session containing old/current dates, a sibling branch, different actual response models, and mixed known/unknown prices. These deliberately verify full-session rather than date-page totals. Browser asset tests import a synthetic PNG through Settings and verify Blob rendering/persistence without a Pi upload. Raw downloaded fan art is used only for separate local visual inspection, never committed as a fixture. These checks do not certify provider billing, physical phones, Safari or the public deployment.

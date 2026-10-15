@@ -22,6 +22,8 @@ import { HistoryControls } from "./components/pi-web-ui/history-controls";
 import { RemoteAccessPanel } from "./components/pi-web-ui/remote-access-panel";
 import { ResumeSessionPicker } from "./components/pi-web-ui/resume-session-picker";
 import { SessionDetails, sessionStatsSummary } from "./components/pi-web-ui/session-details";
+import { WhalePet } from "./components/pi-web-ui/whale-pet";
+import { type WhaleMode, WhaleSettings } from "./components/pi-web-ui/whale-settings";
 import { extractText } from "./core/chat-conversion";
 import { downloadExport } from "./core/export-download";
 import { copyText, isEditableTarget } from "./core/format";
@@ -43,6 +45,7 @@ import type {
   SessionStatsResult,
 } from "./core/types";
 import { errorUiText, renderUiText, UiError, uiRelativeTime, uiText } from "./core/ui-text";
+import { useWhaleAssets } from "./core/whale-assets";
 import {
   MAX_WORKSPACE_UPLOAD_BYTES,
   MAX_WORKSPACE_UPLOAD_FILES,
@@ -168,6 +171,22 @@ export function App() {
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const whaleAssets = useWhaleAssets();
+  const [whaleMode, setWhaleMode] = useState<WhaleMode>(() => {
+    const mode = readPreference("pi-web-ui-whale-mode");
+    return mode === "hidden" || mode === "compact" ? mode : "full";
+  });
+  const [whaleReduceMotion, setWhaleReduceMotion] = useState(
+    () => readPreference("pi-web-ui-whale-reduce-motion") === "true",
+  );
+  const changeWhaleMode = (mode: WhaleMode) => {
+    setWhaleMode(mode);
+    writePreference("pi-web-ui-whale-mode", mode);
+  };
+  const changeWhaleMotion = (value: boolean) => {
+    setWhaleReduceMotion(value);
+    writePreference("pi-web-ui-whale-reduce-motion", String(value));
+  };
   const [remoteAccess, setRemoteAccess] = useState<"access" | "login" | null>(() =>
     location.hash === "#remote-access" ? "access" : null,
   );
@@ -1368,6 +1387,25 @@ export function App() {
           )}
         </div>
 
+        <WhalePet
+          mode={whaleMode}
+          onModeChange={changeWhaleMode}
+          reduceMotion={whaleReduceMotion}
+          images={whaleAssets.images}
+          suspended={Boolean(
+            modelOpen ||
+              settingsOpen ||
+              remoteAccess ||
+              commandOpen ||
+              statusOverlay ||
+              forkPickerMessages ||
+              resumeListing ||
+              sessionDetails ||
+              dialog ||
+              sidebarMobileOpen ||
+              rightPanelVisible,
+          )}
+        />
         {modelOpen && (
           <ModelPicker
             currentModel={currentModel}
@@ -1381,6 +1419,15 @@ export function App() {
         {remoteAccess && <RemoteAccessPanel initialTab={remoteAccess} onClose={closeRemoteAccess} />}
         {settingsOpen && (
           <SettingsPanel
+            whaleSettings={
+              <WhaleSettings
+                mode={whaleMode}
+                onModeChange={changeWhaleMode}
+                reduceMotion={whaleReduceMotion}
+                onReduceMotionChange={changeWhaleMotion}
+                assets={whaleAssets}
+              />
+            }
             authConfigured={authConfigured}
             authEnabled={authEnabled}
             autoCompaction={autoCompaction}

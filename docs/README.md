@@ -25,3 +25,6 @@
 - [Workspace 入口](prd/workspace-status-float.md)、[产物](prd/workspace-artifacts.md)、[详情面板](prd/right-panel.md)
 
 架构与协议决策维护在 `adr/`，包括 [事件协议](adr/0002-web-ui-extension-event-protocol.md)、[生命周期](adr/0005-intercepted-command-ui-lifecycle.md)、[WebSocket 协议](adr/0008-unified-websocket-protocol.md)、[真实 E2E](adr/0010-real-pi-web-ui-e2e.md)、[视觉验证](adr/0011-web-ui-visual-validation.md)、[附件分片续传](adr/0016-resumable-workspace-uploads.md)。
+
+- [网页鲸鱼娘](prd/whale-companion.md)：页面内悬浮、显示生命周期、本地素材与当前会话用量。
+- [ADR 0017](adr/0017-web-whale-companion.md)：浏览器资源与公开软件许可分离、只读统计及 scope fencing。

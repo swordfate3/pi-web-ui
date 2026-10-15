@@ -12,6 +12,28 @@ export type WebConnectionInfo = {
   advertisedUrl: string;
   registrationConfigured: boolean;
 };
+export type UsageStatsTotals = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  cost: number | null;
+  unpricedRequests: number;
+  requests: number;
+};
+export type UsageStatsModel = UsageStatsTotals & { provider: string; model: string };
+export type UsageStatsResult = {
+  sessionId: string;
+  runtimeId: string;
+  statisticsScope: "all_entries";
+  currency: "USD";
+  totals: UsageStatsTotals;
+  models: UsageStatsModel[];
+  lastResponse: UsageStatsModel | null;
+  truncated: boolean;
+};
+
 export type ThemeMode = "system" | "light" | "dark";
 export type AppView = "chat" | "projects";
 export type SystemTone = "info" | "success" | "error";

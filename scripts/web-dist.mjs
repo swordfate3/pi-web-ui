@@ -20,6 +20,7 @@ const SOURCE_FILES = [
   "extensions/connection-listener.ts",
   "extensions/session-registration.ts",
   "extensions/session-history.ts",
+  "extensions/session-usage.ts",
   "extensions/file-downloads.ts",
   "extensions/workspace-uploads.ts",
   "extensions/remote-access/plan.ts",

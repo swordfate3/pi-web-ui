@@ -184,3 +184,9 @@ Open `http://localhost:4444`; Vite serves the React UI and proxies `/api` and `/
 ## License
 
 [MIT](LICENSE). Upstream attribution is preserved; see [license provenance](docs/license-provenance.md).
+
+### 网页鲸鱼娘
+
+页面内可选悬浮鲸鱼娘支持拖动、点击反馈、收起、关闭，以及当前会话全部分支的 Token / 按实际响应模型划分的 USD 估算费用。互动不调用模型。缺少价格时显示未知；估算不等于实际账单。
+
+在 **设置 → 鲸鱼娘** 导入本地 PNG/WebP（最少一张待机图，最多五个状态），图片仅保存在本浏览器当前站点，不上传给 Pi，不随软件包分发。未导入时使用小鲸鱼表情。关闭后也可从设置重新开启。详见 [产品说明](docs/prd/whale-companion.md)。

@@ -12,6 +12,7 @@ import { decodeSessionTreeOrKeep } from "../session-tree-wire";
 import { isToolExpandable } from "../tool-summary";
 import type { ChatItem } from "../types";
 import { errorUiText, uiText } from "../ui-text";
+import { parseUsageStats } from "../usage-stats";
 import { artifactsFromEntries } from "../workspace-artifacts";
 import { runSessionAction } from "./session-action";
 import type { SessionSlice, StoreSlice } from "./types";
@@ -35,6 +36,15 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
   const sameIdentity = (source: ReturnType<typeof identity>) =>
     source.sessionId === get().sessionId && source.runtimeId === get().runtimeId;
   return {
+    getUsageStats: async () => {
+      const source = identity();
+      if (!source.sessionId || !source.runtimeId || get().connection !== "connected" || get().sessionActionPending)
+        throw new Error("Usage statistics unavailable for this session.");
+      const result = await get().send("get_usage_stats", { sessionId: source.sessionId, runtimeId: source.runtimeId });
+      if (!sameIdentity(source) || get().sessionActionPending || get().connection !== "connected")
+        throw new Error("Usage statistics unavailable for this session.");
+      return parseUsageStats(result, source.sessionId, source.runtimeId);
+    },
     historyRange: recentHistoryRange(),
     history: null,
     historyBefore: null,

@@ -17,6 +17,8 @@ export type PiWebUiHarnessOptions = {
   longSession?: boolean;
   /** A saved conversation whose original snapshot exceeds the Hub frame limit. */
   datedHistory?: boolean;
+  /** Synthetic multi-model, mixed-priced usage across branches and dates. */
+  usageHistory?: boolean;
   /** Optional immutable release root; defaults to the working repository. */
   runtimeDir?: string;
   /** Explicit root for Node ESM integration runners (Playwright supplies __dirname). */
@@ -40,11 +42,13 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   mkdirSync(agentDir, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
   if (options.git !== false) prepareGitWorkspace(workspaceDir);
-  const longSessionFile = options.datedHistory
-    ? writeDatedHistoryFixture(sessionDir, workspaceDir)
-    : options.longSession
-      ? writeLongSessionFixture(sessionDir, workspaceDir)
-      : undefined;
+  const longSessionFile = options.usageHistory
+    ? writeUsageHistoryFixture(sessionDir, workspaceDir)
+    : options.datedHistory
+      ? writeDatedHistoryFixture(sessionDir, workspaceDir)
+      : options.longSession
+        ? writeLongSessionFixture(sessionDir, workspaceDir)
+        : undefined;
 
   const processOutput: string[] = [];
   const piProcess = spawn(
@@ -113,6 +117,62 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
       if (existsSync(tempRoot)) rmSync(tempRoot, { recursive: true, force: true });
     },
   };
+}
+
+function writeUsageHistoryFixture(sessionDir: string, workspaceDir: string): string {
+  const sessionId = "8e91f4c2-3000-4500-8500-000000000017";
+  const file = path.join(sessionDir, `${Date.now()}_${sessionId}.jsonl`);
+  const now = Date.now();
+  const old = now - 14 * 86400000;
+  const usage = (scale: number, cost: number) => ({
+    input: 100 * scale,
+    output: 20 * scale,
+    cacheRead: 30 * scale,
+    cacheWrite: 5 * scale,
+    reasoning: 10 * scale,
+    cacheWrite1h: 2 * scale,
+    totalTokens: 155 * scale,
+    cost: { input: cost, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+  });
+  const user = (id: string, parentId: string | null, time: number) => ({
+    type: "message",
+    id,
+    parentId,
+    timestamp: new Date(time).toISOString(),
+    message: { role: "user", content: "SYNTHETIC_USAGE_ONLY", timestamp: time },
+  });
+  const assistant = (id: string, parentId: string, time: number, model: string, scale: number, cost: number) => ({
+    type: "message",
+    id,
+    parentId,
+    timestamp: new Date(time).toISOString(),
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "SYNTHETIC_USAGE_RESPONSE" }],
+      api: "anthropic-messages",
+      provider: "fixture-provider",
+      model: "selected-alias",
+      responseModel: model,
+      usage: usage(scale, cost),
+      timestamp: time,
+      stopReason: "stop",
+    },
+  });
+  writeFileSync(
+    file,
+    `${[
+      { type: "session", version: 3, id: sessionId, timestamp: new Date(old).toISOString(), cwd: workspaceDir },
+      user("usage-user", null, old),
+      assistant("usage-priced", "usage-user", old + 1, "billed-model-a", 1, 0.001),
+      // This is a sibling branch, not part of the current leaf's prompt context.
+      assistant("usage-unknown", "usage-user", now - 2, "billed-model-b", 2, 0),
+      user("usage-current", "usage-priced", now),
+    ]
+      .map((value) => JSON.stringify(value))
+      .join("\n")}\n`,
+    "utf8",
+  );
+  return file;
 }
 
 function writeDatedHistoryFixture(sessionDir: string, workspaceDir: string): string {

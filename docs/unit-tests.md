@@ -106,3 +106,16 @@ downloads. It captures rendered screenshots. Optional
 `PI_E2E_BROWSER_EXECUTABLE` selects a local compatible Chromium executable;
 otherwise Playwright uses its default browser installation. All temporary Pi
 processes, proxy servers and test workspaces are cleaned up by the harness.
+
+## Web companion
+
+`tests/session-usage.test.ts` covers actual response-model grouping, cache/reasoning subset semantics, mixed/unknown pricing, summaries, malformed values, and bounded model rows. `tests/usage-stats-client.test.ts` checks reply parsing and session/runtime/disconnect fences. `tests/whale-pet.test.ts` covers visible-viewport positioning and optional local storage. Local image validation tests are separate from actual IndexedDB browser evidence.
+
+```sh
+node --import ./tests/register-ts.mjs --test tests/session-usage.test.ts tests/usage-stats-client.test.ts tests/whale-pet.test.ts tests/whale-assets.test.ts
+PI_E2E_BIN="$PWD/node_modules/.bin/pi" node --import ./tests/register-ts.mjs --test e2e/whale-usage.integration.ts
+npm run e2e:gen
+node_modules/.bin/playwright test -c e2e/playwright.config.ts whale-companion
+```
+
+The real Pi usage fixture contains synthetic old/current dates and sibling branches, priced/unknown responses and different actual model IDs; no real session is opened. Companion browser scenarios use a generated one-pixel PNG, not downloaded fan art, and verify local storage/reload, lack of uploads, display lifecycle, scope replacement and mobile bounds. Visual screenshots of imported fan artwork are local-only artifacts, not package assets or functional proof by themselves.

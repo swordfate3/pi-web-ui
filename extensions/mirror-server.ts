@@ -28,6 +28,7 @@ import { listenWithFallback } from "./connection-listener.ts";
 import { attachmentDisposition, WorkspaceDownloads } from "./file-downloads.ts";
 import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
+import { getSessionUsageStatistics } from "./session-usage.ts";
 import { serveWorkspaceUpload, WorkspaceUploads } from "./workspace-uploads.ts";
 
 type BrowserImage = {
@@ -1823,6 +1824,22 @@ export default function (pi: ExtensionAPI) {
             break;
           }
           sendTo(ws, success(buildSessionDetails(ctx)));
+          break;
+        }
+
+        case "get_usage_stats": {
+          const usageCtx = checkHistoryIdentity(params, true);
+          if (params.runtimeId !== runtimeId) throw new Error("Pi runtime changed. Request usage statistics again.");
+          sendTo(
+            ws,
+            success(
+              getSessionUsageStatistics(
+                usageCtx.sessionManager.getEntries(),
+                usageCtx.sessionManager.getSessionId(),
+                runtimeId,
+              ),
+            ),
+          );
           break;
         }
 

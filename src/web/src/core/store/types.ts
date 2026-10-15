@@ -21,6 +21,7 @@ import type {
   SystemTone,
   ThemeMode,
   Usage,
+  UsageStatsResult,
   WebConnectionInfo,
   WorkspaceArtifact,
 } from "../types";
@@ -41,6 +42,7 @@ export type ConnectionSlice = {
 };
 
 export type SessionSlice = {
+  getUsageStats: () => Promise<UsageStatsResult>;
   historyRange: HistoryRange;
   history: HistoryMetadata | null;
   historyBefore: string | null;

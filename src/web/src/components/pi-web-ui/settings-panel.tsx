@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -8,6 +8,7 @@ import type { ThemeMode } from "../../core/types";
 import { Modal } from "./modal";
 
 export function SettingsPanel(props: {
+  whaleSettings?: ReactNode;
   authConfigured: boolean;
   authEnabled: boolean;
   autoCompaction: boolean;
@@ -74,6 +75,8 @@ export function SettingsPanel(props: {
             ))}
           </div>
         </section>
+
+        {props.whaleSettings}
 
         <section className="space-y-2">
           <h3 className="font-medium text-sm">{t("Session")}</h3>

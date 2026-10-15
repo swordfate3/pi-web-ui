@@ -115,6 +115,18 @@ test("date history actions and preview explanation translate without translating
   }
 });
 
+test("expired Hub handoff explains recovery in both languages", () => {
+  const key = "Session link expired. Reopen this Pi from the Hub." as keyof typeof messages;
+  try {
+    setLanguage("zh-CN");
+    assert.equal(t(key), "会话链接已失效，请从总管重新打开这个 Pi。");
+    setLanguage("en");
+    assert.equal(t(key), key);
+  } finally {
+    setLanguage("en");
+  }
+});
+
 test("tree labels translate while chat content, IDs and tool wire names remain intact", () => {
   try {
     const tree = [

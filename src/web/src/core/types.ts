@@ -3,6 +3,8 @@ import type { ComponentType } from "react";
 import type { UiText } from "./ui-text";
 
 export type ConnectionState = "connecting" | "connected" | "disconnected";
+/** Browser-only capability from Hub, never forwarded to the Pi/model. */
+export type HubRoute = { generation: string; token: string };
 /** Read-only listener facts. Configured registration is not a verified lease. */
 export type WebConnectionInfo = {
   port: number;

@@ -43,3 +43,18 @@ responsibilities. Current remote onboarding templates remain single-session.
 The generation ledger grows across lifetimes and has no automatic pruning.
 There is no arbitrary fixed session-count limit. Review and monitor state growth
 and service resources before public deployment. See [operating guide](../hub.md).
+
+## Browser handoff after session replacement (2026-10-15)
+
+Retiring a generation still closes its sockets and permanently invalidates its
+URL. An already connected browser may now use an in-memory, short-lived Hub
+capability to follow only that Pi's first verified successor. This is not a
+redirect from the retired route, not selection of the most recently active Pi,
+and not reuse of the administrator or registration credential. Revocation,
+expiry, Hub restart and the disappearance of the bound successor stop handoff.
+The browser replaces its address while keeping its mounted app and action
+waiter; it never repeats `/resume`, `/new` or other lifecycle commands.
+
+See ADR 0008 for the transport contract. Deployment requires the new Hub server
+and browser assets together; a frontend-only update cannot teach an old Hub this
+endpoint. The existing state, grants and generation ledger must be retained.

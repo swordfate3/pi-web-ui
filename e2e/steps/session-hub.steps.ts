@@ -12,6 +12,7 @@ let browserPage: Page | undefined;
 let agents: PiWebUiHarness[] = [];
 let screen = "desktop";
 let oldPath = "";
+let lastSessionId = "";
 const errors: string[] = [];
 function page() {
   if (!browserPage) throw new Error("Hub page is not initialized");
@@ -37,6 +38,18 @@ When("我在 {string} 打开有两个真实 Pi 的总管首页", async ({ browse
     hasTouch: screen === "mobile",
   });
   browserPage = await context.newPage();
+  lastSessionId = "";
+  page().on("websocket", (socket) => {
+    socket.on("framereceived", (frame) => {
+      try {
+        const value = JSON.parse(String(frame.payload));
+        if (value.type === "event" && value.event === "state_sync" && value.payload.sessionId)
+          lastSessionId = value.payload.sessionId;
+      } catch {
+        /* Ignore transport control frames. */
+      }
+    });
+  });
   errors.length = 0;
   page().on("pageerror", (error) => errors.push(error.message));
   await page().goto(`${hub?.url}sessions/`);
@@ -67,6 +80,55 @@ Then("总管路由中的 Pi 可以收发真实测试消息", async () => {
   await page().getByTestId("submit-message").click();
   await expect(page().getByRole("log")).toContainText("你好，Pi Web UI 已收到消息。");
   expect(errors).toEqual([]);
+});
+
+Then("新建和恢复会话自动跟随原 Pi 的新链接", async () => {
+  const input = page().getByTestId("message-input");
+  const send = async (message: string) => {
+    await input.fill(message);
+    await page().getByTestId("submit-message").click();
+    await expect(input).toHaveValue("");
+  };
+  await send("HANDOFF_FIRST_SESSION_MARKER");
+  await expect(page().getByRole("log")).toContainText("你好，Pi Web UI 已收到消息。");
+  await send("/name handoff-first-beta");
+  await expect(page().getByText("handoff-first-beta", { exact: true }).first()).toBeVisible();
+  const firstId = lastSessionId;
+  expect(firstId).toBeTruthy();
+  const firstPath = new URL(page().url()).pathname;
+  await send("/new");
+  await expect.poll(() => lastSessionId).not.toBe(firstId);
+  await expect.poll(() => new URL(page().url()).pathname).not.toBe(firstPath);
+  const secondId = lastSessionId;
+  const secondPath = new URL(page().url()).pathname;
+  expect((await page().request.get(`${hub?.url.slice(0, -1)}${firstPath}`)).status()).toBe(410);
+  await send("HANDOFF_SECOND_SESSION_MARKER");
+  await expect(page().getByRole("log")).toContainText("HANDOFF_SECOND_SESSION_MARKER");
+  await send("/name handoff-second-beta");
+  await expect(page().getByText("handoff-second-beta", { exact: true }).first()).toBeVisible();
+  for (const [name, id, marker, absent] of [
+    ["handoff-first-beta", firstId, "HANDOFF_FIRST_SESSION_MARKER", "HANDOFF_SECOND_SESSION_MARKER"],
+    ["handoff-second-beta", secondId, "HANDOFF_SECOND_SESSION_MARKER", "HANDOFF_FIRST_SESSION_MARKER"],
+  ]) {
+    await send("/webui");
+    await send("/resume");
+    await expect(page().getByRole("dialog")).toBeVisible();
+    await page().getByRole("dialog").getByRole("button").filter({ hasText: name }).click();
+    await expect.poll(() => lastSessionId).toBe(id);
+    await expect(page().getByRole("log")).toContainText(marker);
+    await expect(page().getByRole("log")).not.toContainText(absent);
+    await expect(page().getByRole("dialog")).toBeHidden();
+    await expect(page().getByText("WebSocket 错误", { exact: true })).toBeHidden();
+    await expect(page().getByText("WebSocket error", { exact: true })).toBeHidden();
+    await expect(input).toBeVisible();
+  }
+  expect(new URL(page().url()).pathname).not.toBe(secondPath);
+  expect((await page().request.get(`${hub?.url.slice(0, -1)}${secondPath}`)).status()).toBe(410);
+  // The untouched Alpha is still live; none of the handoffs selected it.
+  expect((await page().request.get(`${hub?.url.slice(0, -1)}${oldPath}`)).status()).toBe(200);
+  expect(errors).toEqual([]);
+  expect(await page().evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page().screenshot({ path: path.resolve(__dirname, `../../.tmp/resume-handoff-${screen}.png`) });
 });
 
 When("第一个 Pi 退出并返回总管首页", async () => {

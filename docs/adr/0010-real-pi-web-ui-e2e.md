@@ -211,7 +211,17 @@ npm run e2e
 - Tool card success/error/long output expand behavior.
 - Arch mode availability and enter/exit flow.
 
-### Long-session regression
+### Hub generation handoff regression
+
+The desktop/mobile scenarios in `e2e/features/session-hub.feature` use two real
+Pi processes and the packaged Hub CLI. They create two named histories through
+the UI, run `/new`, then `/resume` into both saved sessions in succession without
+returning to the portal. Assertions check actual WebSocket snapshot session IDs,
+updated browser paths, correct/non-mixed message content, old-path `410` and the
+other Pi's unaffected route. They do not mock the socket or repeat lifecycle
+requests. Rendered screenshots are checked separately under ADR 0011.
+
+### Long-session snapshot regression
 
 Long persisted histories must be tested through the real Pi CLI and browser,
 not only extension loading or a short empty-session smoke check. Snapshots use

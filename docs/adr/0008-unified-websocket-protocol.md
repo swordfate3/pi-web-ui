@@ -237,15 +237,38 @@ and `registrationConfigured`. It does not expose registry paths or credentials,
 probe the gateway, prove a lease, or change connection settings. Account management
 remains an independently executed server-terminal operation, not an RPC method.
 
-### Frontend Changes
+### Hub route handoff (2026-10-15)
+
+Hub-proxied sockets additionally receive one transport-owned `hub_route` event
+with `{ generation, token }`. `PiClient` consumes it directly: it never enters
+the domain store, Pi backend, model context, browser storage or page URL. The
+token authorizes a same-origin `POST /api/session-handoff` in a request header
+after the socket closes. This narrow HTTP control-plane exception cannot execute
+Pi commands and is not an RPC fallback.
+
+The Hub returns the still-live original path, `202` while waiting for the first
+successor of the exact same grant/run ID, or that successor's verified path.
+Capabilities expire 45 seconds after disconnection, are bounded in memory, and
+do not survive Hub restart. Revoked grants and superseded successors fail closed.
+Original generation URLs remain `410`; opening an old bookmark does not acquire
+a handoff capability. A browser waits at most 15 seconds, replaces only a strict
+same-origin `/s/<generation>/` path, and reconnects without replaying user intent.
+Direct connections and older Hubs retain their existing reconnect behavior.
+The Hub reserves this control event and drops backend-origin copies. If the
+successor registers while backend proof is in flight, route resolution returns
+`202` for another lookup. Failed replacement handshakes retain the previous
+capability until a fresh Hub control frame arrives; these attempts share one
+15-second recovery deadline instead of renewing it indefinitely.
+
+### Frontend request lifecycle
 
 1. **Single `send()` function** — Replace `sendWs()` + `rpc()` with a single `send(method, params?)` that returns `Promise<WsResponse>`. Internally queues messages when disconnected, sends immediately when connected.
 
-2. **Remove `rpc()` entirely** — All HTTP POST logic removed.
+2. **Remove `rpc()` entirely** — Pi commands have no HTTP POST fallback. The separate Hub handoff POST described above resolves transport routes only.
 
-3. **Resilience** — WebSocket reconnect automatically replays queued requests. No fallback to HTTP needed.
+3. **Resilience** — Socket closure rejects outstanding and queued requests. Never replay prompts or session actions into a replacement session. Hub route resolution reconnects transport only; there is no HTTP command fallback.
 
-4. **`ConnectionState`** simplifies: `"connecting" | "connected" | "disconnected"`. While disconnected, requests queue up and resolve when reconnected.
+4. **`ConnectionState`** simplifies: `"connecting" | "connected" | "disconnected"`. Hub handoff rejects new requests while resolving. Requests queued for an opening direct socket never survive its closure.
 
 ### Backend Changes
 

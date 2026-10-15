@@ -157,6 +157,10 @@ Then("大型工具历史预览有界且原文件保持完整", async ({ page, co
     const openedMs = await page.evaluate((t) => performance.now() - t, start);
     // The browser must not claim that a 300 KiB original parameter was loaded.
     // The fixture's real workspace files above remain byte-for-byte complete.
+    // Offscreen code uses content-visibility:auto. Bring the parameters into
+    // view before measuring visible text; their heading alone is insufficient.
+    await row.locator('[data-language="json"]').first().scrollIntoViewIfNeeded();
+    await expect(row).toContainText("historyPreview", { useInnerText: true });
     const preview = await row.innerText();
     expect(preview.length).toBeLessThan(4000);
     expect(preview).not.toContain(expected);

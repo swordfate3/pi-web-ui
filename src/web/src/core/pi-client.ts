@@ -1,10 +1,10 @@
-import type { WsError, WsEvent, WsRequest, WsResponse } from "./types";
+import type { HubRoute, WsError, WsEvent, WsRequest, WsResponse } from "./types";
 import { UiError, type UiText, uiText } from "./ui-text";
 import { wsUrl } from "./ws";
 
 type PiClientOptions = {
   onConnectionChange: (state: "connecting" | "connected" | "disconnected") => void;
-  onError: (message: UiText) => void;
+  onError: (message: UiText | null) => void;
   onEvent: (event: WsEvent) => void;
   onOpen: () => void;
   onPromptResponse: (result: unknown) => void;
@@ -21,6 +21,10 @@ export class PiClient {
   private ws: WebSocket | null = null;
   private intentionallyClosed = false;
   private reconnectTimer: number | null = null;
+  private hubRoute: HubRoute | null = null;
+  private hubRoutePath: string | null = null;
+  private handoffDeadline = 0;
+  private handoffController: AbortController | null = null;
   private requestCounter = 0;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly sentRequestIds = new Set<string>();
@@ -39,6 +43,7 @@ export class PiClient {
 
     ws.onopen = () => {
       if (this.ws !== ws) return;
+      this.options.onError(null);
       this.options.onConnectionChange("connected");
       this.flushQueuedRequests();
       this.options.onOpen();
@@ -60,7 +65,21 @@ export class PiClient {
             pending.reject(data.error ? new Error(data.error) : new UiError(uiText("Request failed")));
           }
         } else if (data.type === "event") {
-          this.options.onEvent(data);
+          if (data.event === "hub_route") {
+            const route = data.payload as Partial<HubRoute> | undefined;
+            if (
+              route &&
+              typeof route.generation === "string" &&
+              /^[a-f0-9]{32}$/.test(route.generation) &&
+              typeof route.token === "string" &&
+              /^[a-f0-9]{48}$/.test(route.token) &&
+              location.pathname === `/s/${route.generation}/`
+            ) {
+              this.hubRoute = { generation: route.generation, token: route.token };
+              this.hubRoutePath = location.pathname;
+              this.handoffDeadline = 0;
+            }
+          } else this.options.onEvent(data);
         } else if (data.type === "error") {
           this.options.onError(data.message || uiText("Server error"));
         }
@@ -71,7 +90,7 @@ export class PiClient {
 
     ws.onerror = () => {
       if (this.ws !== ws) return;
-      this.options.onError(uiText("WebSocket error"));
+      if (!this.hubRoute) this.options.onError(uiText("WebSocket error"));
     };
 
     ws.onclose = () => {
@@ -98,16 +117,19 @@ export class PiClient {
       this.queuedRequests.length = 0;
       this.options.onConnectionChange("disconnected");
       if (!this.intentionallyClosed) {
-        this.reconnectTimer = window.setTimeout(() => {
-          this.reconnectTimer = null;
-          this.connect();
-        }, 1200);
+        const route = this.hubRoute;
+        if (route) void this.recoverHubRoute(route);
+        else this.scheduleReconnect();
       }
     };
   }
 
   send(method: string, params?: Record<string, unknown>) {
     return new Promise<unknown>((resolve, reject) => {
+      if (this.handoffController) {
+        reject(new UiError(uiText("Wait for the session to finish syncing.")));
+        return;
+      }
       // Never queue a session replacement for a later connection/session.
       if (["fork_session", "switch_session", "reload"].includes(method) && this.ws?.readyState !== WebSocket.OPEN) {
         reject(new UiError(uiText("Reconnect before starting a session action")));
@@ -131,7 +153,7 @@ export class PiClient {
   }
 
   ensureConnected() {
-    if (this.ws?.readyState === WebSocket.OPEN || this.reconnectTimer) return;
+    if (this.ws?.readyState === WebSocket.OPEN || this.reconnectTimer || this.handoffController) return;
     if (this.ws) {
       this.ws.close();
       return;
@@ -141,6 +163,11 @@ export class PiClient {
 
   disconnect() {
     this.intentionallyClosed = true;
+    this.handoffController?.abort();
+    this.handoffController = null;
+    this.hubRoute = null;
+    this.hubRoutePath = null;
+    this.handoffDeadline = 0;
     if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.ws?.close();
@@ -151,6 +178,72 @@ export class PiClient {
     this.pendingRequests.clear();
     this.sentRequestIds.clear();
     this.queuedRequests.length = 0;
+  }
+
+  private scheduleReconnect() {
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, 1200);
+  }
+
+  private async recoverHubRoute(route: HubRoute) {
+    const sourcePath = this.hubRoutePath ?? `/s/${route.generation}/`;
+    if (location.pathname !== sourcePath) return;
+    const controller = new AbortController();
+    this.handoffController = controller;
+    this.handoffDeadline ||= Date.now() + 15_000;
+    const timeout = window.setTimeout(() => controller.abort(), Math.max(0, this.handoffDeadline - Date.now()));
+    this.options.onConnectionChange("connecting");
+    try {
+      while (!controller.signal.aborted && !this.intentionallyClosed && Date.now() < this.handoffDeadline) {
+        try {
+          const response = await fetch("/api/session-handoff", {
+            method: "POST",
+            headers: { "X-Pi-Web-Handoff": route.token },
+            credentials: "same-origin",
+            cache: "no-store",
+            redirect: "error",
+            signal: controller.signal,
+          });
+          if (response.status === 200) {
+            const result = await response.json();
+            if (typeof result.path !== "string" || !/^\/s\/[a-f0-9]{32}\/$/.test(result.path)) break;
+            if (
+              controller.signal.aborted ||
+              this.handoffController !== controller ||
+              this.intentionallyClosed ||
+              location.pathname !== sourcePath
+            )
+              return;
+            // Keep the mounted app, its session-action waiter and unsent draft.
+            // Only replace the address; never replay a lifecycle request.
+            window.history.replaceState(window.history.state, "", result.path);
+            // Retain the existing capability until the new socket receives its
+            // own Hub control frame. A failed handshake must still be able to
+            // resolve the first successor, not retry a retired path forever.
+            this.hubRoutePath = result.path;
+            this.handoffController = null;
+            this.connect();
+            return;
+          }
+          if (response.status !== 202) break;
+        } catch {
+          if (controller.signal.aborted) break;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 350));
+      }
+      if (this.handoffController === controller && !this.intentionallyClosed) {
+        this.hubRoute = null;
+        this.hubRoutePath = null;
+        this.handoffDeadline = 0;
+        this.options.onConnectionChange("disconnected");
+        this.options.onError(uiText("Session link expired. Reopen this Pi from the Hub."));
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (this.handoffController === controller) this.handoffController = null;
+    }
   }
 
   private flushQueuedRequests() {

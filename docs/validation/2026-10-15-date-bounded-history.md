@@ -97,3 +97,6 @@ browser. Full records remain in the original session files.
 The separate resume-to-new-generation URL handoff defect is not fixed by
 date-bounded loading. Do not treat this change as a blanket fix for every
 WebSocket disconnect or every resume failure.
+
+Follow-up: the independent generation handoff repair and its own verification
+are documented in [resume-hub-handoff](2026-10-15-resume-hub-handoff.md).

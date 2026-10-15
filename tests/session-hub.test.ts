@@ -11,6 +11,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createSessionRegistration } from "../extensions/session-registration.ts";
 import { initializeHub, issueSession, readHubConfig, revokeSession } from "../hub/config.ts";
 import { startHub } from "../hub/server.ts";
+import { PiClient } from "../src/web/src/core/pi-client.ts";
 
 function exchange(socketPath: string, value: Record<string, unknown>) {
   return new Promise<{ ok: boolean; error?: string; result?: { url: string } }>((resolve, reject) => {
@@ -39,20 +40,34 @@ async function fixture(t: test.TestContext, leaseMs = 45000) {
     await hub.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  async function backend(label: string) {
+  async function backend(label: string, initialFrame = label) {
     const file = path.join(dir, `${label}.json`);
     const credential = issueSession(config, file, { label });
     const registration = createSessionRegistration({ socketPath: hub.socketPath, credentialFile: file });
-    const server = http.createServer((req, res) => {
+    let holdProof: (() => Promise<void>) | undefined;
+    let failUpgrade: (() => Promise<void>) | undefined;
+    const server = http.createServer(async (req, res) => {
+      if (req.headers["x-pi-web-challenge"] && holdProof) {
+        const wait = holdProof;
+        holdProof = undefined;
+        await wait();
+      }
       if (registration.guard(req, res)) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ label, url: req.url, proof: req.headers["x-pi-web-proof"] }));
       }
     });
     const wss = new WebSocketServer({ noServer: true });
-    server.on("upgrade", (req, socket, head) => {
+    server.on("upgrade", async (req, socket, head) => {
+      if (failUpgrade) {
+        const fail = failUpgrade;
+        failUpgrade = undefined;
+        await fail();
+        socket.destroy();
+        return;
+      }
       if (!registration.guard(req)) return socket.destroy();
-      wss.handleUpgrade(req, socket, head, (ws) => ws.send(label));
+      wss.handleUpgrade(req, socket, head, (ws) => ws.send(initialFrame));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as net.AddressInfo).port;
@@ -72,6 +87,31 @@ async function fixture(t: test.TestContext, leaseMs = 45000) {
       credential,
       registration,
       port,
+      pauseNextProof() {
+        let release!: () => void;
+        let started!: () => void;
+        const waiting = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const entered = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        holdProof = () => {
+          started();
+          return waiting;
+        };
+        t.after(release);
+        return { entered, release };
+      },
+      failNextUpgrade(action: () => Promise<void>) {
+        failUpgrade = action;
+      },
+      broadcast(value: unknown) {
+        for (const ws of wss.clients) ws.send(JSON.stringify(value));
+      },
+      disconnectBrowsers() {
+        for (const ws of wss.clients) ws.terminate();
+      },
       get url() {
         return url;
       },
@@ -90,6 +130,212 @@ async function fixture(t: test.TestContext, leaseMs = 45000) {
     },
   };
 }
+
+async function handoffConnection(t: test.TestContext, url: string, origin: string) {
+  const socket = new WebSocket(`${url.replace("http:", "ws:")}ws`, { origin });
+  t.after(() => socket.terminate());
+  const token = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Hub did not supply an in-memory handoff capability")), 1500);
+    socket.on("error", reject);
+    socket.on("message", (data) => {
+      try {
+        const value = JSON.parse(data.toString());
+        if (value.type === "event" && value.event === "hub_route") {
+          clearTimeout(timer);
+          resolve(value.payload.token);
+        }
+      } catch {
+        /* A backend may also send non-JSON test frames. */
+      }
+    });
+    socket.once("close", () => clearTimeout(timer));
+  });
+  assert.match(token, /^[a-f0-9]{48}$/);
+  return { socket, token };
+}
+
+function resolveHandoff(url: string, token: string, origin = new URL(url).origin) {
+  return fetch(`${url}api/session-handoff`, {
+    method: "POST",
+    headers: { Origin: origin, "X-Pi-Web-Handoff": token },
+  });
+}
+
+test("a successor registered during proof leaves the browser handoff retryable", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("A");
+  assert.ok(a.url);
+  const { token } = await handoffConnection(t, a.url, new URL(f.hub.url).origin);
+  const proof = a.pauseNextProof();
+  const inFlight = resolveHandoff(f.hub.url, token);
+  await proof.entered;
+  await a.registration.stop();
+  await a.registration.start(a.port, () => {});
+  proof.release();
+  assert.equal((await inFlight).status, 202, "a verified successor arriving during proof is not a terminal 410");
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 200);
+});
+
+test("backend events cannot overwrite the Hub-owned handoff control frame", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("A");
+  assert.ok(a.url);
+  const { socket, token } = await handoffConnection(t, a.url, new URL(f.hub.url).origin);
+  const received: string[] = [];
+  const ordinary = new Promise<void>((resolve) =>
+    socket.on("message", (data) => {
+      received.push(data.toString());
+      if (data.toString().includes('"event":"ordinary"')) resolve();
+    }),
+  );
+  a.broadcast({
+    type: "event",
+    event: "hub_route",
+    payload: { generation: new URL(a.url).pathname.split("/")[2], token: "0".repeat(48) },
+  });
+  a.broadcast({ type: "event", event: "ordinary", payload: { value: "unchanged" } });
+  await ordinary;
+  assert.equal(
+    received.some((value) => value.includes('"event":"hub_route"')),
+    false,
+  );
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 200);
+});
+
+test("PiClient keeps its capability until a replacement socket receives fresh Hub control", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("A", JSON.stringify({ type: "event", event: "ordinary", payload: {} }));
+  assert.ok(a.url);
+  let page = new URL(a.url);
+  const origin = page.origin;
+  const actualFetch = globalThis.fetch;
+  const saved = new Map(
+    ["window", "location", "WebSocket", "fetch"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  );
+  const client = new PiClient({
+    onConnectionChange() {},
+    onError() {},
+    onEvent() {},
+    onPromptResponse() {},
+    onOpen() {
+      opens += 1;
+    },
+  });
+  let opens = 0;
+  try {
+    Object.defineProperty(globalThis, "location", { configurable: true, get: () => page });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        setTimeout,
+        clearTimeout,
+        history: {
+          state: null,
+          replaceState(_state: unknown, _title: string, value: string) {
+            page = new URL(value, page);
+          },
+        },
+      },
+    });
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      value: class extends WebSocket {
+        constructor(url: string) {
+          super(url, { origin });
+        }
+      },
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: (url: string, init: RequestInit) =>
+        actualFetch(new URL(url, page), { ...init, headers: { ...init.headers, Origin: origin } }),
+    });
+    client.connect();
+    await until(() => opens === 1);
+    // A network drop first resolves to still-current A. That replacement
+    // handshake fails while the real Pi registration moves to B.
+    a.failNextUpgrade(async () => {
+      await a.registration.stop();
+      await a.registration.start(a.port, () => {});
+    });
+    a.disconnectBrowsers();
+    await until(() => opens === 2);
+    assert.notEqual(page.pathname, new URL(a.url).pathname);
+    assert.equal((await actualFetch(page)).status, 200);
+  } finally {
+    client.disconnect();
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
+async function until(condition: () => boolean) {
+  const end = Date.now() + 2500;
+  while (!condition() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(condition(), "real transport did not reconnect to the successor");
+}
+
+test("an open browser follows only its Pi successor while the old route stays gone", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("A");
+  const b = await f.backend("B");
+  assert.ok(a.url && b.url);
+  const old = a.url;
+  const { token } = await handoffConnection(t, old, new URL(f.hub.url).origin);
+  const stillLive = await resolveHandoff(f.hub.url, token);
+  assert.equal(stillLive.status, 200);
+  assert.equal((await stillLive.json()).path, new URL(old).pathname, "B is not a substitute for A");
+  assert.equal((await resolveHandoff(f.hub.url, token, "https://attacker.example")).status, 403);
+  assert.equal((await resolveHandoff(f.hub.url, "0".repeat(48))).status, 410);
+  await a.registration.stop();
+  assert.equal((await fetch(old)).status, 410);
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 202);
+  let next = "";
+  await a.registration.start(a.port, (url) => {
+    next = url ?? "";
+  });
+  const response = await resolveHandoff(f.hub.url, token);
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.path, new URL(next).pathname);
+  assert.notEqual(result.path, new URL(b.url).pathname);
+  assert.equal((await fetch(old)).status, 410, "handoff must not revive a retired link");
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 200, "a lost response may be retried idempotently");
+  await a.registration.stop();
+  await a.registration.start(a.port, () => {});
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 410, "never follow a second unrelated replacement");
+});
+
+test("revocation and Hub restart invalidate browser handoff capabilities", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("A");
+  assert.ok(a.url);
+  const { token } = await handoffConnection(t, a.url, new URL(f.hub.url).origin);
+  revokeSession(f.config, a.credential.run_id);
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 410);
+  const b = await f.backend("B");
+  assert.ok(b.url);
+  const other = await handoffConnection(t, b.url, new URL(f.hub.url).origin);
+  await f.restart();
+  assert.equal((await resolveHandoff(f.hub.url, other.token)).status, 410);
+});
+
+test("a disconnected browser capability expires even when the Pi later registers again", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("A");
+  assert.ok(a.url);
+  const { socket, token } = await handoffConnection(t, a.url, new URL(f.hub.url).origin);
+  const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+  await a.registration.stop();
+  await closed;
+  // Advance only Date; sockets and registration deadlines remain real.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  t.mock.timers.tick(46_000);
+  await a.registration.start(a.port, () => {});
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 410);
+});
 
 test("two separately authorized sessions route HTTP and remove only the stopped generation", async (t) => {
   const f = await fixture(t);
@@ -119,7 +365,9 @@ test("WebSocket routing injects proof and rejects cross-origin connections", asy
   t.after(() => ws.terminate());
   assert.equal(
     await new Promise<string>((resolve, reject) => {
-      ws.once("message", (data) => resolve(data.toString()));
+      ws.on("message", (data) => {
+        if (data.toString() === "A") resolve("A");
+      });
       ws.once("error", reject);
     }),
     "A",

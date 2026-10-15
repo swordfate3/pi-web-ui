@@ -9,6 +9,7 @@ import { type Grant, type HubConfig, privateDirectory, readGrant, readPrivateJso
 import { portalCss, portalHtml, portalJs } from "./portal.ts";
 
 type Session = { grant: Grant; generation: string; port: number; expires: number; since: number };
+type Handoff = { grant: Grant; from: string; successor?: string; expires: number };
 const mac = (token: string, value: string) => createHmac("sha256", token).update(value).digest("hex");
 function equal(value: unknown, expected: string) {
   if (typeof value !== "string") return false;
@@ -157,6 +158,12 @@ async function startLockedHub(config: HubConfig) {
   const peers = new Set<net.Socket>();
   const connections = new Set<net.Socket>();
   const webSockets = new Map<WebSocket, string>();
+  // Browser-only, memory-only capabilities. A disconnected browser gets one
+  // short opportunity to follow its exact successor, never an arbitrary Pi.
+  const handoffs = new Map<string, Handoff>();
+  const pruneHandoffs = () => {
+    for (const [token, item] of handoffs) if (item.expires <= Date.now()) handoffs.delete(token);
+  };
   let stopped = false;
   let pending = Promise.resolve();
   let url = "";
@@ -231,6 +238,11 @@ async function startLockedHub(config: HubConfig) {
       if (other.grant.run_id === grant.run_id && other.generation !== generation) retire(other.generation);
     if (session) session.expires = Date.now() + config.leaseMs;
     else sessions.set(generation, { grant, generation, port, expires: Date.now() + config.leaseMs, since: Date.now() });
+    pruneHandoffs();
+    for (const item of handoffs.values()) {
+      if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor)
+        item.successor = generation;
+    }
     return { url: `${config.publicUrl ?? url}s/${generation}/` };
   };
   const registry = net.createServer((socket) => {
@@ -304,6 +316,63 @@ async function startLockedHub(config: HubConfig) {
         fail(response, 403);
         return;
       }
+      const pathname = request.url?.split("?")[0];
+      if (pathname === "/api/session-handoff") {
+        if (request.method !== "POST") {
+          fail(response, 405);
+          return;
+        }
+        if (!allowedBrowser(request, true)) {
+          fail(response, 403);
+          return;
+        }
+        pruneHandoffs();
+        const token = request.headers["x-pi-web-handoff"];
+        const item = typeof token === "string" && /^[a-f0-9]{48}$/.test(token) ? handoffs.get(token) : undefined;
+        if (!item) {
+          fail(response, 410);
+          return;
+        }
+        const grant = readGrant(config, item.grant.run_id);
+        if (grant.revoked || !equal(grant.token, item.grant.token) || grant.backendHost !== item.grant.backendHost) {
+          handoffs.delete(token as string);
+          fail(response, 410);
+          return;
+        }
+        const targetGeneration = item.successor ?? item.from;
+        const successor = current(targetGeneration);
+        if (!successor && !item.successor) {
+          response
+            .writeHead(202, { "Content-Type": "application/json", "Cache-Control": "no-store" })
+            .end(JSON.stringify({ pending: true }));
+          return;
+        }
+        const proved = successor && (await proveBackend(grant, successor.generation, successor.port));
+        // A replacement can register while the original backend proof is in
+        // flight. Let the browser resolve the newly bound first successor on
+        // its next poll, rather than turning a healthy handoff into a 410.
+        if (!stopped && item.expires > Date.now() && targetGeneration !== (item.successor ?? item.from)) {
+          response
+            .writeHead(202, { "Content-Type": "application/json", "Cache-Control": "no-store" })
+            .end(JSON.stringify({ pending: true }));
+          return;
+        }
+        if (
+          !successor ||
+          successor.grant.run_id !== grant.run_id ||
+          !proved ||
+          stopped ||
+          current(targetGeneration) !== successor ||
+          item.expires <= Date.now()
+        ) {
+          fail(response, 410);
+          return;
+        }
+        response
+          .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
+          .end(JSON.stringify({ path: `/s/${successor.generation}/` }));
+        return;
+      }
       const route = matchRoute(request);
       if (route) {
         const session = current(route[1]);
@@ -351,7 +420,6 @@ async function startLockedHub(config: HubConfig) {
         request.pipe(upstream);
         return;
       }
-      const pathname = request.url?.split("?")[0];
       if (!["GET", "HEAD"].includes(request.method ?? "")) {
         fail(response, 405);
         return;
@@ -456,6 +524,16 @@ async function startLockedHub(config: HubConfig) {
           webSockets.set(client, session.generation);
           const forward = (from: WebSocket, to: WebSocket) => {
             from.on("message", (data, binary) => {
+              if (from === upstream && !binary) {
+                try {
+                  const value = JSON.parse(data.toString());
+                  // Reserve this one Hub transport event. Ordinary Pi events
+                  // still pass through byte-for-byte, including unknown ones.
+                  if (value?.type === "event" && value.event === "hub_route") return;
+                } catch {
+                  // Non-JSON payloads retain their existing transport behavior.
+                }
+              }
               if (to.readyState !== WebSocket.OPEN) return;
               if (to.bufferedAmount > 8 * 1024 * 1024) {
                 from.terminate();
@@ -472,6 +550,22 @@ async function startLockedHub(config: HubConfig) {
           };
           forward(client, upstream);
           forward(upstream, client);
+          pruneHandoffs();
+          if (handoffs.size < 512) {
+            const token = randomBytes(24).toString("hex");
+            const item: Handoff = { grant: session.grant, from: session.generation, expires: Infinity };
+            handoffs.set(token, item);
+            client.once("close", () => {
+              item.expires = Date.now() + 45_000;
+            });
+            client.send(
+              JSON.stringify({
+                type: "event",
+                event: "hub_route",
+                payload: { generation: session.generation, token },
+              }),
+            );
+          }
         });
       });
     } catch {
@@ -505,6 +599,7 @@ async function startLockedHub(config: HubConfig) {
   const sweep = setInterval(
     () => {
       for (const id of sessions.keys()) current(id);
+      pruneHandoffs();
     },
     Math.min(1000, config.leaseMs),
   );
@@ -516,6 +611,7 @@ async function startLockedHub(config: HubConfig) {
     close() {
       if (closing) return closing;
       stopped = true;
+      handoffs.clear();
       clearInterval(sweep);
       for (const id of sessions.keys()) retire(id);
       for (const peer of peers) peer.destroy();

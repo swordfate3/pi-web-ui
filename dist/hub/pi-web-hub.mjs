@@ -378,6 +378,10 @@ async function startLockedHub(config) {
 	const peers = /* @__PURE__ */ new Set();
 	const connections = /* @__PURE__ */ new Set();
 	const webSockets = /* @__PURE__ */ new Map();
+	const handoffs = /* @__PURE__ */ new Map();
+	const pruneHandoffs = () => {
+		for (const [token, item] of handoffs) if (item.expires <= Date.now()) handoffs.delete(token);
+	};
 	let stopped = false;
 	let pending = Promise.resolve();
 	let url = "";
@@ -446,6 +450,8 @@ async function startLockedHub(config) {
 			expires: Date.now() + config.leaseMs,
 			since: Date.now()
 		});
+		pruneHandoffs();
+		for (const item of handoffs.values()) if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor) item.successor = generation;
 		return { url: `${config.publicUrl ?? url}s/${generation}/` };
 	};
 	const registry = net.createServer((socket) => {
@@ -514,6 +520,56 @@ async function startLockedHub(config) {
 				fail(response, 403);
 				return;
 			}
+			const pathname = request.url?.split("?")[0];
+			if (pathname === "/api/session-handoff") {
+				if (request.method !== "POST") {
+					fail(response, 405);
+					return;
+				}
+				if (!allowedBrowser(request, true)) {
+					fail(response, 403);
+					return;
+				}
+				pruneHandoffs();
+				const token = request.headers["x-pi-web-handoff"];
+				const item = typeof token === "string" && /^[a-f0-9]{48}$/.test(token) ? handoffs.get(token) : void 0;
+				if (!item) {
+					fail(response, 410);
+					return;
+				}
+				const grant = readGrant(config, item.grant.run_id);
+				if (grant.revoked || !equal(grant.token, item.grant.token) || grant.backendHost !== item.grant.backendHost) {
+					handoffs.delete(token);
+					fail(response, 410);
+					return;
+				}
+				const targetGeneration = item.successor ?? item.from;
+				const successor = current(targetGeneration);
+				if (!successor && !item.successor) {
+					response.writeHead(202, {
+						"Content-Type": "application/json",
+						"Cache-Control": "no-store"
+					}).end(JSON.stringify({ pending: true }));
+					return;
+				}
+				const proved = successor && await proveBackend(grant, successor.generation, successor.port);
+				if (!stopped && item.expires > Date.now() && targetGeneration !== (item.successor ?? item.from)) {
+					response.writeHead(202, {
+						"Content-Type": "application/json",
+						"Cache-Control": "no-store"
+					}).end(JSON.stringify({ pending: true }));
+					return;
+				}
+				if (!successor || successor.grant.run_id !== grant.run_id || !proved || stopped || current(targetGeneration) !== successor || item.expires <= Date.now()) {
+					fail(response, 410);
+					return;
+				}
+				response.writeHead(200, {
+					"Content-Type": "application/json",
+					"Cache-Control": "no-store"
+				}).end(JSON.stringify({ path: `/s/${successor.generation}/` }));
+				return;
+			}
 			const route = matchRoute(request);
 			if (route) {
 				const session = current(route[1]);
@@ -564,7 +620,6 @@ async function startLockedHub(config) {
 				request.pipe(upstream);
 				return;
 			}
-			const pathname = request.url?.split("?")[0];
 			if (!["GET", "HEAD"].includes(request.method ?? "")) {
 				fail(response, 405);
 				return;
@@ -657,6 +712,10 @@ async function startLockedHub(config) {
 					webSockets.set(client, session.generation);
 					const forward = (from, to) => {
 						from.on("message", (data, binary) => {
+							if (from === upstream && !binary) try {
+								const value = JSON.parse(data.toString());
+								if (value?.type === "event" && value.event === "hub_route") return;
+							} catch {}
 							if (to.readyState !== WebSocket.OPEN) return;
 							if (to.bufferedAmount > 8 * 1024 * 1024) {
 								from.terminate();
@@ -673,6 +732,27 @@ async function startLockedHub(config) {
 					};
 					forward(client, upstream);
 					forward(upstream, client);
+					pruneHandoffs();
+					if (handoffs.size < 512) {
+						const token = randomBytes(24).toString("hex");
+						const item = {
+							grant: session.grant,
+							from: session.generation,
+							expires: Infinity
+						};
+						handoffs.set(token, item);
+						client.once("close", () => {
+							item.expires = Date.now() + 45e3;
+						});
+						client.send(JSON.stringify({
+							type: "event",
+							event: "hub_route",
+							payload: {
+								generation: session.generation,
+								token
+							}
+						}));
+					}
 				});
 			});
 		} catch {
@@ -704,6 +784,7 @@ async function startLockedHub(config) {
 	}
 	const sweep = setInterval(() => {
 		for (const id of sessions.keys()) current(id);
+		pruneHandoffs();
 	}, Math.min(1e3, config.leaseMs));
 	sweep.unref();
 	let closing;
@@ -713,6 +794,7 @@ async function startLockedHub(config) {
 		close() {
 			if (closing) return closing;
 			stopped = true;
+			handoffs.clear();
 			clearInterval(sweep);
 			for (const id of sessions.keys()) retire(id);
 			for (const peer of peers) peer.destroy();

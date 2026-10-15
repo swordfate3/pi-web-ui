@@ -23,7 +23,7 @@ Browser history is a read-only window, not the model's context or the persisted 
 
 ## Consequences
 
-Older messages require a date selection; very large individual records show previews. This intentionally bounds mobile transfer/parse/render work. It does not delete history, compact model context, or alter TUI messages. The separate resume-to-new-generation URL handoff defect is not solved by date-bounded loading.
+Older messages require a date selection; very large individual records show previews. This intentionally bounds mobile transfer/parse/render work. It does not delete history, compact model context, or alter TUI messages. Date-bounded loading alone did not fix resume-to-new-generation URL handoff; the separate follow-up fix is described in ADR 0013 and ADR 0008.
 
 ## Verification
 

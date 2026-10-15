@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { t, useLanguage } from "../../core/i18n";
 import type { ChatItem } from "../../core/types";
 import { ChatItemView } from "./chat-item-view";
+import { FileDownloadBoundary } from "./file-message-response";
 import { UserMessageView } from "./user-message-view";
 
 type ChatListProps = {
@@ -74,15 +75,19 @@ export const ChatList = memo(function ChatList({ items, highlightedEntryId, ...p
       />
     );
   }
-  return items.map((item) => (
-    <ChatRow
-      {...props}
-      highlighted={Boolean(
-        highlightedEntryId &&
-          (item.entryId === highlightedEntryId || item.relatedEntryIds?.includes(highlightedEntryId)),
-      )}
-      item={item}
-      key={item.id}
-    />
-  ));
+  return (
+    <FileDownloadBoundary>
+      {items.map((item) => (
+        <ChatRow
+          {...props}
+          highlighted={Boolean(
+            highlightedEntryId &&
+              (item.entryId === highlightedEntryId || item.relatedEntryIds?.includes(highlightedEntryId)),
+          )}
+          item={item}
+          key={item.id}
+        />
+      ))}
+    </FileDownloadBoundary>
+  );
 });

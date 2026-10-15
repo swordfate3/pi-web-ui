@@ -75,9 +75,9 @@ Then("已有 Markdown 的控件变为中文但正文保持原样", async () => {
   await expect(log.getByRole("button", { name: /复制代码/ })).toBeVisible();
   await expect(log).toContainText('const RAW_CODE_42 = "Keep this English string";');
   await expect(log).toContainText("Keep this English table");
-  // Streamdown's safe external link is a button until the user confirms.
-  await log.getByRole("button", { name: "External raw URL", exact: true }).click();
-  const safety = page().locator('[data-streamdown="link-safety-modal"]');
+  // File links and external links now share the stable confirmation boundary.
+  await log.getByRole("link", { name: "External raw URL", exact: true }).click();
+  const safety = page().getByRole("dialog", { name: "打开外部链接？" });
   await expect(safety).toContainText("https://example.com/raw-language-42");
   await expect(safety.getByRole("button", { name: "复制链接", exact: true })).toBeVisible();
   await page().keyboard.press("Escape");

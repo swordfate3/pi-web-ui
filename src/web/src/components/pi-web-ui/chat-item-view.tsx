@@ -1,12 +1,6 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { useState } from "react";
-import {
-  Message,
-  MessageAction,
-  MessageActions,
-  MessageContent,
-  MessageResponse,
-} from "@/components/ai-elements/message";
+import { Message, MessageAction, MessageActions, MessageContent } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
 import { cn } from "@/lib/utils";
@@ -14,6 +8,7 @@ import { t, useLanguage } from "../../core/i18n";
 import { formatToolSummary, isToolExpandable, isToolHistoryPreview } from "../../core/tool-summary";
 import type { ChatItem } from "../../core/types";
 import { renderUiText } from "../../core/ui-text";
+import { FileMessageResponse } from "./file-message-response";
 
 export function ChatItemView({
   item,
@@ -104,11 +99,11 @@ export function ChatItemView({
             <ReasoningContent className={cn(isActivity && "mt-1 text-xs")}>{item.reasoning}</ReasoningContent>
           </Reasoning>
         )}
-        <MessageResponse
+        <FileMessageResponse
           className={cn(isActivity && "text-muted-foreground [&_ol]:my-1 [&_p]:my-0 [&_pre]:my-1 [&_ul]:my-1")}
         >
           {item.text}
-        </MessageResponse>
+        </FileMessageResponse>
       </MessageContent>
       {canCopy && (
         <MessageActions className="self-start opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">

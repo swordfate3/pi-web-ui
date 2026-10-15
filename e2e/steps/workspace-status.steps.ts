@@ -9,6 +9,7 @@ let workspaceGit = true;
 let longSession = false;
 let runtimeDir: string | undefined;
 let harness: PiWebUiHarness | null = null;
+let collapseHistorySynced = false;
 
 export function getActiveHarness(): PiWebUiHarness | null {
   return harness;
@@ -66,6 +67,9 @@ When("我让 agent 执行折叠回归任务", async ({ page }) => {
   await expect(page.getByRole("log").getByText("Collapse regression write completed successfully.")).toBeVisible({
     timeout: 30_000,
   });
+  // Assert interactions on the final real history, not a live row whose key is
+  // about to be replaced by the scheduled settled snapshot.
+  await expect.poll(() => collapseHistorySynced).toBe(true);
 });
 
 Then("思考正文默认折叠且可以展开", async ({ page }) => {
@@ -126,6 +130,25 @@ Given("agent 会执行失败的 write 工具", async () => {
 
 When("我打开 Pi Web UI", async ({ page }) => {
   harness = await startPiWebUi(fixtureName, { git: workspaceGit, longSession, runtimeDir });
+  collapseHistorySynced = false;
+  if (fixtureName === "collapse-regression") {
+    page.on("websocket", (socket) => {
+      const syncIds = new Set<string>();
+      socket.on("framesent", ({ payload }) => {
+        const message = JSON.parse(String(payload));
+        if (message.type === "req" && message.method === "sync_request") syncIds.add(message.id);
+      });
+      socket.on("framereceived", ({ payload }) => {
+        const message = JSON.parse(String(payload));
+        if (message.type !== "res" || !syncIds.delete(message.id) || !message.ok) return;
+        if (
+          message.result?.isStreaming === false &&
+          JSON.stringify(message.result.entries).includes("Collapse regression write completed successfully.")
+        )
+          collapseHistorySynced = true;
+      });
+    });
+  }
   await page.goto(harness.pageUrl);
   await expect(page.getByPlaceholder("Message Pi...")).toBeVisible();
 });

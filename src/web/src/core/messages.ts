@@ -1,5 +1,14 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "Download this file?": "是否下载此文件？",
+  "Save this project file to your device?": "是否将此项目文件下载到你的设备？",
+  "Yes, download": "是，下载",
+  "Preparing download...": "正在准备下载…",
+  "Could not download this file": "无法下载此文件",
+  "Invalid file download response": "文件下载响应无效",
+  "Reconnect and click the file again.": "请重新连接后再次点击文件。",
+  "File unavailable for download. Use a regular, non-sensitive file in the current project.":
+    "文件无法下载。请确认文件存在、位于当前项目内，且不是链接或敏感配置文件。",
   "History preview. Full data remains in the original session.": "历史预览，完整数据保留在原始会话中。",
   "Could not load history": "无法加载历史记录",
   "History start date": "历史开始日期",

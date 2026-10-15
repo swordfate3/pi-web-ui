@@ -311,6 +311,20 @@ Virtualized-tree tests navigate via public search/current-node controls and scro
 
 See `docs/prd/interaction-performance.md` for scope and preserved invariants.
 
+## Project-file download regression
+
+`file-download.feature` uses a real Pi `write` tool to create a Chinese-named
+PDF byte fixture, then clicks the assistant's bold path, Markdown link and
+inline-code path. Desktop and mobile run both directly and via a temporary
+packaged Hub. Cancel sends no preparation request; confirmation downloads the
+original bytes and basename. External-link confirmation and missing-file errors
+are checked without leaving the chat. Screenshots record the visible dialog.
+The fixture is a byte-integrity file, not a PDF-rendering test.
+
+`e2e/file-download.integration.ts` separately checks a 5 MiB binary stream, HTTP
+headers/methods/Origin, path restrictions and stale identities with real Pi/Hub.
+Run with `node --import ./tests/register-ts.mjs --test e2e/file-download.integration.ts`.
+
 ## References
 
 - `AGENTS.md`

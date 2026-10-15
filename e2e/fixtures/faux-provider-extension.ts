@@ -5,6 +5,7 @@ import collapseRegressionResponses from "./responses/collapse-regression.ts";
 import dailyCommandsResponses from "./responses/daily-commands.ts";
 import duplicateArtifactResponses from "./responses/duplicate-artifact.ts";
 import externalArtifactResponses from "./responses/external-artifact.ts";
+import fileDownloadResponses from "./responses/file-download.ts";
 import languageMarkdownResponses from "./responses/language-markdown.ts";
 import largeToolOutputResponses from "./responses/large-tool-output.ts";
 import toolFailureResponses from "./responses/tool-failure.ts";
@@ -19,6 +20,7 @@ const responsesByName = {
   "slash-commands": chatLifecycleResponses,
   "duplicate-artifact": duplicateArtifactResponses,
   "external-artifact": externalArtifactResponses,
+  "file-download": fileDownloadResponses,
   "tool-failure": toolFailureResponses,
   "workspace-artifact": workspaceArtifactResponses,
 };

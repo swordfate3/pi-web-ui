@@ -68,6 +68,7 @@ persistence, restart behavior and the authenticated-gateway boundary.
 - Streaming text and thinking/reasoning blocks
 - Tool call display with expand/collapse
 - Image attachments with paste, drop, and preview
+- Click project-file paths in assistant replies to confirm a download, preserving the original filename (including Chinese); works directly or through Hub. See [download behavior and access limits](docs/prd/file-downloads.md).
 - Branch from user messages and continue from branch ends via `navigate_tree` in the current session tree (requires `/webui` command context)
 - Follow-up messages while the agent is streaming
 

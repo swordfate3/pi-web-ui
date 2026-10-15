@@ -27,7 +27,7 @@ This dual-channel design has several problems:
 
 ## Decision
 
-**WebSocket becomes the single channel for all server-client application communication.** HTTP remains only for initial page load (static files) and WebSocket upgrade.
+**WebSocket is the channel for server-client application commands and events.** HTTP remains for initial page load, WebSocket upgrade, and explicit binary attachment streaming. File downloads are prepared over WebSocket using session/runtime identity; only the resulting short-lived capability is used by `GET`/`HEAD /api/downloads/<token>`. File bytes must not be base64-encoded into application frames. See [file downloads](../prd/file-downloads.md).
 
 ### Unified Envelope
 
@@ -224,6 +224,7 @@ All current commands become methods under the unified `req`/`res` pattern:
 | New | `get_git_status` | — |
 | New | `get_git_diff` | `{ path? }` optional file-specific diff |
 | New | `get_file_content` | `{ path }` |
+| New | `prepare_file_download` | `{ path, sessionId, runtimeId }` → `{ token, filename, size, downloadUrl }`; current-workspace ordinary files only |
 | `GET /api/projects` | Deleted (unused in current UI) | — |
 | `POST /api/projects/launch` | Deleted (iTerm2-specific) | — |
 | `GET /api/sessions` | Deleted (ADR 0007) | — |

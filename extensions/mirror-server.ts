@@ -25,6 +25,7 @@ import {
 import { WebSocket, WebSocketServer } from "ws";
 import { type ConnectionSettings, localWebUrl, resolveConnectionConfig } from "./connection-config.ts";
 import { listenWithFallback } from "./connection-listener.ts";
+import { attachmentDisposition, WorkspaceDownloads } from "./file-downloads.ts";
 import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 
@@ -349,6 +350,7 @@ export default function (pi: ExtensionAPI) {
   // listing. Paths never come from the browser; downloads serve only owned HTML.
   const savedSelections = new Map<string, Readonly<SavedSelection>>();
   const exports = new Map<string, { path: string; directory: string; filename: string; expiresAt: number }>();
+  const fileDownloads = new WorkspaceDownloads();
   let activeExport: { controller: AbortController; done: Promise<unknown> } | null = null;
 
   function clearSessionAction() {
@@ -807,6 +809,7 @@ export default function (pi: ExtensionAPI) {
     const closingExport = activeExport;
     closingExport?.controller.abort();
     for (const token of exports.keys()) removeExport(token);
+    fileDownloads.clear();
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = null;
@@ -1215,6 +1218,7 @@ export default function (pi: ExtensionAPI) {
     runtimeActive = true;
     lifecycleEpoch++;
     savedSelections.clear();
+    fileDownloads.clear();
     advancedFeaturesEnabled = false;
     latestExecuteCtx = null;
     clearSessionAction();
@@ -1886,6 +1890,26 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
+        case "prepare_file_download": {
+          const downloadCtx = checkHistoryIdentity(params, true);
+          if (typeof params.path !== "string" || params.runtimeId !== runtimeId)
+            throw new Error("Invalid file download request");
+          sendTo(
+            ws,
+            success(
+              fileDownloads.prepare(
+                {
+                  workspace: downloadCtx.cwd,
+                  sessionId: downloadCtx.sessionManager.getSessionId(),
+                  epoch: lifecycleEpoch,
+                },
+                params.path,
+              ),
+            ),
+          );
+          break;
+        }
+
         case "get_file_content": {
           const filePath = typeof params.path === "string" ? params.path : "";
           if (!filePath) {
@@ -2022,6 +2046,61 @@ export default function (pi: ExtensionAPI) {
 
     // Strip query params
     urlPath = urlPath.split("?")[0];
+
+    if (urlPath.startsWith("/api/downloads")) {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        res.writeHead(405, { Allow: "GET, HEAD" });
+        res.end("Method not allowed");
+        return;
+      }
+      if (
+        req.headers["sec-fetch-site"] === "cross-site" ||
+        (!registration &&
+          req.headers.origin &&
+          req.headers.origin !==
+            (SETTINGS.publicUrl ? new URL(SETTINGS.publicUrl).origin : `http://${req.headers.host}`))
+      ) {
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
+      }
+      const match = /^\/api\/downloads\/([0-9a-f-]{36})$/.exec(urlPath);
+      try {
+        if (!match || !runtimeActive || !latestCtx || sessionReplacementPending)
+          throw new Error("Download unavailable");
+        const opened = fileDownloads.open(match[1], {
+          workspace: latestCtx.cwd,
+          sessionId: latestCtx.sessionManager.getSessionId(),
+          epoch: lifecycleEpoch,
+        });
+        res.writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": attachmentDisposition(opened.filename),
+          "Content-Length": opened.size,
+          "X-Content-Type-Options": "nosniff",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+        });
+        if (req.method === "HEAD" || opened.size === 0) {
+          fs.closeSync(opened.fd);
+          res.end();
+        } else {
+          const stream = fs.createReadStream("", {
+            fd: opened.fd,
+            autoClose: true,
+            ...(opened.size > 0 ? { end: opened.size - 1 } : {}),
+          });
+          stream.on("error", () => res.destroy());
+          res.on("close", () => stream.destroy());
+          stream.pipe(res);
+        }
+      } catch {
+        res.writeHead(404);
+        res.end("File download unavailable or expired");
+      }
+      return;
+    }
 
     if (urlPath.startsWith("/api/exports")) {
       pruneExports();

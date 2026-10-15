@@ -361,6 +361,7 @@ export type ReloadRequest = { sessionId: string };
 /** runtimeId is the OLD runtime, not proof of completion. */
 export type ReloadAck = { accepted: boolean; sessionId: string; runtimeId: string };
 export type ExportHtmlResult = { token: string; filename: string; downloadUrl: string };
+export type FileDownloadResult = { token: string; filename: string; size: number; downloadUrl: string };
 
 export type SessionStatisticsTotals = {
   input?: number;

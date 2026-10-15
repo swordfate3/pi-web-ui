@@ -7,6 +7,7 @@ import type {
   ConnectionState,
   ExtensionDialog,
   FileContentResult,
+  FileDownloadResult,
   GitDiffResult,
   GitStatusResult,
   HistoryMetadata,
@@ -126,6 +127,7 @@ export type SettingsSlice = {
 };
 
 export type WorkspaceSlice = {
+  prepareFileDownload: (path: string) => Promise<FileDownloadResult>;
   gitStatus: GitStatusResult | null;
   gitLoading: boolean;
   artifacts: WorkspaceArtifact[];

@@ -78,6 +78,9 @@ persistence, restart behavior and the authenticated-gateway boundary.
 
 ### Sessions
 - Sidebar with the current conversation tree
+- Bounded history: recent three calendar days by default; choose dates to read older messages without downloading the entire session
+- Older pages replace the visible history window; oversized individual records show an explicit preview while original session files remain unchanged
+- The `/resume` picker filters saved sessions by last activity in the chosen date range; the Hub portal still lists currently online Pi processes
 - Search, expand/collapse, and select tree nodes without overwriting the input draft
 - Branch from user messages when you want to edit an earlier prompt and continue in the same session
 - Continue from non-user branch ends when you want to resume an existing branch without changing the draft

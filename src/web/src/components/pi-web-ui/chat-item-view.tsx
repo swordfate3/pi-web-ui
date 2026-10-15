@@ -11,7 +11,7 @@ import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-e
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
 import { cn } from "@/lib/utils";
 import { t, useLanguage } from "../../core/i18n";
-import { formatToolSummary, isToolExpandable } from "../../core/tool-summary";
+import { formatToolSummary, isToolExpandable, isToolHistoryPreview } from "../../core/tool-summary";
 import type { ChatItem } from "../../core/types";
 import { renderUiText } from "../../core/ui-text";
 
@@ -62,6 +62,11 @@ export function ChatItemView({
             title={item.name}
             type={`tool-${item.name}` as `tool-${string}`}
           />
+          {isToolHistoryPreview(item) && (
+            <p className="px-3 pb-2 text-muted-foreground text-xs">
+              {t("History preview. Full data remains in the original session.")}
+            </p>
+          )}
           {expandable && (
             <ToolContent>
               <ToolInput input={item.input as never} />

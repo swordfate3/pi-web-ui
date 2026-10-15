@@ -15,6 +15,8 @@ export type PiWebUiHarness = {
 export type PiWebUiHarnessOptions = {
   git?: boolean;
   longSession?: boolean;
+  /** A saved conversation whose original snapshot exceeds the Hub frame limit. */
+  datedHistory?: boolean;
   /** Optional immutable release root; defaults to the working repository. */
   runtimeDir?: string;
   /** Explicit root for Node ESM integration runners (Playwright supplies __dirname). */
@@ -38,7 +40,11 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   mkdirSync(agentDir, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
   if (options.git !== false) prepareGitWorkspace(workspaceDir);
-  const longSessionFile = options.longSession ? writeLongSessionFixture(sessionDir, workspaceDir) : undefined;
+  const longSessionFile = options.datedHistory
+    ? writeDatedHistoryFixture(sessionDir, workspaceDir)
+    : options.longSession
+      ? writeLongSessionFixture(sessionDir, workspaceDir)
+      : undefined;
 
   const processOutput: string[] = [];
   const piProcess = spawn(
@@ -107,6 +113,76 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
       if (existsSync(tempRoot)) rmSync(tempRoot, { recursive: true, force: true });
     },
   };
+}
+
+function writeDatedHistoryFixture(sessionDir: string, workspaceDir: string): string {
+  const sessionId = "8e91f4c2-3000-4500-8500-000000000003";
+  const file = path.join(sessionDir, `${Date.now()}_${sessionId}.jsonl`);
+  const now = new Date();
+  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const oldTime = midnight - 14 * 86400000 + 3600000;
+  const recentTime = midnight + 1000;
+  const iso = (time: number) => new Date(time).toISOString();
+  const lines = [
+    JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: iso(oldTime), cwd: workspaceDir }),
+  ];
+  let parentId: string | null = null;
+  function user(id: string, text: string, time: number) {
+    lines.push(
+      JSON.stringify({
+        type: "message",
+        id,
+        parentId,
+        timestamp: iso(time),
+        message: { role: "user", content: text, timestamp: time },
+      }),
+    );
+    parentId = id;
+  }
+  user("datedold", "DATED_OLD_ONLY_MARKER", oldTime);
+  for (let index = 0; index < 150; index++) {
+    user(`dated-${String(index).padStart(4, "0")}`, `DATED_RECENT_${index}`, recentTime + index);
+  }
+  const id = "datedbig";
+  lines.push(
+    JSON.stringify({
+      type: "message",
+      id,
+      parentId,
+      timestamp: iso(recentTime + 200),
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: `DATED_LARGE_START_${"x".repeat(20 * 1024 * 1024)}_DATED_LARGE_END` }],
+        api: "anthropic-messages",
+        provider: "faux",
+        model: "faux-1",
+        timestamp: recentTime + 200,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+        stopReason: "stop",
+      },
+    }),
+  );
+  parentId = id;
+  user("datedend", "DATED_RECENT_END_MARKER", recentTime + 300);
+  writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
+  const savedId = "9e91f4c2-0000-4500-8500-000000000014";
+  writeFileSync(
+    path.join(sessionDir, `old-saved_${savedId}.jsonl`),
+    `${[
+      { type: "session", version: 3, id: savedId, timestamp: iso(oldTime), cwd: workspaceDir },
+      {
+        type: "message",
+        id: "savedold",
+        parentId: null,
+        timestamp: iso(oldTime),
+        message: { role: "user", content: "SAVED_OLD_DATE_MARKER", timestamp: oldTime },
+      },
+    ]
+      .map((value) => JSON.stringify(value))
+      .join("\n")}\n`,
+    "utf8",
+  );
+  return file;
 }
 
 function writeLongSessionFixture(sessionDir: string, workspaceDir: string): string {

@@ -133,7 +133,7 @@ Then("优化后侧栏可见行数有界", async ({ page }) => {
   expect(rows).toBeLessThan(300);
 });
 
-Then("大型工具原始输出可完整访问且性能已记录", async ({ page, context }) => {
+Then("大型工具历史预览有界且原文件保持完整", async ({ page, context }) => {
   const harness = getActiveHarness();
   if (!harness) throw new Error("No performance Pi harness");
   expect(readFileSync(path.join(harness.workspaceDir, "large-single.txt"), "utf8")).toBe(line);
@@ -141,6 +141,9 @@ Then("大型工具原始输出可完整访问且性能已记录", async ({ page,
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const rows = page.locator('[data-chat-item-kind="tool"]');
   await expect(rows).toHaveCount(4);
+  await expect(page.getByRole("region", { name: "Conversation history" })).toContainText(
+    "Large entries are bounded previews. Full data remains in the original session.",
+  );
   const samples: Array<Record<string, unknown>> = [];
   for (const [index, expected] of [
     [0, line],
@@ -149,33 +152,33 @@ Then("大型工具原始输出可完整访问且性能已记录", async ({ page,
     const row = rows.nth(index);
     const start = await page.evaluate(() => performance.now());
     await row.locator('[data-slot="collapsible-trigger"]').click();
-    const fullCopy = row.getByRole("button", { name: "Copy full parameters", exact: true });
-    await expect(fullCopy).toBeVisible();
+    const parameters = row.getByText("Parameters", { exact: true });
+    await expect(parameters).toBeVisible();
     const openedMs = await page.evaluate((t) => performance.now() - t, start);
-    await fullCopy.click();
-    await expect
-      .poll(async () => JSON.parse(await page.evaluate(() => navigator.clipboard.readText())).content)
-      .toBe(expected);
-    await row.getByRole("button", { name: "Show full parameters", exact: true }).click();
-    await expect(row.locator('[data-code-rendering="plain"]').first()).toBeVisible();
-    const pagination = row.locator("[data-code-pagination]").first();
-    await expect(pagination).toBeVisible();
-    await pagination.getByRole("button", { name: "Next page", exact: true }).click();
-    await expect(pagination.getByRole("button", { name: "Previous page", exact: true })).toBeEnabled();
+    // The browser must not claim that a 300 KiB original parameter was loaded.
+    // The fixture's real workspace files above remain byte-for-byte complete.
+    const preview = await row.innerText();
+    expect(preview.length).toBeLessThan(4000);
+    expect(preview).not.toContain(expected);
+    expect(preview).toContain("historyPreview");
     samples.push({ toolIndex: index, openedMs, originalContentChars: expected.length });
     await row.locator('[data-slot="collapsible-trigger"]').click();
   }
-  // Pi itself limits read/bash returned output. Copy must preserve that actual
-  // returned result, not pretend all source-file bytes were delivered by Pi.
+  // The ordinary write acknowledgement remains usable, while a large bash
+  // result can itself be a bounded preview. Never claim its copy is the source.
+  await rows.nth(0).locator('[data-slot="collapsible-trigger"]').click();
+  await expect(rows.nth(0).locator("[data-tool-output]")).toContainText("Successfully wrote");
+  await rows.nth(0).locator('[data-slot="collapsible-trigger"]').click();
   const outputRow = rows.nth(3);
   await outputRow.locator('[data-slot="collapsible-trigger"]').click();
   const result = outputRow.locator("[data-tool-output]");
   await expect(result).toContainText("LARGE_MULTILINE_ROW_");
   await result.getByRole("button", { name: "Copy full tool result", exact: true }).click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
-  expect(copied).toContain("LARGE_MULTILINE_ROW_5999_");
+  expect(copied).toContain("LARGE_MULTILINE_ROW_");
+  expect(copied.length).toBeLessThan(32 * 1024);
   record({
-    kind: "large-tool-output",
+    kind: "large-tool-history-preview",
     fixture: "real-write-read-bash",
     samples,
     copiedResultChars: copied.length,

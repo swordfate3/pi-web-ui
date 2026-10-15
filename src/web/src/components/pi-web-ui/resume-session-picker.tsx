@@ -1,18 +1,24 @@
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { recentHistoryRange } from "../../core/history-dates";
 import { getLanguage, t, useLanguage } from "../../core/i18n";
-import type { SavedSession, SavedSessionsResult } from "../../core/types";
+import type { HistoryRange, SavedSession, SavedSessionsResult } from "../../core/types";
+import { DateRangeControls } from "./history-controls";
 import { Modal } from "./modal";
 
 export function ResumeSessionPicker({
   listing,
   onCancel,
   onSelect,
+  onRangeChange,
+  loading,
 }: {
   listing: SavedSessionsResult;
   onCancel: () => void;
   onSelect: (session: SavedSession) => void;
+  onRangeChange: (range: HistoryRange) => void;
+  loading?: boolean;
 }) {
   useLanguage();
   const [query, setQuery] = useState("");
@@ -29,6 +35,26 @@ export function ResumeSessionPicker({
         <p className="break-all text-muted-foreground text-sm">
           {t("Saved sessions for the current project: {cwd}", { cwd: listing.cwd })}
         </p>
+        <DateRangeControls
+          saved
+          range={
+            listing.from !== undefined && listing.to !== undefined
+              ? { from: listing.from, to: listing.to }
+              : recentHistoryRange()
+          }
+          loading={loading}
+          onChange={onRangeChange}
+        />
+        {loading && (
+          <p role="status" className="text-muted-foreground text-sm">
+            {t("Loading saved sessions...")}
+          </p>
+        )}
+        {listing.truncated && (
+          <p className="text-muted-foreground text-sm">
+            {t("Saved session results are capped. Narrow the date range to find more.")}
+          </p>
+        )}
         <Input
           autoFocus
           aria-label={t("Search saved sessions")}
@@ -43,7 +69,7 @@ export function ResumeSessionPicker({
           {sessions.map((session) => (
             <Button
               className="h-auto min-h-12 w-full justify-start whitespace-normal px-3 py-2 text-left"
-              disabled={session.isCurrent || session.sessionId === listing.sessionId}
+              disabled={loading || session.isCurrent || session.sessionId === listing.sessionId}
               key={session.id}
               onClick={() => onSelect(session)}
               type="button"

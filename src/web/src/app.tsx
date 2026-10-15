@@ -18,20 +18,24 @@ import {
   WorkspaceStatusFloat,
 } from "./components/pi-web-ui";
 import { ChatList } from "./components/pi-web-ui/chat-list";
+import { HistoryControls } from "./components/pi-web-ui/history-controls";
 import { RemoteAccessPanel } from "./components/pi-web-ui/remote-access-panel";
 import { ResumeSessionPicker } from "./components/pi-web-ui/resume-session-picker";
 import { SessionDetails, sessionStatsSummary } from "./components/pi-web-ui/session-details";
 import { extractText, processPromptFiles } from "./core/chat-conversion";
 import { downloadExport } from "./core/export-download";
 import { copyText, isEditableTarget } from "./core/format";
+import { recentHistoryRange } from "./core/history-dates";
 import { t, useLanguage } from "./core/i18n";
 import { PiClient } from "./core/pi-client";
+import { cancelSavedSessionPicker } from "./core/saved-session-picker";
 import { readPreference, writePreference } from "./core/storage";
 import { usePiWebUiStore } from "./core/store";
 import { dispatchPiEvent } from "./core/store/event-dispatch";
 import type {
   ChatItem,
   ExportHtmlResult,
+  HistoryRange,
   PromptCommand,
   SavedSession,
   SavedSessionsResult,
@@ -169,6 +173,12 @@ export function App() {
   const [sessionDetails, setSessionDetails] = useState<SessionStatsResult | null>(null);
   const resumeSourceRuntimeRef = useRef<string | null>(null);
   const resumeRequestRef = useRef(0);
+  const closeResumePicker = useCallback(() => {
+    cancelSavedSessionPicker(resumeRequestRef, () => {
+      setResumeLoading(false);
+      setResumeListing(null);
+    });
+  }, []);
   const forkPickerSessionIdRef = useRef<string | null>(null);
   const draftTextRef = useRef(draftText);
   draftTextRef.current = draftText;
@@ -179,10 +189,10 @@ export function App() {
 
   useEffect(() => {
     if (resumeListing && (resumeListing.sessionId !== sessionId || resumeSourceRuntimeRef.current !== runtimeId)) {
-      setResumeListing(null);
+      closeResumePicker();
       setError(uiText("Session or runtime changed. Reopen the session picker."));
     }
-  }, [resumeListing, sessionId, runtimeId, setError]);
+  }, [resumeListing, sessionId, runtimeId, setError, closeResumePicker]);
 
   const itemElementsRef = useRef<Map<string, HTMLElement>>(new Map());
   const pendingFocusEntryIdRef = useRef<string | null>(null);
@@ -508,41 +518,49 @@ export function App() {
     }
   }, [chatStatus, compactSend, sessionActionPending, setError]);
 
-  const openResumePicker = useCallback(async () => {
-    const store = usePiWebUiStore.getState();
-    if (
-      store.chatStatus !== "ready" ||
-      store.sessionActionPending ||
-      !store.sessionId ||
-      store.connection !== "connected"
-    ) {
-      setError(uiText("Connect and wait for the current Pi turn or session action to finish."));
-      return;
-    }
-    const sourceSessionId = store.sessionId;
-    const sourceRuntimeId = store.runtimeId;
-    const request = ++resumeRequestRef.current;
-    setResumeLoading(true);
-    try {
-      const listing = (await compactSend("get_saved_sessions")) as SavedSessionsResult;
-      if (request !== resumeRequestRef.current) return;
-      const current = usePiWebUiStore.getState();
+  const openResumePicker = useCallback(
+    async (range: HistoryRange = recentHistoryRange()) => {
+      const store = usePiWebUiStore.getState();
       if (
-        listing.sessionId !== sourceSessionId ||
-        current.sessionId !== sourceSessionId ||
-        current.runtimeId !== sourceRuntimeId ||
-        current.sessionActionPending
+        store.chatStatus !== "ready" ||
+        store.sessionActionPending ||
+        !store.sessionId ||
+        store.connection !== "connected"
       ) {
-        throw new UiError(uiText("Session changed. Reopen the session picker."));
+        setError(uiText("Connect and wait for the current Pi turn or session action to finish."));
+        return;
       }
-      resumeSourceRuntimeRef.current = sourceRuntimeId;
-      setResumeListing(listing);
-    } catch (err) {
-      setError(errorUiText(err, uiText("Could not load saved sessions")));
-    } finally {
-      if (request === resumeRequestRef.current) setResumeLoading(false);
-    }
-  }, [compactSend, setError]);
+      const sourceSessionId = store.sessionId;
+      const sourceRuntimeId = store.runtimeId;
+      const request = ++resumeRequestRef.current;
+      setResumeLoading(true);
+      try {
+        const listing = (await compactSend("get_saved_sessions", {
+          ...range,
+          sessionId: sourceSessionId,
+          ...(sourceRuntimeId ? { runtimeId: sourceRuntimeId } : {}),
+        })) as SavedSessionsResult;
+        if (request !== resumeRequestRef.current) return;
+        const current = usePiWebUiStore.getState();
+        if (
+          listing.sessionId !== sourceSessionId ||
+          (listing.runtimeId && listing.runtimeId !== sourceRuntimeId) ||
+          current.sessionId !== sourceSessionId ||
+          current.runtimeId !== sourceRuntimeId ||
+          current.sessionActionPending
+        ) {
+          throw new UiError(uiText("Session changed. Reopen the session picker."));
+        }
+        resumeSourceRuntimeRef.current = sourceRuntimeId;
+        setResumeListing(listing);
+      } catch (err) {
+        if (request === resumeRequestRef.current) setError(errorUiText(err, uiText("Could not load saved sessions")));
+      } finally {
+        if (request === resumeRequestRef.current) setResumeLoading(false);
+      }
+    },
+    [compactSend, setError],
+  );
 
   const resumeSelectedSession = useCallback(
     async (selection: SavedSession) => {
@@ -553,7 +571,7 @@ export function App() {
         resumeSourceRuntimeRef.current !== store.runtimeId
       ) {
         setError(uiText("Session changed. Reopen the session picker."));
-        setResumeListing(null);
+        closeResumePicker();
         return;
       }
       if (selection.isCurrent || selection.sessionId === store.sessionId || store.sessionActionPending) return;
@@ -569,7 +587,7 @@ export function App() {
       // The source binding is checked immediately before the store captures it.
       try {
         const completion = resumeSession(selection.id, selection.sessionId);
-        setResumeListing(null);
+        closeResumePicker();
         await completion;
         setDraftText("");
         setQueuedMessages([]);
@@ -577,7 +595,7 @@ export function App() {
         setError(errorUiText(err, uiText("Resume failed")));
       }
     },
-    [queuedMessages.length, resumeListing, resumeSession, setError],
+    [queuedMessages.length, resumeListing, resumeSession, setError, closeResumePicker],
   );
 
   const reloadCurrentRuntime = useCallback(async () => {
@@ -918,7 +936,7 @@ export function App() {
         else if (commandOpen) setCommandOpen(false);
         else if (modelOpen) setModelOpen(false);
         else if (settingsOpen) setSettingsOpen(false);
-        else if (resumeListing) setResumeListing(null);
+        else if (resumeListing) closeResumePicker();
         else if (forkPickerMessages) setForkPickerMessages(null);
         else if (sessionDetails) setSessionDetails(null);
         else if (chatStatus === "streaming") abort();
@@ -929,6 +947,7 @@ export function App() {
   }, [
     abort,
     chatStatus,
+    closeResumePicker,
     commandOpen,
     modelOpen,
     settingsOpen,
@@ -1044,6 +1063,7 @@ export function App() {
 
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
+            <HistoryControls />
             <div className="relative min-h-0 flex-1">
               <Conversation className="h-full">
                 <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-4 py-8 sm:px-6">
@@ -1217,7 +1237,9 @@ export function App() {
         {resumeListing && (
           <ResumeSessionPicker
             listing={resumeListing}
-            onCancel={() => setResumeListing(null)}
+            loading={resumeLoading}
+            onRangeChange={(range) => void openResumePicker(range)}
+            onCancel={closeResumePicker}
             onSelect={(selection) => void resumeSelectedSession(selection)}
           />
         )}

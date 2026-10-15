@@ -9,6 +9,8 @@ import type {
   FileContentResult,
   GitDiffResult,
   GitStatusResult,
+  HistoryMetadata,
+  HistoryRange,
   ModelInfo,
   PromptCommand,
   RightPanelTab,
@@ -38,6 +40,13 @@ export type ConnectionSlice = {
 };
 
 export type SessionSlice = {
+  historyRange: HistoryRange;
+  history: HistoryMetadata | null;
+  historyBefore: string | null;
+  historyLoading: boolean;
+  historyError: UiText | null;
+  loadHistory: (range: HistoryRange, before?: string) => Promise<void>;
+  isHistoryLive: () => boolean;
   items: ChatItem[];
   chatStatus: ChatSubmitStatus;
   tree: SessionTreeNode[];
@@ -58,7 +67,7 @@ export type SessionSlice = {
   lastUsage: Usage | null;
   contextWindowSize: number;
   addSystemMessage: (text: UiText, tone?: SystemTone) => void;
-  applyStateSync: (sync: StateSyncPayload) => void;
+  applyStateSync: (sync: StateSyncPayload, options?: { requested?: boolean }) => void;
   requestConversationSync: (options?: { debounce?: boolean }) => Promise<void> | void;
   clearConversationTimers: () => void;
   setChatStatus: (status: ChatSubmitStatus) => void;

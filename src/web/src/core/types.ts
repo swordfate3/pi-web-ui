@@ -47,6 +47,8 @@ export type ChatItem =
       id: string;
       name: string;
       input: unknown;
+      /** Invocation is outside this bounded page; the result remains inspectable. */
+      resultOnly?: boolean;
       output?: unknown;
       errorText?: string;
       state: ToolState;
@@ -168,7 +170,16 @@ export type WsError = {
   message: string;
 };
 
+export type HistoryRange = { from: number; to: number };
+export type HistoryMetadata = HistoryRange & {
+  nextBefore: string | null;
+  total: number;
+  returned: number;
+  truncatedEntries: number;
+  treeLimited: boolean;
+};
 export type StateSyncPayload = {
+  history?: HistoryMetadata;
   entries?: SessionEntry[];
   /** Preferred flat DFS pre-order tree; structural parents are independent of entry.parentId. */
   treeNodes?: SessionTreeNodeWire[];
@@ -333,6 +344,11 @@ export type SavedSession = {
 
 export type SavedSessionsResult = {
   sessionId: string;
+  runtimeId?: string;
+  from?: number;
+  to?: number;
+  total?: number;
+  truncated?: boolean;
   cwd: string;
   sessions: SavedSession[];
 };

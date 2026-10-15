@@ -8,6 +8,8 @@
     "extensions/connection-config.ts",
     "extensions/connection-listener.ts",
     "extensions/session-registration.ts",
+    "extensions/session-history.ts",
+    "tests/session-history.test.ts",
     "extensions/remote-access/plan.ts",
     "tests/web-connection.test.ts",
     "tests/session-registration.test.ts",

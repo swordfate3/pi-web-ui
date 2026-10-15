@@ -19,6 +19,7 @@ const SOURCE_FILES = [
   "extensions/connection-config.ts",
   "extensions/connection-listener.ts",
   "extensions/session-registration.ts",
+  "extensions/session-history.ts",
   "extensions/remote-access/plan.ts",
   "extensions/remote-access/gateway.py",
   "scripts/web-dist.mjs",

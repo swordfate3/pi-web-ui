@@ -25,6 +25,7 @@ import {
 import { WebSocket, WebSocketServer } from "ws";
 import { type ConnectionSettings, localWebUrl, resolveConnectionConfig } from "./connection-config.ts";
 import { listenWithFallback } from "./connection-listener.ts";
+import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 
 type BrowserImage = {
@@ -79,49 +80,6 @@ type BrowserTreeNode = {
   label?: string;
   labelTimestamp?: string;
 };
-
-// Tree depth must never become JSON depth. Preserve getTree()'s root/child order
-// using iterative preorder traversal, including orphan roots and resolved labels.
-function flattenSessionTree(tree: unknown): BrowserTreeNode[] {
-  if (!Array.isArray(tree)) throw new Error("Invalid session tree: expected roots array");
-  const nodes: BrowserTreeNode[] = [];
-  const seenNodes = new WeakSet<object>();
-  const seenIds = new Set<string>();
-  const stack: { node: unknown; parentNodeId: string | null }[] = [];
-  for (let i = tree.length - 1; i >= 0; i--) {
-    stack.push({ node: tree[i], parentNodeId: null });
-  }
-  while (stack.length > 0) {
-    const next = stack.pop();
-    if (!next) break;
-    const { node, parentNodeId } = next;
-    if (!node || typeof node !== "object" || Array.isArray(node)) {
-      throw new Error("Invalid session tree: expected node object");
-    }
-    if (seenNodes.has(node)) throw new Error("Invalid session tree: repeated or cyclic node");
-    seenNodes.add(node);
-    const { entry, children, label, labelTimestamp } = node as Record<string, unknown>;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error("Invalid session tree: expected entry object");
-    }
-    const id = (entry as SessionEntry).id;
-    if (typeof id !== "string" || !id || seenIds.has(id)) {
-      throw new Error("Invalid session tree: missing or duplicate entry id");
-    }
-    if (!Array.isArray(children)) throw new Error("Invalid session tree: expected children array");
-    if (label !== undefined && typeof label !== "string") throw new Error("Invalid session tree: invalid label");
-    if (labelTimestamp !== undefined && typeof labelTimestamp !== "string") {
-      throw new Error("Invalid session tree: invalid label timestamp");
-    }
-    seenIds.add(id);
-    nodes.push({ entry: entry as BrowserTreeNode["entry"], parentNodeId, label, labelTimestamp });
-    // Use the actual nested parent, not entry.parentId (which can be stale or orphaned).
-    for (let i = children.length - 1; i >= 0; i--) {
-      stack.push({ node: children[i], parentNodeId: id });
-    }
-  }
-  return nodes;
-}
 
 type FileListItem = {
   name: string;
@@ -460,9 +418,11 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function listSavedSessions() {
+  async function listSavedSessions(params: Record<string, unknown> = {}) {
     if (!latestCtx) throw new Error("No context available");
     if (sessionReplacementPending) throw new Error("A session action is already in progress");
+    checkHistoryIdentity(params);
+    const range = historyRange(params);
     const scope = sessionScope(latestCtx);
     // Pass the actual public manager's sessionDir, including CLI --session-dir.
     // Never use listAll: custom stores can contain multiple projects.
@@ -470,46 +430,50 @@ export default function (pi: ExtensionAPI) {
     if (!scopeIsCurrent(scope) || sessionReplacementPending)
       throw new Error("Session changed. Reopen the session picker.");
     pruneSavedSelections();
+    const filtered = selectSavedSessions(
+      sessions.filter(
+        (session) =>
+          session.cwd && path.resolve(session.cwd) === scope.cwd && allowedSessionPath(session.path, scope.sessionDir),
+      ),
+      range,
+      100,
+    );
     return {
       sessionId: scope.sessionId,
+      runtimeId,
       cwd: scope.cwd,
-      sessions: sessions
-        .filter(
-          (session) =>
-            session.cwd &&
-            path.resolve(session.cwd) === scope.cwd &&
-            allowedSessionPath(session.path, scope.sessionDir),
-        )
-        .slice(0, MAX_SAVED_SELECTIONS)
-        .map((session) => {
-          const existing = [...savedSelections].find(
-            ([, selection]) => selection.path === session.path && selection.targetSessionId === session.id,
-          );
-          const id = existing?.[0] ?? randomUUID();
-          if (!existing && savedSelections.size >= MAX_SAVED_SELECTIONS) {
-            const oldest = savedSelections.keys().next().value;
-            if (oldest) savedSelections.delete(oldest);
-          }
-          savedSelections.set(
-            id,
-            Object.freeze({
-              ...scope,
-              path: session.path,
-              targetSessionId: session.id,
-              expiresAt: Date.now() + CAPABILITY_TTL_MS,
-            }),
-          );
-          return {
-            id,
-            sessionId: session.id,
-            name: session.name ?? null,
-            created: session.created.toISOString(),
-            modified: session.modified.toISOString(),
-            messageCount: session.messageCount,
-            firstMessage: session.firstMessage,
-            isCurrent: session.id === scope.sessionId,
-          };
-        }),
+      ...range,
+      total: filtered.total,
+      truncated: filtered.truncated,
+      sessions: filtered.sessions.map((session) => {
+        const existing = [...savedSelections].find(
+          ([, selection]) => selection.path === session.path && selection.targetSessionId === session.id,
+        );
+        const id = existing?.[0] ?? randomUUID();
+        if (!existing && savedSelections.size >= MAX_SAVED_SELECTIONS) {
+          const oldest = savedSelections.keys().next().value;
+          if (oldest) savedSelections.delete(oldest);
+        }
+        savedSelections.set(
+          id,
+          Object.freeze({
+            ...scope,
+            path: session.path,
+            targetSessionId: session.id,
+            expiresAt: Date.now() + CAPABILITY_TTL_MS,
+          }),
+        );
+        return {
+          id,
+          sessionId: session.id,
+          name: session.name?.slice(0, 160) ?? null,
+          created: session.created.toISOString(),
+          modified: session.modified.toISOString(),
+          messageCount: session.messageCount,
+          firstMessage: session.firstMessage.slice(0, 240),
+          isCurrent: session.id === scope.sessionId,
+        };
+      }),
     };
   }
 
@@ -798,7 +762,7 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   function sendTo(ws: WritableSocket, data: unknown) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(stringifyForBrowser(data));
+      ws.send(guardHistoryFrame(stringifyForBrowser(data), data));
     }
   }
 
@@ -810,7 +774,7 @@ export default function (pi: ExtensionAPI) {
     for (const client of clients) {
       if (client.readyState === WebSocket.OPEN) {
         // No open clients means no serialization; otherwise serialize only once.
-        json ??= stringifyForBrowser(data);
+        json ??= guardHistoryFrame(stringifyForBrowser(data), data);
         client.send(json);
       }
     }
@@ -1254,7 +1218,7 @@ export default function (pi: ExtensionAPI) {
     advancedFeaturesEnabled = false;
     latestExecuteCtx = null;
     clearSessionAction();
-    broadcast({ type: "event", event: "state_sync", payload: (await buildStateSnapshot(ctx)).payload });
+    broadcast({ type: "event", event: "state_sync", payload: buildStateSnapshot(ctx).payload });
     liveArtifactPaths.clear();
     broadcast({ type: "event", event: "webui_state", payload: { advancedFeatures: false } });
     turnCount = 0;
@@ -1361,10 +1325,22 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   // Build state snapshot for new connections
   // ═══════════════════════════════════════
-  async function buildStateSnapshot(ctx: ExtensionContext) {
+  function checkHistoryIdentity(params: Record<string, unknown>, required = false) {
+    if (!latestCtx || !runtimeActive) throw new Error("No context available");
+    if (sessionReplacementPending) throw new Error("A session action is already in progress");
+    if ((required || params.sessionId !== undefined) && params.sessionId !== latestCtx.sessionManager.getSessionId())
+      throw new Error("Session changed. Request history again.");
+    if (params.runtimeId !== undefined && params.runtimeId !== runtimeId)
+      throw new Error("Pi runtime changed. Request history again.");
+    return latestCtx;
+  }
+
+  function buildStateSnapshot(ctx: ExtensionContext, params: Record<string, unknown> = {}) {
     // Get session entries for message history
-    const entries = ctx.sessionManager.getBranch();
-    const treeNodes = flattenSessionTree(ctx.sessionManager.getTree());
+    const page = selectSessionHistory(ctx.sessionManager.getBranch(), ctx.sessionManager.getTree(), {
+      ...historyRange(params),
+      ...(params.before === undefined ? {} : { before: params.before as string }),
+    });
     const leafId = ctx.sessionManager.getLeafId();
 
     // Get model info
@@ -1380,8 +1356,7 @@ export default function (pi: ExtensionAPI) {
       type: "event",
       event: "state_sync",
       payload: {
-        entries,
-        treeNodes,
+        ...page,
         leafId,
         model,
         thinkingLevel,
@@ -1675,7 +1650,7 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("No context available"));
             break;
           }
-          sendTo(ws, success({ entries: ctx.sessionManager.getEntries() }));
+          sendTo(ws, success(buildStateSnapshot(checkHistoryIdentity(params), params).payload));
           break;
         }
 
@@ -1783,7 +1758,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         case "get_saved_sessions": {
-          sendTo(ws, success(await listSavedSessions()));
+          sendTo(ws, success(await listSavedSessions(params)));
           break;
         }
 
@@ -1870,27 +1845,13 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
-        case "get_tree": {
-          // The browser transport uses the same flat shape as state_sync, not
-          // Pi RPC's nested tree (which overflows JSON.stringify on long sessions).
-          sendTo(
-            ws,
-            success({
-              treeNodes: ctx ? flattenSessionTree(ctx.sessionManager.getTree()) : [],
-              leafId: ctx?.sessionManager.getLeafId() ?? null,
-            }),
-          );
-          break;
-        }
-
+        case "get_history":
+        case "get_tree":
         case "sync_request": {
-          const snapshot = ctx
-            ? await buildStateSnapshot(ctx)
-            : {
-                type: "event",
-                event: "state_sync",
-                payload: { entries: [], treeNodes: [], leafId: null, model: null },
-              };
+          const historyCtx = checkHistoryIdentity(params, request.method === "get_history");
+          if (request.method === "get_history" && (params.from === undefined || params.to === undefined))
+            throw new Error("Invalid history date range: from and to are required");
+          const snapshot = buildStateSnapshot(historyCtx, params);
           sendTo(ws, success(snapshot.payload));
           break;
         }
@@ -2533,17 +2494,11 @@ export default function (pi: ExtensionAPI) {
 
       // Immediately send state snapshot
       if (latestCtx) {
-        buildStateSnapshot(latestCtx)
-          .then((snapshot) => {
-            sendTo(ws, snapshot);
-          })
-          .catch((error: unknown) => {
-            sendTo(ws, {
-              type: "error",
-              code: "STATE_SYNC_FAILED",
-              message: error instanceof Error ? error.message : String(error),
-            });
-          });
+        try {
+          sendTo(ws, buildStateSnapshot(latestCtx));
+        } catch {
+          sendTo(ws, { type: "error", code: "STATE_SYNC_FAILED", message: "Could not load bounded session history" });
+        }
       }
 
       ws.on("message", (data) => {

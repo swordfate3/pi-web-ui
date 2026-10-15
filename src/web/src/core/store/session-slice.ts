@@ -6,6 +6,7 @@ import {
   formatToolOutput,
   syncToItems,
 } from "../chat-conversion";
+import { recentHistoryRange } from "../history-dates";
 import { decodeSessionTreeOrKeep } from "../session-tree-wire";
 import { isToolExpandable } from "../tool-summary";
 import type { ChatItem } from "../types";
@@ -14,11 +15,6 @@ import { artifactsFromEntries } from "../workspace-artifacts";
 import { runSessionAction } from "./session-action";
 import type { SessionSlice, StoreSlice } from "./types";
 
-let conversationSyncInFlight = false;
-let conversationSyncPending = false;
-let conversationSyncTimer: number | null = null;
-let streamingId: string | null = null;
-let streamingHasToolCall = false;
 let itemCounter = 0;
 
 function nextId(prefix: string) {
@@ -26,327 +22,470 @@ function nextId(prefix: string) {
   return `${prefix}-${Date.now()}-${itemCounter}`;
 }
 
-export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => ({
-  items: [],
-  chatStatus: "ready",
-  tree: [],
-  leafId: null,
-  sessionId: null,
-  runtimeId: null,
-  sessionActionPending: false,
-  sessionActionError: null,
-  sessionActionNotice: null,
-  selectedTreeEntryId: null,
-
-  setSessionActionError: (message) => set({ sessionActionError: message, error: message }),
-
-  forkSession: (action, entryId) => runSessionAction([set, get, api], { method: "fork_session", action, entryId }),
-  resumeSession: (id, targetSessionId) =>
-    runSessionAction([set, get, api], { method: "switch_session", id, targetSessionId }),
-  reloadRuntime: () => runSessionAction([set, get, api], { method: "reload" }),
-  loadingTreeEntryId: null,
-  conversationSyncing: false,
-  conversationSyncError: null,
-  lastUsage: null,
-  contextWindowSize: 0,
-
-  addSystemMessage: (text, tone = "info") => {
-    set((state) => ({ items: [...state.items, { kind: "system", id: nextId("system"), text, tone }] }));
-  },
-
-  applyStateSync: (sync) => {
-    const entries = sync.entries ?? [];
-    const items = syncToItems(entries, nextId);
-    const artifacts = artifactsFromEntries(entries);
-    const decodedTree = decodeSessionTreeOrKeep(sync, get().tree);
-    const tree = decodedTree.tree;
-    const previousSessionId = get().sessionId;
-    const sessionChanged = Boolean(sync.sessionId && previousSessionId && sync.sessionId !== previousSessionId);
-    const notice = sessionChanged ? null : get().sessionActionNotice;
-    if (notice) items.push({ kind: "system", id: nextId("session-action"), text: notice, tone: "success" });
-    const currentSelection = sessionChanged ? null : get().selectedTreeEntryId;
-    let selectedTreeEntryId: string | null = sync.leafId ?? null;
-
-    if (decodedTree.ok && currentSelection) {
-      const stack = [...tree];
-      while (stack.length > 0) {
-        const node = stack.pop();
-        if (node?.entry.id === currentSelection) {
-          selectedTreeEntryId = currentSelection;
-          break;
-        }
-        if (node) {
-          for (const child of node.children) stack.push(child);
-        }
-      }
-    }
-
-    // Keep navigation state aligned with the retained tree on a rejected snapshot.
-    if (!decodedTree.ok) selectedTreeEntryId = get().selectedTreeEntryId;
-
-    set({
-      artifacts,
-      conversationSyncError: decodedTree.error,
-      chatStatus: sync.isStreaming ? "streaming" : "ready",
-      connection: "connected",
-      contextWindowSize: sync.model?.contextWindow || get().contextWindowSize,
-      currentModel: sync.model || null,
-      error: sessionChanged ? null : get().error,
-      items,
-      lastUsage: findLastUsage(entries),
-      leafId: decodedTree.ok ? (sync.leafId ?? null) : get().leafId,
-      sessionId: sync.sessionId ?? previousSessionId,
-      // A runtime identity only counts when this snapshot explicitly identifies
-      // its session too (reload must not complete on a partial snapshot).
-      runtimeId: sync.sessionId ? (sync.runtimeId ?? (sessionChanged ? null : get().runtimeId)) : get().runtimeId,
-      sessionActionNotice: notice,
-      modelLabel: sync.model?.id ? sync.model.id.split("/").pop() || sync.model.id : "model",
-      selectedTreeEntryId,
-      sessionName: sync.sessionName || "Pi Web UI",
-      thinkingLevel: sync.thinkingLevel || "off",
-      availableThinkingLevels: sync.availableThinkingLevels || ["off"],
-      tree,
-    });
-    get().requestGitStatusRefresh({ debounce: true });
-  },
-
-  requestConversationSync: async (options) => {
-    if (options?.debounce) {
-      if (conversationSyncTimer) window.clearTimeout(conversationSyncTimer);
-      conversationSyncTimer = window.setTimeout(() => {
-        conversationSyncTimer = null;
-        void get().requestConversationSync();
-      }, 250);
-      return;
-    }
-
-    if (conversationSyncInFlight) {
-      conversationSyncPending = true;
-      return;
-    }
-
-    conversationSyncInFlight = true;
-    set({ conversationSyncError: null, conversationSyncing: true });
-    try {
-      const sync = await get().send("sync_request");
-      get().applyStateSync(sync as Parameters<SessionSlice["applyStateSync"]>[0]);
-    } catch (error) {
-      set({ conversationSyncError: errorUiText(error, uiText("Sync failed")) });
-    } finally {
-      conversationSyncInFlight = false;
-      set({ conversationSyncing: false });
-      if (conversationSyncPending) {
-        conversationSyncPending = false;
-        window.setTimeout(() => void get().requestConversationSync(), 0);
-      }
-    }
-  },
-
-  clearConversationTimers: () => {
-    if (conversationSyncTimer) window.clearTimeout(conversationSyncTimer);
-    conversationSyncTimer = null;
-  },
-
-  setChatStatus: (chatStatus) => set({ chatStatus }),
-  setSelectedTreeEntryId: (selectedTreeEntryId) => set({ selectedTreeEntryId }),
-  setLoadingTreeEntryId: (loadingTreeEntryId) => set({ loadingTreeEntryId }),
-  setLastUsage: (lastUsage) => set({ lastUsage }),
-  setContextWindowSize: (contextWindowSize) => set({ contextWindowSize }),
-
-  sendPrompt: async (command) => {
-    set({ chatStatus: "submitted", error: null });
-    try {
-      await get().send("prompt", {
-        message: command.message,
-        ...(command.images?.length && { images: command.images }),
+export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
+  let streamingId: string | null = null;
+  let streamingHasToolCall = false;
+  let historySelected = false;
+  let historyGeneration = 0;
+  let conversationSyncInFlight = false;
+  let conversationSyncPending = false;
+  let conversationSyncTimer: number | null = null;
+  const identity = () => ({ sessionId: get().sessionId, runtimeId: get().runtimeId });
+  const sameIdentity = (source: ReturnType<typeof identity>) =>
+    source.sessionId === get().sessionId && source.runtimeId === get().runtimeId;
+  return {
+    historyRange: recentHistoryRange(),
+    history: null,
+    historyBefore: null,
+    historyLoading: false,
+    historyError: null,
+    isHistoryLive: () =>
+      !get().historyBefore &&
+      !get().historyLoading &&
+      Date.now() >= get().historyRange.from &&
+      Date.now() < get().historyRange.to,
+    loadHistory: async (range, before) => {
+      const source = identity();
+      if (!source.sessionId) return;
+      const generation = ++historyGeneration;
+      historySelected = true;
+      streamingId = null;
+      streamingHasToolCall = false;
+      set({
+        historyRange: range,
+        historyBefore: before ?? null,
+        historyLoading: true,
+        historyError: null,
+        conversationSyncError: null,
+        conversationSyncing: false,
+        items: [],
+        tree: [],
+        artifacts: [],
+        history: null,
+        selectedTreeEntryId: null,
       });
-    } catch (error) {
-      set({ chatStatus: "error", error: errorUiText(error, uiText("Prompt failed")) });
-    }
-  },
+      try {
+        const sync = (await get().send("get_history", {
+          ...range,
+          ...(before ? { before } : {}),
+          sessionId: source.sessionId,
+          ...(source.runtimeId ? { runtimeId: source.runtimeId } : {}),
+        })) as Parameters<SessionSlice["applyStateSync"]>[0];
+        if (generation !== historyGeneration || !sameIdentity(source)) return;
+        if (sync.sessionId !== source.sessionId || (source.runtimeId && sync.runtimeId !== source.runtimeId)) return;
+        get().applyStateSync(sync, { requested: true });
+      } catch (error) {
+        if (generation === historyGeneration && sameIdentity(source))
+          set({ historyError: errorUiText(error, uiText("Could not load history")) });
+      } finally {
+        if (generation === historyGeneration && sameIdentity(source)) set({ historyLoading: false });
+      }
+    },
+    items: [],
+    chatStatus: "ready",
+    tree: [],
+    leafId: null,
+    sessionId: null,
+    runtimeId: null,
+    sessionActionPending: false,
+    sessionActionError: null,
+    sessionActionNotice: null,
+    selectedTreeEntryId: null,
 
-  abort: async () => {
-    try {
-      await get().send("abort");
-      set({ chatStatus: "ready" });
-      get().addSystemMessage(uiText("Aborted by user"), "error");
-    } catch (error) {
-      set({ error: errorUiText(error, uiText("Abort failed")) });
-    }
-  },
+    setSessionActionError: (message) => set({ sessionActionError: message, error: message }),
 
-  toggleAllTools: (open) => {
-    set((state) => ({
-      items: state.items.map((item) => (item.kind === "tool" && isToolExpandable(item) ? { ...item, open } : item)),
-    }));
-  },
+    forkSession: (action, entryId) => runSessionAction([set, get, api], { method: "fork_session", action, entryId }),
+    resumeSession: (id, targetSessionId) =>
+      runSessionAction([set, get, api], { method: "switch_session", id, targetSessionId }),
+    reloadRuntime: () => runSessionAction([set, get, api], { method: "reload" }),
+    loadingTreeEntryId: null,
+    conversationSyncing: false,
+    conversationSyncError: null,
+    lastUsage: null,
+    contextWindowSize: 0,
 
-  toggleTool: (id, open) => {
-    set((state) => ({
-      items: state.items.map((item) => (item.kind === "tool" && item.id === id ? { ...item, open } : item)),
-    }));
-  },
+    addSystemMessage: (text, tone = "info") => {
+      set((state) => ({ items: [...state.items, { kind: "system", id: nextId("system"), text, tone }] }));
+    },
 
-  applyAgentStart: () => {
-    set({ chatStatus: "streaming" });
-  },
+    applyStateSync: (sync, options) => {
+      const previousSessionId = get().sessionId;
+      const sessionChanged = Boolean(sync.sessionId && previousSessionId && sync.sessionId !== previousSessionId);
+      const runtimeChanged = Boolean(
+        sync.sessionId && sync.runtimeId && get().runtimeId && sync.runtimeId !== get().runtimeId,
+      );
+      if (sessionChanged || runtimeChanged) {
+        historyGeneration++;
+        streamingId = null;
+        streamingHasToolCall = false;
+        if (sessionChanged) historySelected = false;
+        set({
+          historyLoading: false,
+          historyError: null,
+          conversationSyncing: false,
+          ...(sessionChanged
+            ? {
+                historyRange: recentHistoryRange(),
+                historyBefore: null,
+                history: null,
+                items: [],
+                tree: [],
+                artifacts: [],
+                selectedTreeEntryId: null,
+                leafId: null,
+              }
+            : {}),
+        });
+      }
+      const range = get().historyRange;
+      const keepPage =
+        !options?.requested &&
+        ((!sync.history && historySelected) ||
+          (Boolean(sync.history) &&
+            (sync.history?.from !== range.from ||
+              sync.history?.to !== range.to ||
+              get().historyBefore ||
+              get().historyLoading)));
+      const entries = sync.entries ?? [];
+      const items = syncToItems(entries, nextId);
+      if (!keepPage) {
+        streamingId = null;
+        streamingHasToolCall = false;
+        // Pi persists assistant entries only after message_end. Snapshot entries
+        // are completed history, never the currently streaming assistant.
+      }
+      const artifacts = artifactsFromEntries(entries);
+      const decodedTree = decodeSessionTreeOrKeep(sync, get().tree);
+      const tree = decodedTree.tree;
+      const notice = sessionChanged ? null : get().sessionActionNotice;
+      if (notice) items.push({ kind: "system", id: nextId("session-action"), text: notice, tone: "success" });
+      const currentSelection = sessionChanged ? null : get().selectedTreeEntryId;
+      let selectedTreeEntryId: string | null = sync.leafId ?? null;
 
-  applyAgentEnd: () => {
-    const hadToolCall = streamingHasToolCall;
-    set((state) => ({
-      chatStatus: "ready",
-      items: state.items.map((item) =>
-        item.kind === "message" && item.streaming
+      if (decodedTree.ok && currentSelection) {
+        const stack = [...tree];
+        while (stack.length > 0) {
+          const node = stack.pop();
+          if (node?.entry.id === currentSelection) {
+            selectedTreeEntryId = currentSelection;
+            break;
+          }
+          if (node) {
+            for (const child of node.children) stack.push(child);
+          }
+        }
+      }
+
+      // Keep navigation state aligned with the retained tree on a rejected snapshot.
+      if (!decodedTree.ok) selectedTreeEntryId = get().selectedTreeEntryId;
+
+      set({
+        artifacts,
+        conversationSyncError: decodedTree.error,
+        chatStatus: sync.isStreaming ? "streaming" : "ready",
+        connection: "connected",
+        contextWindowSize: sync.model?.contextWindow || get().contextWindowSize,
+        currentModel: sync.model || null,
+        error: sessionChanged ? null : get().error,
+        items,
+        lastUsage: findLastUsage(entries),
+        leafId: decodedTree.ok ? (sync.leafId ?? null) : get().leafId,
+        sessionId: sync.sessionId ?? previousSessionId,
+        // A runtime identity only counts when this snapshot explicitly identifies
+        // its session too (reload must not complete on a partial snapshot).
+        runtimeId: sync.sessionId ? (sync.runtimeId ?? (sessionChanged ? null : get().runtimeId)) : get().runtimeId,
+        sessionActionNotice: notice,
+        modelLabel: sync.model?.id ? sync.model.id.split("/").pop() || sync.model.id : "model",
+        selectedTreeEntryId,
+        sessionName: sync.sessionName || "Pi Web UI",
+        thinkingLevel: sync.thinkingLevel || "off",
+        availableThinkingLevels: sync.availableThinkingLevels || ["off"],
+        tree,
+        history: sync.history ?? null,
+        ...(keepPage
           ? {
-              ...item,
-              copyable: !hadToolCall,
-              presentation: hadToolCall ? "activity" : "normal",
-              streaming: false,
+              items: get().items,
+              tree: get().tree,
+              artifacts: get().artifacts,
+              history: get().history,
+              selectedTreeEntryId: get().selectedTreeEntryId,
+              leafId: get().leafId,
             }
-          : item,
-      ),
-    }));
-    streamingId = null;
-    streamingHasToolCall = false;
-    void get().requestConversationSync({ debounce: true });
-    get().requestGitStatusRefresh({ debounce: true });
-  },
+          : {}),
+      });
+      get().requestGitStatusRefresh({ debounce: true });
+      if (keepPage && !get().historyLoading) void get().loadHistory(range, get().historyBefore ?? undefined);
+    },
 
-  applyMessageStart: (event) => {
-    if (event.message?.role === "assistant") {
-      const id = event.message.id || nextId("assistant");
-      const hasInitialToolCall = extractToolCalls(event.message.content).length > 0;
-      streamingId = id;
-      streamingHasToolCall = hasInitialToolCall;
+    requestConversationSync: async (options) => {
+      if (options?.debounce) {
+        if (conversationSyncTimer) window.clearTimeout(conversationSyncTimer);
+        conversationSyncTimer = window.setTimeout(() => {
+          conversationSyncTimer = null;
+          void get().requestConversationSync();
+        }, 250);
+        return;
+      }
+
+      if (conversationSyncInFlight) {
+        conversationSyncPending = true;
+        return;
+      }
+
+      conversationSyncInFlight = true;
+      const generation = historyGeneration;
+      const source = identity();
+      const range = get().historyRange;
+      const before = get().historyBefore;
+      set({ conversationSyncError: null, conversationSyncing: true });
+      try {
+        const sync = (await get().send("sync_request", {
+          ...range,
+          ...(before ? { before } : {}),
+          ...(source.sessionId ? { sessionId: source.sessionId } : {}),
+          ...(source.runtimeId ? { runtimeId: source.runtimeId } : {}),
+        })) as Parameters<SessionSlice["applyStateSync"]>[0];
+        if (
+          generation === historyGeneration &&
+          sameIdentity(source) &&
+          (!sync.sessionId || sync.sessionId === source.sessionId) &&
+          (!sync.runtimeId || sync.runtimeId === source.runtimeId)
+        )
+          get().applyStateSync(sync, { requested: true });
+      } catch (error) {
+        if (generation === historyGeneration && sameIdentity(source))
+          set({ conversationSyncError: errorUiText(error, uiText("Sync failed")) });
+      } finally {
+        conversationSyncInFlight = false;
+        set({ conversationSyncing: false });
+        if (conversationSyncPending) {
+          conversationSyncPending = false;
+          window.setTimeout(() => void get().requestConversationSync(), 0);
+        }
+      }
+    },
+
+    clearConversationTimers: () => {
+      historyGeneration++;
+      if (conversationSyncTimer) window.clearTimeout(conversationSyncTimer);
+      conversationSyncTimer = null;
+    },
+
+    setChatStatus: (chatStatus) => set({ chatStatus }),
+    setSelectedTreeEntryId: (selectedTreeEntryId) => set({ selectedTreeEntryId }),
+    setLoadingTreeEntryId: (loadingTreeEntryId) => set({ loadingTreeEntryId }),
+    setLastUsage: (lastUsage) => set({ lastUsage }),
+    setContextWindowSize: (contextWindowSize) => set({ contextWindowSize }),
+
+    sendPrompt: async (command) => {
+      set({ chatStatus: "submitted", error: null });
+      try {
+        await get().send("prompt", {
+          message: command.message,
+          ...(command.images?.length && { images: command.images }),
+        });
+      } catch (error) {
+        set({ chatStatus: "error", error: errorUiText(error, uiText("Prompt failed")) });
+      }
+    },
+
+    abort: async () => {
+      try {
+        await get().send("abort");
+        set({ chatStatus: "ready" });
+        get().addSystemMessage(uiText("Aborted by user"), "error");
+      } catch (error) {
+        set({ error: errorUiText(error, uiText("Abort failed")) });
+      }
+    },
+
+    toggleAllTools: (open) => {
+      set((state) => ({
+        items: state.items.map((item) => (item.kind === "tool" && isToolExpandable(item) ? { ...item, open } : item)),
+      }));
+    },
+
+    toggleTool: (id, open) => {
+      set((state) => ({
+        items: state.items.map((item) => (item.kind === "tool" && item.id === id ? { ...item, open } : item)),
+      }));
+    },
+
+    applyAgentStart: () => {
+      set({ chatStatus: "streaming" });
+    },
+
+    applyAgentEnd: () => {
+      const hadToolCall = streamingHasToolCall;
+      set((state) => ({
+        chatStatus: "ready",
+        items: state.items.map((item) =>
+          item.kind === "message" && item.streaming
+            ? {
+                ...item,
+                copyable: !hadToolCall,
+                presentation: hadToolCall ? "activity" : "normal",
+                streaming: false,
+              }
+            : item,
+        ),
+      }));
+      streamingId = null;
+      streamingHasToolCall = false;
+      void get().requestConversationSync({ debounce: true });
+      get().requestGitStatusRefresh({ debounce: true });
+    },
+
+    applyMessageStart: (event) => {
+      if (!get().isHistoryLive()) return;
+      if (event.message?.role === "assistant") {
+        const id = event.message.id || nextId("assistant");
+        const hasInitialToolCall = extractToolCalls(event.message.content).length > 0;
+        streamingId = id;
+        streamingHasToolCall = hasInitialToolCall;
+        set((state) => ({
+          items: [
+            ...state.items,
+            {
+              kind: "message",
+              id,
+              role: "assistant",
+              text: extractText(event.message?.content),
+              reasoning: extractThinking(event.message?.content),
+              streaming: true,
+              copyable: false,
+              presentation: hasInitialToolCall ? "activity" : "normal",
+            },
+          ],
+        }));
+        return;
+      }
+
+      if (event.message?.role === "user") {
+        const text = extractText(event.message.content);
+        if (!text) return;
+        set((state) => ({
+          items: [...state.items, { kind: "message", id: event.message?.id || nextId("user"), role: "user", text }],
+        }));
+      }
+    },
+
+    applyMessageUpdate: (event) => {
+      if (!get().isHistoryLive()) return;
+      const messageEvent = event.assistantMessageEvent;
+      const delta = messageEvent?.delta || "";
+      if (
+        !streamingId &&
+        get().chatStatus === "streaming" &&
+        (messageEvent?.type === "toolcall_delta" ||
+          (delta && (messageEvent?.type === "text_delta" || messageEvent?.type === "thinking_delta")))
+      ) {
+        get().applyMessageStart({ type: "message_start", message: { role: "assistant", content: "" } });
+      }
+      const id = streamingId;
+      if (!id) return;
+      if (messageEvent?.type === "toolcall_delta") {
+        streamingHasToolCall = true;
+        set((state) => ({
+          items: state.items.map((item) =>
+            item.kind === "message" && item.id === id ? { ...item, copyable: false, presentation: "activity" } : item,
+          ),
+        }));
+        return;
+      }
+      if (!delta || (messageEvent?.type !== "text_delta" && messageEvent?.type !== "thinking_delta")) return;
+
+      set((state) => ({
+        items: state.items.map((item) => {
+          if (item.kind !== "message" || item.id !== id) return item;
+          if (messageEvent.type === "thinking_delta") return { ...item, reasoning: `${item.reasoning || ""}${delta}` };
+          return { ...item, text: `${item.text}${delta}` };
+        }),
+      }));
+    },
+
+    applyMessageEnd: (event) => {
+      if (!get().isHistoryLive()) return;
+      const id = streamingId;
+      if (!id) return;
+      const usage = event.message?.usage;
+      const finalText = event.message ? extractText(event.message.content) : undefined;
+      const finalReasoning = event.message ? extractThinking(event.message.content) : undefined;
+      const finalToolCalls = event.message ? extractToolCalls(event.message.content) : undefined;
+      const hasToolCalls = finalToolCalls?.length ? true : streamingHasToolCall;
+
+      set((state) => ({
+        items: state.items.map((item) =>
+          item.kind === "message" && item.id === id
+            ? {
+                ...item,
+                ...(finalReasoning !== undefined && { reasoning: finalReasoning }),
+                ...(finalText !== undefined && { text: finalText }),
+                copyable: !hasToolCalls,
+                cost: usage?.cost?.total,
+                presentation: hasToolCalls ? "activity" : "normal",
+                streaming: false,
+              }
+            : item,
+        ),
+        lastUsage: usage || null,
+      }));
+      streamingId = null;
+      streamingHasToolCall = false;
+    },
+
+    applyToolExecutionStart: (event) => {
+      if (!get().isHistoryLive()) return;
+      if (!event.toolCallId) return;
+      streamingHasToolCall = true;
       set((state) => ({
         items: [
           ...state.items,
           {
-            kind: "message",
-            id,
-            role: "assistant",
-            text: extractText(event.message?.content),
-            reasoning: extractThinking(event.message?.content),
-            streaming: true,
-            copyable: false,
-            presentation: hasInitialToolCall ? "activity" : "normal",
-          },
+            kind: "tool",
+            id: event.toolCallId as string,
+            name: event.toolName || "tool",
+            input: event.args,
+            state: "input-streaming",
+            open: false,
+          } satisfies ChatItem,
         ],
       }));
-      return;
-    }
+    },
 
-    if (event.message?.role === "user") {
-      const text = extractText(event.message.content);
-      if (!text) return;
-      set((state) => ({
-        items: [...state.items, { kind: "message", id: event.message?.id || nextId("user"), role: "user", text }],
-      }));
-    }
-  },
-
-  applyMessageUpdate: (event) => {
-    const messageEvent = event.assistantMessageEvent;
-    const delta = messageEvent?.delta || "";
-    const id = streamingId;
-    if (!id) return;
-    if (messageEvent?.type === "toolcall_delta") {
-      streamingHasToolCall = true;
+    applyToolExecutionUpdate: (event) => {
+      if (!get().isHistoryLive()) return;
+      if (!event.toolCallId) return;
       set((state) => ({
         items: state.items.map((item) =>
-          item.kind === "message" && item.id === id ? { ...item, copyable: false, presentation: "activity" } : item,
+          item.kind === "tool" && item.id === event.toolCallId
+            ? { ...item, output: formatToolOutput(event.partialResult), state: "input-available" }
+            : item,
         ),
       }));
-      return;
-    }
-    if (!delta || (messageEvent?.type !== "text_delta" && messageEvent?.type !== "thinking_delta")) return;
+    },
 
-    set((state) => ({
-      items: state.items.map((item) => {
-        if (item.kind !== "message" || item.id !== id) return item;
-        if (messageEvent.type === "thinking_delta") return { ...item, reasoning: `${item.reasoning || ""}${delta}` };
-        return { ...item, text: `${item.text}${delta}` };
-      }),
-    }));
-  },
+    applyToolExecutionEnd: (event) => {
+      if (!get().isHistoryLive()) return;
+      get().mergeArtifactsFromToolEvent(event);
+      get().requestGitStatusRefresh({ debounce: true });
+      if (!event.toolCallId) return;
+      set((state) => ({
+        items: state.items.map((item) =>
+          item.kind === "tool" && item.id === event.toolCallId
+            ? {
+                ...item,
+                errorText: event.isError ? String(formatToolOutput(event.result)) : undefined,
+                output: event.isError ? undefined : formatToolOutput(event.result),
+                state: event.isError ? "output-error" : "output-available",
+              }
+            : item,
+        ),
+      }));
+    },
 
-  applyMessageEnd: (event) => {
-    const id = streamingId;
-    if (!id) return;
-    const usage = event.message?.usage;
-    const finalText = event.message ? extractText(event.message.content) : undefined;
-    const finalReasoning = event.message ? extractThinking(event.message.content) : undefined;
-    const finalToolCalls = event.message ? extractToolCalls(event.message.content) : undefined;
-    const hasToolCalls = finalToolCalls?.length ? true : streamingHasToolCall;
-
-    set((state) => ({
-      items: state.items.map((item) =>
-        item.kind === "message" && item.id === id
-          ? {
-              ...item,
-              ...(finalReasoning !== undefined && { reasoning: finalReasoning }),
-              ...(finalText !== undefined && { text: finalText }),
-              copyable: !hasToolCalls,
-              cost: usage?.cost?.total,
-              presentation: hasToolCalls ? "activity" : "normal",
-              streaming: false,
-            }
-          : item,
-      ),
-      lastUsage: usage || null,
-    }));
-    streamingId = null;
-    streamingHasToolCall = false;
-  },
-
-  applyToolExecutionStart: (event) => {
-    if (!event.toolCallId) return;
-    streamingHasToolCall = true;
-    set((state) => ({
-      items: [
-        ...state.items,
-        {
-          kind: "tool",
-          id: event.toolCallId as string,
-          name: event.toolName || "tool",
-          input: event.args,
-          state: "input-streaming",
-          open: false,
-        } satisfies ChatItem,
-      ],
-    }));
-  },
-
-  applyToolExecutionUpdate: (event) => {
-    if (!event.toolCallId) return;
-    set((state) => ({
-      items: state.items.map((item) =>
-        item.kind === "tool" && item.id === event.toolCallId
-          ? { ...item, output: formatToolOutput(event.partialResult), state: "input-available" }
-          : item,
-      ),
-    }));
-  },
-
-  applyToolExecutionEnd: (event) => {
-    get().mergeArtifactsFromToolEvent(event);
-    get().requestGitStatusRefresh({ debounce: true });
-    if (!event.toolCallId) return;
-    set((state) => ({
-      items: state.items.map((item) =>
-        item.kind === "tool" && item.id === event.toolCallId
-          ? {
-              ...item,
-              errorText: event.isError ? String(formatToolOutput(event.result)) : undefined,
-              output: event.isError ? undefined : formatToolOutput(event.result),
-              state: event.isError ? "output-error" : "output-available",
-            }
-          : item,
-      ),
-    }));
-  },
-
-  markPromptReady: () => {
-    set((state) => ({ chatStatus: state.chatStatus === "submitted" ? "ready" : state.chatStatus }));
-  },
-});
+    markPromptReady: () => {
+      set((state) => ({ chatStatus: state.chatStatus === "submitted" ? "ready" : state.chatStatus }));
+    },
+  };
+};

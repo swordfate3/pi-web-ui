@@ -135,6 +135,16 @@ interface WsError {
 
 ### State Sync Event
 
+**Date-bounded history update:** see [ADR 0014](0014-date-bounded-browser-history.md).
+`state_sync` now includes a bounded page rather than every historical message.
+`get_history` and `sync_request` accept inclusive numeric `from`, exclusive numeric
+`to`, optional `before` entry-ID cursor, and `sessionId` fencing. The returned
+`history` metadata includes `from`, `to`, `nextBefore`, `total`, `returned`,
+`truncatedEntries`, and `treeLimited`. A lightweight partial `treeNodes` is
+declared as such. `get_saved_sessions` accepts the same date range and returns
+only compact matching session metadata. Raw Pi events retain their source
+meaning; display-window filtering belongs to the browser.
+
 The current `mirror_sync` type becomes a standard event:
 
 ```json

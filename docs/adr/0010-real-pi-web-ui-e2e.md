@@ -29,6 +29,14 @@ e2e/
 
 Canonical CI path uses built frontend assets served by Pi mirror-server:
 
+The dated-history regression additionally uses a synthetic saved JSONL with a
+20 MiB record, recent pages, and a fourteen-day-old message. The backend integration
+`e2e/date-history.integration.ts` connects a real Pi to a packaged Hub and asserts
+bounded frames, date isolation, cursor/session rejection, and unchanged original
+session bytes. The browser scenario `e2e/features/date-history.feature` separately
+exercises date controls on desktop/mobile; screenshot inspection remains visual
+validation, not a substitute for functional assertions.
+
 ```text
 Playwright Browser
   -> Pi mirror-server static UI + /ws

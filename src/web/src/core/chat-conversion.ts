@@ -58,7 +58,23 @@ export function syncToItems(
         items.push(tool);
       }
     } else if (message.role === "toolResult" && message.toolCallId) {
-      const tool = tools.get(message.toolCallId);
+      let tool = tools.get(message.toolCallId);
+      // Bounded pages can begin after the invocation (count, bytes or dates).
+      // Keep its result visible without fetching outside the selected page.
+      if (!tool) {
+        tool = {
+          kind: "tool",
+          id: message.toolCallId,
+          name: message.toolName || "tool",
+          input: { historyPreview: true, notice: "Tool invocation is outside this history page." },
+          resultOnly: true,
+          state: "input-available",
+          entryId: entry.id,
+          relatedEntryIds: entry.id ? [entry.id] : [],
+        };
+        tools.set(tool.id, tool);
+        items.push(tool);
+      }
       if (tool) {
         if (entry.id && !tool.relatedEntryIds?.includes(entry.id)) {
           tool.relatedEntryIds = [...(tool.relatedEntryIds ?? []), entry.id];

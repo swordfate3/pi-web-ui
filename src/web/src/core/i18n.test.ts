@@ -101,6 +101,20 @@ test("dictionary placeholders stay aligned in both languages", () => {
   }
 });
 
+test("date history actions and preview explanation translate without translating session data", () => {
+  try {
+    setLanguage("zh-CN");
+    assert.equal(t("History start date"), "历史开始日期");
+    assert.equal(t("Apply dates"), "应用日期");
+    assert.notEqual(
+      t("Large entries are bounded previews. Full data remains in the original session."),
+      "Large entries are bounded previews. Full data remains in the original session.",
+    );
+  } finally {
+    setLanguage("en");
+  }
+});
+
 test("tree labels translate while chat content, IDs and tool wire names remain intact", () => {
   try {
     const tree = [

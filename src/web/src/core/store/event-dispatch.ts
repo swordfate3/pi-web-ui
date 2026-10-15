@@ -45,9 +45,11 @@ export function dispatchPiEvent(store: PiWebUiStore, data: WsEvent) {
       store.applyToolExecutionEnd(event);
       break;
     case "auto_compaction_start":
+      if (!store.isHistoryLive()) break;
       store.addSystemMessage(uiText("Compacting context..."));
       break;
     case "auto_compaction_end":
+      if (!store.isHistoryLive()) break;
       store.addSystemMessage(
         uiText("Context compacted{summary}", { summary: event.summary ? `: ${event.summary}` : "" }),
         "success",

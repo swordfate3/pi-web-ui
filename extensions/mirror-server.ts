@@ -313,6 +313,18 @@ export default function (pi: ExtensionAPI) {
   let server: http.Server | null = null;
   let listenController: AbortController | null = null;
   let registration: SessionRegistration | null = null;
+
+  async function renameSession(name: string): Promise<string | null> {
+    pi.setSessionName(name);
+    // Read before yielding: a session replacement can invalidate Pi's old runtime.
+    // A failed read/Hub refresh must not turn a successful Pi rename into an error.
+    let currentName: string | null = name;
+    try {
+      currentName = pi.getSessionName() ?? null;
+    } catch {}
+    await registration?.refresh(); // Shared, bounded ACK wait; renewal remains the fallback.
+    return currentName;
+  }
   let wss: WebSocketServer | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   const clients = new Set<WebSocket>();
@@ -1596,8 +1608,7 @@ export default function (pi: ExtensionAPI) {
               );
               break;
             }
-            pi.setSessionName(commandArgs);
-            const name = pi.getSessionName() ?? null;
+            const name = await renameSession(commandArgs);
             sendTo(
               ws,
               success({ command: "name", name, message: name ? `Session renamed to: ${name}` : "Session has no name" }),
@@ -1898,8 +1909,8 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("Name cannot be empty"));
             break;
           }
-          pi.setSessionName(name);
-          sendTo(ws, success({ name: pi.getSessionName() ?? null }));
+          const currentName = await renameSession(name);
+          sendTo(ws, success({ name: currentName }));
           break;
         }
 

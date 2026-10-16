@@ -52,7 +52,13 @@ test("portal removes only the legacy middle-dot eight-hex suffix, not route iden
     since: 0,
   }));
   runInNewContext(portalJs, {
-    document: { getElementById: get, createElement: () => new Element(), addEventListener() {} },
+    document: {
+      getElementById: get,
+      createElement: () => new Element(),
+      querySelectorAll: () => [],
+      addEventListener() {},
+    },
+    window: { addEventListener() {} },
     fetch: async () => ({ ok: true, json: async () => ({ sessions }) }),
     setInterval() {},
     AbortSignal,
@@ -71,6 +77,88 @@ test("portal removes only the legacy middle-dot eight-hex suffix, not route iden
   assert.equal(cards[0].children[1].title, "pi_projects");
   assert.equal(cards[0].children[2].children[0].textContent, "会话名字");
   assert.equal(sessions[0].label, labels[0], "original registry metadata is not rewritten");
+});
+
+test("portal refreshes on history return, coalesces in-flight returns and preserves unchanged cards", async () => {
+  class Element {
+    textContent = "";
+    title = "";
+    href = "";
+    className = "";
+    value = "";
+    children: Element[] = [];
+    handlers = new Map<string, () => void>();
+    append(...children: Element[]) {
+      this.children.push(...children);
+    }
+    replaceChildren() {
+      this.children = [];
+    }
+    addEventListener(name: string, handler: () => void) {
+      this.handlers.set(name, handler);
+    }
+  }
+  const elements = new Map<string, Element>();
+  const get = (id: string) => {
+    if (!elements.has(id)) elements.set(id, new Element());
+    return elements.get(id) as Element;
+  };
+  const events = new Map<string, (event: { persisted: boolean }) => void>();
+  let interval: (() => void) | undefined;
+  let fetches = 0;
+  let release: (() => void) | undefined;
+  let hold = false;
+  let name = "旧名字";
+  runInNewContext(portalJs, {
+    document: {
+      getElementById: get,
+      createElement: () => new Element(),
+      querySelectorAll: () => [],
+      addEventListener() {},
+    },
+    window: {
+      addEventListener: (event: string, handler: (event: { persisted: boolean }) => void) => events.set(event, handler),
+    },
+    fetch: async () => {
+      fetches++;
+      const sessionName = name;
+      if (hold)
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      return {
+        ok: true,
+        json: async () => ({ sessions: [{ label: "Folder", sessionName, path: "/s/test/", since: 0 }] }),
+      };
+    },
+    setInterval: (handler: () => void) => {
+      interval = handler;
+    },
+    clearTimeout() {},
+    AbortSignal,
+    Date,
+  });
+  const settled = () => new Promise((resolve) => setImmediate(resolve));
+  await settled();
+  const original = get("sessions").children[0];
+  interval?.();
+  await settled();
+  assert.equal(get("sessions").children[0], original, "unchanged polls preserve DOM/focus");
+  hold = true;
+  interval?.();
+  await settled();
+  name = "新名字";
+  events.get("pageshow")?.({ persisted: true });
+  events.get("pageshow")?.({ persisted: true });
+  assert.equal(fetches, 3, "no parallel fetch on multiple restore events");
+  hold = false;
+  release?.();
+  await settled();
+  assert.equal(fetches, 4, "only one follow-up refresh after pending request");
+  assert.equal(get("sessions").children[0].children[2].children[0].textContent, name);
+  events.get("pageshow")?.({ persisted: false });
+  await settled();
+  assert.equal(fetches, 4, "normal initial pageshow does not duplicate the initial fetch");
 });
 
 function exchange(socketPath: string, value: Record<string, unknown>) {
@@ -104,13 +192,16 @@ async function fixture(t: test.TestContext, leaseMs = 45000) {
     const file = path.join(dir, `${label}.json`);
     const credential = issueSession(config, file, { label });
     const registration = createSessionRegistration({ socketPath: hub.socketPath, credentialFile: file });
-    let holdProof: (() => Promise<void>) | undefined;
+    let holdProof: (() => Promise<boolean>) | undefined;
     let failUpgrade: (() => Promise<void>) | undefined;
     const server = http.createServer(async (req, res) => {
       if (req.headers["x-pi-web-challenge"] && holdProof) {
         const wait = holdProof;
         holdProof = undefined;
-        await wait();
+        if (await wait()) {
+          res.writeHead(503).end();
+          return;
+        }
       }
       if (registration.guard(req, res)) {
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -147,11 +238,11 @@ async function fixture(t: test.TestContext, leaseMs = 45000) {
       credential,
       registration,
       port,
-      pauseNextProof() {
+      pauseNextProof(fail = false) {
         let release!: () => void;
         let started!: () => void;
-        const waiting = new Promise<void>((resolve) => {
-          release = resolve;
+        const waiting = new Promise<boolean>((resolve) => {
+          release = () => resolve(fail);
         });
         const entered = new Promise<void>((resolve) => {
           started = resolve;
@@ -236,6 +327,141 @@ test("a successor registered during proof leaves the browser handoff retryable",
   assert.equal((await resolveHandoff(f.hub.url, token)).status, 200);
 });
 
+for (const failure of ["proof", "retirement"] as const) {
+  test(`an unbound handoff waits after old ${failure} until its first successor registers`, async (t) => {
+    const f = await fixture(t);
+    const a = await f.backend("A");
+    assert.ok(a.url);
+    const old = a.url;
+    const { token } = await handoffConnection(t, old, new URL(f.hub.url).origin);
+    const proof = a.pauseNextProof(failure === "proof");
+    const inFlight = resolveHandoff(f.hub.url, token);
+    await proof.entered;
+    if (failure === "retirement") {
+      // Retire through real IPC without changing the backend's identity: its
+      // held proof still succeeds, but the old Hub route is no longer live.
+      const retired = await exchange(f.hub.socketPath, {
+        action: "unregister",
+        ...a.credential,
+        generation: new URL(old).pathname.split("/")[2],
+      });
+      assert.equal(retired.ok, true);
+    }
+    proof.release();
+    const pending = await inFlight;
+    assert.equal(pending.status, 202);
+    assert.deepEqual(await pending.json(), { pending: true });
+    assert.equal(pending.headers.get("cache-control"), "no-store");
+    await a.registration.stop();
+    assert.equal((await resolveHandoff(f.hub.url, token)).status, 202);
+    let next = "";
+    await a.registration.start(a.port, (url) => {
+      next = url ?? "";
+    });
+    const followed = await resolveHandoff(f.hub.url, token);
+    assert.equal(followed.status, 200);
+    assert.equal((await followed.json()).path, new URL(next).pathname);
+    assert.equal((await fetch(old)).status, 410);
+  });
+}
+
+for (const bound of [false, true]) {
+  for (const invalidation of ["revoke", "expire"] as const) {
+    test(`${bound ? "bound" : "unbound"} handoff fails closed on ${invalidation} during old proof`, async (t) => {
+      const f = await fixture(t);
+      const a = await f.backend("A");
+      assert.ok(a.url);
+      const { socket, token } = await handoffConnection(t, a.url, new URL(f.hub.url).origin);
+      const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+      a.disconnectBrowsers();
+      await closed;
+      const proof = a.pauseNextProof(true);
+      const inFlight = resolveHandoff(f.hub.url, token);
+      await proof.entered;
+      if (bound) {
+        await a.registration.stop();
+        await a.registration.start(a.port, () => {});
+      }
+      if (invalidation === "revoke") revokeSession(f.config, a.credential.run_id);
+      else {
+        t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+        t.mock.timers.tick(46_000);
+      }
+      proof.release();
+      assert.equal((await inFlight).status, 410);
+      assert.equal((await resolveHandoff(f.hub.url, token)).status, 410);
+    });
+  }
+}
+
+for (const failure of ["proof", "retirement"] as const) {
+  test(`a bound successor ${failure} fails closed instead of reopening the registration wait`, async (t) => {
+    const f = await fixture(t);
+    const a = await f.backend("A");
+    assert.ok(a.url);
+    const { token } = await handoffConnection(t, a.url, new URL(f.hub.url).origin);
+    await a.registration.stop();
+    await a.registration.start(a.port, () => {});
+    const proof = a.pauseNextProof(failure === "proof");
+    const inFlight = resolveHandoff(f.hub.url, token);
+    await proof.entered;
+    if (failure === "retirement") await a.registration.stop();
+    proof.release();
+    assert.equal((await inFlight).status, 410);
+    await a.registration.stop();
+    await a.registration.start(a.port, () => {});
+    assert.equal((await resolveHandoff(f.hub.url, token)).status, 410, "never skip the first successor");
+  });
+}
+
+test("renewals preserve the handoff until the first new generation registers", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("A");
+  assert.ok(a.url);
+  const old = a.url;
+  const { token } = await handoffConnection(t, old, new URL(f.hub.url).origin);
+  const renew = (url: string) =>
+    exchange(f.hub.socketPath, {
+      action: "register",
+      ...a.credential,
+      generation: new URL(url).pathname.split("/")[2],
+      port: a.port,
+      sessionName: "renamed without replacement",
+    });
+  assert.equal((await renew(old)).ok, true);
+  const unchanged = await resolveHandoff(f.hub.url, token);
+  assert.equal(unchanged.status, 200);
+  assert.equal((await unchanged.json()).path, new URL(old).pathname);
+  await a.registration.stop();
+  let next = "";
+  await a.registration.start(a.port, (url) => {
+    next = url ?? "";
+  });
+  assert.equal((await renew(next)).ok, true);
+  const followed = await resolveHandoff(f.hub.url, token);
+  assert.equal(followed.status, 200);
+  assert.equal((await followed.json()).path, new URL(next).pathname);
+  await a.registration.stop();
+  await a.registration.start(a.port, () => {});
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 410);
+});
+
+test("unbound pending polls do not extend the disconnected capability's 45-second deadline", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("A");
+  assert.ok(a.url);
+  const { socket, token } = await handoffConnection(t, a.url, new URL(f.hub.url).origin);
+  // Freeze Date before closure so the server-side deadline is exact.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+  await a.registration.stop();
+  await closed;
+  t.mock.timers.tick(44_999);
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 202);
+  t.mock.timers.tick(1);
+  assert.equal((await resolveHandoff(f.hub.url, token)).status, 410);
+});
+
 test("backend events cannot overwrite the Hub-owned handoff control frame", async (t) => {
   const f = await fixture(t);
   const a = await f.backend("A");
@@ -282,6 +508,7 @@ test("PiClient keeps its capability until a replacement socket receives fresh Hu
     },
   });
   let opens = 0;
+  const routeNotifications: string[] = [];
   try {
     Object.defineProperty(globalThis, "location", { configurable: true, get: () => page });
     Object.defineProperty(globalThis, "window", {
@@ -289,6 +516,11 @@ test("PiClient keeps its capability until a replacement socket receives fresh Hu
       value: {
         setTimeout,
         clearTimeout,
+        dispatchEvent(event: Event) {
+          assert.equal(event.type, "pi-web-route-changed");
+          routeNotifications.push(page.pathname);
+          return true;
+        },
         history: {
           state: null,
           replaceState(_state: unknown, _title: string, value: string) {
@@ -321,6 +553,10 @@ test("PiClient keeps its capability until a replacement socket receives fresh Hu
     a.disconnectBrowsers();
     await until(() => opens === 2);
     assert.notEqual(page.pathname, new URL(a.url).pathname);
+    assert.ok(
+      routeNotifications.includes(page.pathname),
+      "route scoped UI is notified before replacement socket opens",
+    );
     assert.equal((await actualFetch(page)).status, 200);
   } finally {
     client.disconnect();

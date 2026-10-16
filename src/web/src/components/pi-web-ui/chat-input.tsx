@@ -26,6 +26,7 @@ type ChatInputProps = {
   attachmentsDisabled?: boolean;
   uploadProgress?: WorkspaceUploadProgress[];
   onCancelUpload?: () => void;
+  onFilesChange?: (hasFiles: boolean) => void;
   onSubmit: (opts: { text: string; files?: unknown[] }) => void | Promise<void>;
   onAbort: () => void;
   onToggleArchMode: () => void;
@@ -45,6 +46,7 @@ export function ChatInput({
   attachmentsDisabled = false,
   uploadProgress = [],
   onCancelUpload,
+  onFilesChange,
   onSubmit,
   onAbort,
   onToggleArchMode,
@@ -166,7 +168,11 @@ export function ChatInput({
             return onSubmit(message);
           }}
         >
-          <PromptAttachmentPreview disabled={attachmentsDisabled} uploadProgress={uploadProgress} />
+          <PromptAttachmentPreview
+            disabled={attachmentsDisabled}
+            uploadProgress={uploadProgress}
+            onFilesChange={onFilesChange}
+          />
           {uploadProgress.length > 0 && (
             <div className="flex w-full min-w-0 flex-col items-start gap-2 px-3 pt-2" aria-live="polite">
               {uploadProgress.map((progress) => {

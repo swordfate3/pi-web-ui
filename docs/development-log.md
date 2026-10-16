@@ -352,6 +352,12 @@
 - 实际旧label本身为 `pi_projects · ae32751f`，初版保留label导致ID仍显示；portal纯展示精确去除末尾中点分隔8hex，标题／tooltip／搜索一致。API label、授权、路由和会话名不变。
 - 新portal运行单测含非匹配／空标签保护；268默认项（267通过／1条件跳过）、Hub真实Pi5/5、构建／hash／补充types通过。独立Browser桌面／手机使用真实同形旧label+真实/name截图直接查看，自有服务停止。详见[Hub名字报告](validation/hub-session-names.md)。本次本地未提交、push或部署，不借用前次已完成申请。
 
+## 28. Hub 导航与改名体验
+
+- 会话顶栏同源←Hub入口、草稿／附件离开确认、静态加载提示和点击反馈；返回pageshow刷新合并、未变化卡片保留焦点，首次Git刷新debounce合并。网页改名立即登记但只等250ms，15秒续期兜底，不声称慢链路已同步。
+- 回归暴露并修复handoff proof窗口过早410、routePath轮询导致立即文本提交被旧上传scope拒绝。改显式本地route事件＋layout清理，scope checks保留；successor只首次绑定，撤销／期限proof后复查。
+- 最终286单测（285通过／1可选skip）、69/69源码Chromium、离线runtime Hub5/5、8类stale-input、types0／build／manifest通过；独立Browser桌面／手机直接查看，临时服务停止。首次3/5失败与中断尝试保留，限定静态审查不替代动态结果。详见[验证报告](validation/hub-navigation.md)。本轮未提交／push／更新或申请生产部署。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。

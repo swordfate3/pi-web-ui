@@ -1,4 +1,5 @@
 import { FileIcon, PaperclipIcon, XIcon } from "lucide-react";
+import { useEffect } from "react";
 import { PromptInputButton, PromptInputHeader, usePromptInputAttachments } from "@/components/ai-elements/prompt-input";
 import { getLanguage, t, useLanguage, workspaceUploadText } from "../../core/i18n";
 import type { WorkspaceUploadProgress } from "../../core/workspace-uploads";
@@ -38,14 +39,22 @@ export function PromptAttachmentButton({ disabled = false }: { disabled?: boolea
 export function PromptAttachmentPreview({
   disabled = false,
   uploadProgress = [],
+  onFilesChange,
 }: {
   disabled?: boolean;
   uploadProgress?: WorkspaceUploadProgress[];
+  onFilesChange?: (hasFiles: boolean) => void;
 }) {
   useLanguage();
   const attachments = usePromptInputAttachments();
 
-  if (!attachments.files.length) return null;
+  const hasFiles = attachments.files.length > 0;
+  useEffect(() => {
+    onFilesChange?.(hasFiles);
+    return () => onFilesChange?.(false);
+  }, [hasFiles, onFilesChange]);
+
+  if (!hasFiles) return null;
 
   return (
     <PromptInputHeader data-testid="attachment-list">

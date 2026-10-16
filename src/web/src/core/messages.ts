@@ -1,5 +1,8 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "Back to Hub": "返回 Hub",
+  "Return to Hub? Unsent text, queued messages and selected attachments will not be kept on this page.":
+    "返回 Hub？当前页未发送的文字、排队消息和已选附件将不会保留。",
   "Large live content was omitted from Web transport. Bounded previews sync when saved; full data remains in the original session.":
     "大型实时内容未通过网页传输，保存后将同步有界预览；完整数据仍保留在原始会话中。",
   "Dismiss transport notice": "关闭传输提示",

@@ -219,6 +219,9 @@ export class PiClient {
             // Keep the mounted app, its session-action waiter and unsent draft.
             // Only replace the address; never replay a lifecycle request.
             window.history.replaceState(window.history.state, "", result.path);
+            // replaceState does not emit popstate. Notify route-scoped UI before
+            // opening the successor socket, rather than waiting on a polling tick.
+            window.dispatchEvent(new Event("pi-web-route-changed"));
             // Retain the existing capability until the new socket receives its
             // own Hub control frame. A failed handshake must still be able to
             // resolve the first successor, not retry a retired path forever.

@@ -264,9 +264,11 @@ async function startLockedHub(config: HubConfig) {
         sessionName,
       });
     pruneHandoffs();
-    for (const item of handoffs.values()) {
-      if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor)
-        item.successor = generation;
+    if (!session) {
+      for (const item of handoffs.values()) {
+        if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor)
+          item.successor = generation;
+      }
     }
     return { url: `${config.publicUrl ?? url}s/${generation}/` };
   };
@@ -366,17 +368,28 @@ async function startLockedHub(config: HubConfig) {
         }
         const targetGeneration = item.successor ?? item.from;
         const successor = current(targetGeneration);
-        if (!successor && !item.successor) {
-          response
-            .writeHead(202, { "Content-Type": "application/json", "Cache-Control": "no-store" })
-            .end(JSON.stringify({ pending: true }));
+        const proved = successor && (await proveBackend(grant, successor.generation, successor.port));
+        // Proof is asynchronous: revocation and the capability deadline must
+        // still win over either kind of retryable registration gap below.
+        const latestGrant = readGrant(config, grant.run_id);
+        if (
+          stopped ||
+          item.expires <= Date.now() ||
+          latestGrant.revoked ||
+          !equal(latestGrant.token, grant.token) ||
+          latestGrant.backendHost !== grant.backendHost
+        ) {
+          handoffs.delete(token as string);
+          fail(response, 410);
           return;
         }
-        const proved = successor && (await proveBackend(grant, successor.generation, successor.port));
-        // A replacement can register while the original backend proof is in
-        // flight. Let the browser resolve the newly bound first successor on
-        // its next poll, rather than turning a healthy handoff into a 410.
-        if (!stopped && item.expires > Date.now() && targetGeneration !== (item.successor ?? item.from)) {
+        // Before the first successor registers, the old backend may already
+        // reject proof or retire. Keep waiting within the existing deadline.
+        // Once bound, never skip a failed/retired successor for a later one.
+        if (
+          (!item.successor && (!proved || current(targetGeneration) !== successor)) ||
+          (targetGeneration !== item.successor && item.successor && current(item.successor))
+        ) {
           response
             .writeHead(202, { "Content-Type": "application/json", "Cache-Control": "no-store" })
             .end(JSON.stringify({ pending: true }));

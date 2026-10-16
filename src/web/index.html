@@ -7,9 +7,16 @@
     <link rel="icon" type="image/png" href="./icons/pi-web-ui-192.png" />
     <link rel="manifest" href="./manifest.json" />
     <meta name="theme-color" content="#09090b" />
+    <style>
+      .pi-entry { min-height: 80vh; display: grid; place-content: center; gap: 12px; padding: 24px; text-align: center; font: 14px system-ui, sans-serif; color: #64746a; }
+      .pi-entry strong { font-size: 28px; font-weight: 500; color: #234c3c; }
+      @media (prefers-color-scheme: dark) { body:has(.pi-entry) { background: #09090b; } .pi-entry { color: #a1a1aa; } .pi-entry strong { color: #d4e6d8; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="pi-entry" role="status"><strong>π Pi Web</strong><span>正在打开会话 · Opening session…</span><noscript>请启用 JavaScript / JavaScript is required.</noscript></div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

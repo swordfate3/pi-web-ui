@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { webBasePath, webRoute } from "../src/web/src/core/connection-path.ts";
+import { hubHomePath, webBasePath, webRoute } from "../src/web/src/core/connection-path.ts";
 import { exportDownloadUrl } from "../src/web/src/core/export-download.ts";
 import type { ExportHtmlResult } from "../src/web/src/core/types.ts";
 import { wsUrl } from "../src/web/src/core/ws.ts";
+
+test("Hub home is offered only on an exact same-origin Hub session entry", () => {
+  const generation = "a".repeat(32);
+  assert.equal(hubHomePath(`/s/${generation}/`), "/sessions/");
+  assert.equal(hubHomePath(`/s/${generation}/index.html`), "/sessions/");
+  for (const pathname of ["/", "/index.html", "/pi/", "/s/abc/", `/s/${generation}/api`, `//evil/s/${generation}/`])
+    assert.equal(hubHomePath(pathname), null);
+});
 
 test("entry paths retain the current proxy directory, never another session", () => {
   assert.equal(webBasePath("/"), "/");

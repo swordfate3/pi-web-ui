@@ -204,16 +204,28 @@ var portalJs = `(() => {
   const get = (id) => document.getElementById(id);
   let items = [];
   let loading = false;
+  let refreshAgain = false;
+  let lastRender = '';
+  let navigationTimer;
+  const resetNavigation = () => {
+    clearTimeout(navigationTimer);
+    for (const link of document.querySelectorAll('.open[aria-busy]')) {
+      link.removeAttribute('aria-busy'); link.textContent = '打开会话 ↗';
+    }
+  };
   // Legacy launchers append a short run ID to the grant's project label.
   // Display-only: keep the original API label and capability route untouched.
   const projectLabel = (label) => label.replace(/ · [a-f0-9]{8}$/i, '').trim() || label;
   function render() {
     const query = get('search').value.toLocaleLowerCase();
     const visible = items.filter((s) => projectLabel(s.label).toLocaleLowerCase().includes(query) || (s.sessionName || '未命名会话').toLocaleLowerCase().includes(query));
+    get('notice').textContent = items.length && !visible.length ? '没有匹配的会话，请尝试其他关键词。' : '';
+    const renderKey = JSON.stringify([items, query]);
+    if (renderKey === lastRender) return;
+    lastRender = renderKey;
     get('sessions').replaceChildren();
     get('count').textContent = String(items.length);
     get('empty').hidden = items.length !== 0;
-    get('notice').textContent = items.length && !visible.length ? '没有匹配的会话，请尝试其他关键词。' : '';
     for (const session of visible) {
       const card = document.createElement('article'); card.className = 'card';
       const top = document.createElement('div'); top.className = 'card-top';
@@ -226,11 +238,16 @@ var portalJs = `(() => {
       const since = document.createElement('span'); since.textContent = ' · ' + new Date(session.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       meta.append(name, since);
       const link = document.createElement('a'); link.className = 'open'; link.href = session.path; link.textContent = '打开会话 ↗';
+      link.addEventListener('click', (event) => {
+        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        resetNavigation(); link.textContent = '正在打开…'; link.setAttribute('aria-busy', 'true');
+        navigationTimer = setTimeout(resetNavigation, 10000);
+      });
       card.append(top, title, meta, link); get('sessions').append(card);
     }
   }
-  async function refresh() {
-    if (loading) return; loading = true; get('refresh').disabled = true;
+  async function refresh(afterCurrent = false) {
+    if (loading) { if (afterCurrent) refreshAgain = true; return; } loading = true; get('refresh').disabled = true;
     try {
       const response = await fetch('/api/sessions', { cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error();
@@ -241,11 +258,19 @@ var portalJs = `(() => {
       // Do not leave stale sessions looking online when the hub is unavailable.
       items = []; render(); get('health').textContent = '连接中断'; get('health').className = 'disconnected';
       get('notice').textContent = '暂时无法连接总管。请检查服务，或点击刷新重试。';
-    } finally { loading = false; get('refresh').disabled = false; }
+    } finally {
+      loading = false; get('refresh').disabled = false;
+      if (refreshAgain) { refreshAgain = false; void refresh(); }
+    }
   }
-  get('search').addEventListener('input', render); get('refresh').addEventListener('click', refresh);
+  window.addEventListener('pagehide', () => clearTimeout(navigationTimer));
+  window.addEventListener('pageshow', (event) => {
+    resetNavigation();
+    if (event.persisted) refresh(true);
+  });
+  get('search').addEventListener('input', render); get('refresh').addEventListener('click', () => refresh(true));
   refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 5000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });
 })();`;
 var portalCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#21312c;background:#f6f8f5;font-synthesis:none}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 90% 0,#e6efdf,transparent 55%)}main{max-width:1080px;margin:auto;padding:32px 40px 24px;min-height:100dvh}header{display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:650;color:inherit;text-decoration:none}.logo{display:grid;place-items:center;border-radius:12px;background:#234c3c;color:#e8f3dd;width:42px;height:42px;font:32px Georgia,serif}.tag{font-size:10px;letter-spacing:2px;color:#758478;border:1px solid #d7dfd5;border-radius:5px;padding:4px 6px}#health{font-size:12px;color:#697c70}.connected{color:#347652!important}.disconnected{color:#a35437!important}.intro{padding:68px 0 48px}.eyebrow{font-size:12px;letter-spacing:2px;color:#718478}h1{margin:14px 0 16px;font-size:clamp(30px,4vw,46px);font-weight:600;letter-spacing:-1.5px}.intro p{margin:0;color:#718076;font-size:15px;line-height:1.8}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}h2{font-size:17px;font-weight:600;margin:0}#count{display:inline-grid;place-items:center;min-width:25px;height:23px;margin-left:8px;background:#e2ebe0;border-radius:7px;color:#476347;font-size:12px}#updated{font-size:12px;color:#879287;margin:8px 0 0}.controls{display:flex;gap:10px}input,button{font:inherit;border:1px solid #dce3d9;border-radius:9px;background:#fff;padding:11px 14px;font-size:13px;color:#415447}input{width:230px}button{cursor:pointer}button:hover{background:#eef3eb}button:disabled{opacity:.55}input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #93ad91;outline-offset:3px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}.card{background:#ffffffdc;border:1px solid #e0e7dc;border-radius:16px;padding:24px;box-shadow:0 6px 24px #29412c04;min-width:0}.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.project-icon{display:grid;place-items:center;width:40px;height:40px;background:#edf3e8;color:#587452;border-radius:11px;font-size:23px}.online{font-size:11px;color:#39734e;background:#eff5eb;border-radius:20px;padding:5px 10px}.online:before{content:'●';font-size:8px;margin-right:5px}.card h3{font-size:18px;font-weight:600;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{font-size:12px;color:#899587;margin:10px 0 24px;display:flex;min-width:0}.session-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta>span:last-child{flex-shrink:0}.open{display:block;text-align:center;color:#365b42;background:#f2f6ee;border:1px solid #e4ebdf;text-decoration:none;border-radius:8px;padding:11px;font-size:13px}.open:hover{background:#e7efdf}.empty{text-align:center;border:1px dashed #d6dfd0;border-radius:16px;padding:55px 20px;background:#ffffff70}.empty-icon{font:44px Georgia,serif;color:#8a9e82}.empty h3{font-size:17px;font-weight:500;margin:18px 0 10px}.empty p{font-size:13px;color:#7a8978;line-height:1.9}#notice{font-size:13px;color:#a35c3d;line-height:1.6;margin-bottom:14px}#notice:empty{display:none}footer{display:flex;justify-content:space-between;gap:15px;border-top:1px solid #e0e6db;margin-top:48px;padding-top:20px;font-size:11px;color:#96a18f}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}[hidden]{display:none!important}@media(max-width:600px){main{padding:24px 20px}header{gap:8px}.brand{font-size:17px;gap:8px}.logo{width:36px;height:36px;font-size:27px}#health{font-size:11px}.intro{padding:48px 0 34px}h1{letter-spacing:-1px;line-height:1.35}.toolbar{flex-direction:column;align-items:stretch;gap:18px}.controls label{flex:1;min-width:0}input{width:100%;min-width:0}.grid{grid-template-columns:1fr}.card{padding:22px}.card-top{margin-bottom:18px}footer{flex-direction:column;margin-top:32px;line-height:1.6}}`;
 //#endregion
@@ -462,7 +487,9 @@ async function startLockedHub(config) {
 			sessionName
 		});
 		pruneHandoffs();
-		for (const item of handoffs.values()) if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor) item.successor = generation;
+		if (!session) {
+			for (const item of handoffs.values()) if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor) item.successor = generation;
+		}
 		return { url: `${config.publicUrl ?? url}s/${generation}/` };
 	};
 	const registry = net.createServer((socket) => {
@@ -556,15 +583,14 @@ async function startLockedHub(config) {
 				}
 				const targetGeneration = item.successor ?? item.from;
 				const successor = current(targetGeneration);
-				if (!successor && !item.successor) {
-					response.writeHead(202, {
-						"Content-Type": "application/json",
-						"Cache-Control": "no-store"
-					}).end(JSON.stringify({ pending: true }));
+				const proved = successor && await proveBackend(grant, successor.generation, successor.port);
+				const latestGrant = readGrant(config, grant.run_id);
+				if (stopped || item.expires <= Date.now() || latestGrant.revoked || !equal(latestGrant.token, grant.token) || latestGrant.backendHost !== grant.backendHost) {
+					handoffs.delete(token);
+					fail(response, 410);
 					return;
 				}
-				const proved = successor && await proveBackend(grant, successor.generation, successor.port);
-				if (!stopped && item.expires > Date.now() && targetGeneration !== (item.successor ?? item.from)) {
+				if (!item.successor && (!proved || current(targetGeneration) !== successor) || targetGeneration !== item.successor && item.successor && current(item.successor)) {
 					response.writeHead(202, {
 						"Content-Type": "application/json",
 						"Cache-Control": "no-store"

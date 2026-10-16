@@ -14,6 +14,14 @@ function equal(value: unknown, expected: string): boolean {
 }
 class EndedGeneration extends Error {}
 
+type RefreshBatch = { epoch: number; done: Promise<void>; bounded?: Promise<void> };
+type RegistrationTarget = {
+  epoch: number;
+  port: number;
+  onUrl: (url: string | null) => void;
+  getSessionName: () => unknown;
+};
+
 /** One Pi server lifetime, not a multi-process session manager or login provider. */
 export class SessionRegistration {
   private credential: Credential;
@@ -24,6 +32,8 @@ export class SessionRegistration {
   private epoch = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
   private pending: Promise<void> = Promise.resolve();
+  private target: RegistrationTarget | undefined;
+  private queued: RefreshBatch | undefined;
 
   constructor(credential: Credential, socketPath: string, options: { timeoutMs?: number; renewMs?: number } = {}) {
     this.credential = credential;
@@ -88,36 +98,78 @@ export class SessionRegistration {
     getSessionName: () => unknown = () => null,
   ): Promise<void> {
     if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
     const epoch = ++this.epoch;
     this.generation = randomBytes(16).toString("hex");
-    const refresh = async () => {
-      if (epoch !== this.epoch || !this.generation) return;
-      try {
-        const name = getSessionName();
-        // Display-only metadata, never a route/capability identity or prompt excerpt.
-        const sessionName =
-          typeof name === "string"
-            ? name
-                .replace(/\p{Cc}/gu, " ")
-                .trim()
-                .slice(0, 256) || null
-            : null;
-        const reply = (await this.request("register", this.generation, port, sessionName)) as { url?: unknown };
-        const url = validatedPublicUrl(reply?.url);
-        if (epoch === this.epoch) onUrl(url);
-      } catch (error) {
-        if (epoch !== this.epoch) return;
-        if (error instanceof EndedGeneration) this.generation = randomBytes(16).toString("hex");
-        onUrl(null);
-      }
-    };
-    this.pending = this.pending.then(refresh);
-    await this.pending;
+    this.target = { epoch, port, onUrl, getSessionName };
+    await this.enqueueRefresh(this.target).done;
     if (epoch !== this.epoch) return;
     this.timer = setInterval(() => {
-      this.pending = this.pending.then(refresh);
+      if (this.target?.epoch === epoch) this.enqueueRefresh(this.target);
     }, this.renewMs);
     this.timer.unref();
+  }
+
+  /**
+   * Best-effort metadata refresh, not a new generation. One in-flight request plus
+   * one coalesced trailing batch; read the latest name only when that batch runs.
+   * Callers share a 250ms ACK budget (including queue time), not the 5s IPC timeout.
+   * Resolving means the attempt finished OR the budget elapsed, not Hub success.
+   */
+  refresh(): Promise<void> {
+    if (!this.target) return Promise.resolve();
+    const batch = this.enqueueRefresh(this.target);
+    if (!batch.bounded) {
+      batch.bounded = new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, 250);
+        void batch.done.then(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    }
+    return batch.bounded;
+  }
+
+  private enqueueRefresh(target: RegistrationTarget): RefreshBatch {
+    if (this.queued?.epoch === target.epoch) return this.queued;
+    const batch: RefreshBatch = { epoch: target.epoch, done: Promise.resolve() };
+    batch.done = this.pending.then(async () => {
+      // An old queued task must never clear the new epoch's pending batch.
+      if (this.queued === batch) this.queued = undefined;
+      await this.registerCurrent(target);
+    });
+    this.queued = batch;
+    this.pending = batch.done;
+    return batch;
+  }
+
+  private async registerCurrent(target: RegistrationTarget): Promise<void> {
+    if (target.epoch !== this.epoch || !this.generation) return;
+    let url: string | null = null;
+    try {
+      // A throwing getter skips this attempt rather than erasing known Hub metadata.
+      const name = target.getSessionName();
+      // Display-only metadata, never a route/capability identity or prompt excerpt.
+      const sessionName =
+        typeof name === "string"
+          ? name
+              .replace(/\p{Cc}/gu, " ")
+              .trim()
+              .slice(0, 256) || null
+          : null;
+      const reply = (await this.request("register", this.generation, target.port, sessionName)) as { url?: unknown };
+      url = validatedPublicUrl(reply?.url);
+    } catch (error) {
+      if (target.epoch !== this.epoch) return;
+      // Preserve existing recovery only for a Hub-retired generation, not renames.
+      if (error instanceof EndedGeneration) this.generation = randomBytes(16).toString("hex");
+    }
+    if (target.epoch !== this.epoch) return;
+    // UI notification failure must not poison the serial registration queue.
+    try {
+      target.onUrl(url);
+    } catch {}
   }
 
   async stop(): Promise<void> {
@@ -127,8 +179,14 @@ export class SessionRegistration {
     this.timer = undefined;
     const generation = this.generation;
     this.generation = null;
-    await this.pending.catch(() => {});
-    if (generation) await this.request("unregister", generation).catch(() => {});
+    this.target = undefined;
+    this.queued = undefined;
+    // Put unregister on the same tail BEFORE yielding so a concurrent start cannot
+    // register its successor first and then be affected by late old cleanup.
+    this.pending = this.pending.then(async () => {
+      if (generation) await this.request("unregister", generation).catch(() => {});
+    });
+    await this.pending;
   }
 
   guard(request: IncomingMessage, response?: ServerResponse): boolean {

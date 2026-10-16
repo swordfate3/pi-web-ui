@@ -13,6 +13,7 @@ let agents: PiWebUiHarness[] = [];
 let screen = "desktop";
 let oldPath = "";
 let lastSessionId = "";
+let gitRequests = 0;
 const errors: string[] = [];
 function page() {
   if (!browserPage) throw new Error("Hub page is not initialized");
@@ -39,7 +40,15 @@ When("我在 {string} 打开有两个真实 Pi 的总管首页", async ({ browse
   });
   browserPage = await context.newPage();
   lastSessionId = "";
+  gitRequests = 0;
   page().on("websocket", (socket) => {
+    socket.on("framesent", (frame) => {
+      try {
+        if (JSON.parse(String(frame.payload)).method === "get_git_status") gitRequests++;
+      } catch {
+        /* Non-JSON control frame. */
+      }
+    });
     socket.on("framereceived", (frame) => {
       try {
         const value = JSON.parse(String(frame.payload));
@@ -85,6 +94,26 @@ When("我搜索并打开第二个 Pi 会话", async () => {
   await expect(page().locator(".card")).toHaveCount(1);
   await page().getByRole("link", { name: "打开会话" }).click();
   await expect(page().getByTestId("message-input")).toBeVisible();
+  await expect(page().getByTestId("return-to-hub")).toBeVisible();
+  await expect(page().getByTestId("return-to-hub")).toHaveAttribute("href", "/sessions/");
+  await page().waitForTimeout(900);
+  expect(gitRequests).toBe(1);
+  const current = page().url();
+  await page().getByTestId("message-input").fill("UNSENT_HUB_DRAFT");
+  page().once("dialog", (dialog) => dialog.dismiss());
+  await page().getByTestId("return-to-hub").click();
+  await expect(page()).toHaveURL(current);
+  await expect(page().getByTestId("message-input")).toHaveValue("UNSENT_HUB_DRAFT");
+  await page().getByTestId("message-input").fill("");
+  await page()
+    .locator('input[type="file"]')
+    .setInputFiles({ name: "unsent.txt", mimeType: "text/plain", buffer: Buffer.from("synthetic unsent attachment") });
+  await expect(page().getByTestId("attachment-item")).toHaveCount(1);
+  page().once("dialog", (dialog) => dialog.dismiss());
+  await page().getByTestId("return-to-hub").click();
+  await expect(page()).toHaveURL(current);
+  await expect(page().getByTestId("attachment-item")).toHaveCount(1);
+  await page().getByRole("button", { name: "移除附件" }).click();
   expect(new URL(page().url()).pathname).toMatch(/^\/s\/[a-f0-9]{32}\/$/);
 });
 
@@ -102,20 +131,33 @@ async function inputRenameAndCheckHubName() {
   await p.getByTestId("message-input").fill("/name Hub 命名测试 Beta");
   await p.getByTestId("submit-message").click();
   await expect(p.getByText("Hub 命名测试 Beta", { exact: true }).first()).toBeVisible();
-  await expect
-    .poll(
-      async () => {
-        const value = await (await p.request.get(`${hub?.url}api/sessions`)).json();
-        return value.sessions.find((session: { path: string }) => session.path === originalPath)?.sessionName;
-      },
-      { timeout: 25000 },
-    )
-    .toBe("Hub 命名测试 Beta");
-  await p.goto(`${hub?.url}sessions/`);
+  // Return immediately after ACK, not after waiting for the 15s renewal.
+  const renamed = await (await p.request.get(`${hub?.url}api/sessions`)).json();
+  expect(renamed.sessions.find((session: { path: string }) => session.path === originalPath)?.sessionName).toBe(
+    "Hub 命名测试 Beta",
+  );
+  await p.getByTestId("return-to-hub").click();
+  await expect(p).toHaveURL(`${hub?.url}sessions/`);
   await p.getByRole("searchbox").fill("Hub 命名测试");
   await expect(p.locator(".card")).toHaveCount(1);
   await expect(p.locator(".session-name")).toHaveText("Hub 命名测试 Beta");
   await expect(p.locator(".card h3")).toHaveText("移动端 Beta");
+  const card = await p.locator(".card").elementHandle();
+  // Polls must not replace unchanged cards and drop keyboard focus.
+  await p.getByRole("link", { name: "打开会话" }).focus();
+  await p.waitForTimeout(5500);
+  expect(await card?.evaluate((node) => node.isConnected)).toBe(true);
+  await expect(p.getByRole("link", { name: "打开会话" })).toBeFocused();
+  // Exercise the pageshow handler deterministically; actual BFCache is browser-dependent.
+  await p.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  await expect(p.locator(".session-name")).toHaveText("Hub 命名测试 Beta");
+  await p.getByRole("link", { name: "打开会话" }).click();
+  await expect(p.getByTestId("return-to-hub")).toBeVisible();
+  await p.goBack();
+  await expect(p).toHaveURL(`${hub?.url}sessions/`);
+  await p.getByRole("searchbox").fill("Hub 命名测试");
+  await expect(p.locator(".session-name")).toHaveText("Hub 命名测试 Beta");
+  await expect(p.locator('.open[aria-busy="true"]')).toHaveCount(0);
 }
 
 Then("新建和恢复会话自动跟随原 Pi 的新链接", async () => {

@@ -1,6 +1,6 @@
 import { ArchiveIcon, BarChart3Icon, DownloadIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, XIcon } from "lucide-react";
 import type { CSSProperties } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Conversation, ConversationContent, ConversationScrollButton } from "@/components/ai-elements/conversation";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import {
@@ -160,6 +160,7 @@ export function App() {
   });
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
   const [draftText, setDraftText] = useState("");
+  const [hasSelectedFiles, setHasSelectedFiles] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<WorkspaceUploadProgress[]>([]);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [attachmentHandoff, setAttachmentHandoff] = useState(false);
@@ -227,15 +228,15 @@ export function App() {
   useEffect(() => {
     const updatePath = () => setRoutePath(window.location.pathname);
     window.addEventListener("popstate", updatePath);
-    const timer = window.setInterval(updatePath, 100);
+    window.addEventListener("pi-web-route-changed", updatePath);
     return () => {
       window.removeEventListener("popstate", updatePath);
-      window.clearInterval(timer);
+      window.removeEventListener("pi-web-route-changed", updatePath);
     };
   }, []);
 
   const activeUploadScopeRef = useRef(uploadScopeKey);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (activeUploadScopeRef.current === uploadScopeKey) return;
     activeUploadScopeRef.current = uploadScopeKey;
     uploadControllerRef.current?.abort();
@@ -330,10 +331,6 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void refreshSettingsState();
-  }, [refreshSettingsState]);
-
-  useEffect(() => {
     const client = new PiClient({
       onConnectionChange: setConnection,
       onError: setError,
@@ -343,7 +340,9 @@ export function App() {
         const store = usePiWebUiStore.getState();
         void store.refreshSettingsState();
         void store.requestConversationSync();
-        void store.requestGitStatusRefresh();
+        // Coalesce with the initial state snapshot's Git refresh instead of
+        // running blocking backend Git work twice while entering a session.
+        void store.requestGitStatusRefresh({ debounce: true });
       },
       onPromptResponse: (result) => {
         const commandResult = result as
@@ -391,8 +390,18 @@ export function App() {
     const onVisibility = () => {
       if (document.visibilityState === "visible") usePiWebUiStore.getState().client?.ensureConnected();
     };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      const store = usePiWebUiStore.getState();
+      store.client?.ensureConnected();
+      if (store.connection === "connected") void store.requestConversationSync();
+    };
     document.addEventListener("visibilitychange", onVisibility);
-    return () => document.removeEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pageshow", onPageShow);
+    };
   }, []);
 
   useEffect(() => {
@@ -1239,6 +1248,18 @@ export function App() {
       <SidebarInset className="h-full min-h-0 min-w-0">
         <AppHeader
           connection={connection}
+          canLeaveForHub={() =>
+            !(
+              draftText.trim() ||
+              queuedMessages.length ||
+              hasSelectedFiles ||
+              uploadingAttachments ||
+              attachmentHandoff
+            ) ||
+            window.confirm(
+              t("Return to Hub? Unsent text, queued messages and selected attachments will not be kept on this page."),
+            )
+          }
           contextPercent={contextPercent}
           contextWindowSize={contextWindowSize}
           isViewingOtherSession={false}
@@ -1389,6 +1410,7 @@ export function App() {
               onSubmit={submitMessage}
               onToggleArchMode={toggleArchMode}
               onValueChange={setDraftText}
+              onFilesChange={setHasSelectedFiles}
               value={draftText}
               viewingHistory={false}
             />

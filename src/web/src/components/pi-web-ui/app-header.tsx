@@ -2,6 +2,7 @@ import { ArrowLeftIcon, BrainIcon, ChevronsUpDownIcon, CommandIcon, GitCompareIc
 import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
+import { hubHomePath } from "../../core/connection-path";
 import { connectionLabel, t, thinkingLabel, useLanguage } from "../../core/i18n";
 import type { ConnectionState } from "../../core/types";
 import { ConnectionDot } from "./connection-dot";
@@ -21,6 +22,7 @@ type AppHeaderProps = {
   /** Total cost in dollars. */
   totalCost: number;
   onReturnToLive: () => void;
+  canLeaveForHub?: () => boolean;
   onOpenModelPicker: () => void;
   onCycleThinking: () => void;
   onToggleContext: () => void;
@@ -43,6 +45,7 @@ export function AppHeader({
   shouldSuggestCompaction,
   totalCost,
   onReturnToLive,
+  canLeaveForHub,
   onOpenModelPicker,
   onCycleThinking,
   onToggleContext,
@@ -54,8 +57,26 @@ export function AppHeader({
   contextOpen,
 }: AppHeaderProps) {
   useLanguage();
+  const hubHome = hubHomePath(location.pathname);
   return (
     <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 sm:flex-nowrap sm:px-5">
+      {hubHome && (
+        <Button asChild size="sm" variant="outline" className="shrink-0 gap-1 px-2">
+          <a
+            href={hubHome}
+            data-testid="return-to-hub"
+            aria-label={t("Back to Hub")}
+            title={t("Back to Hub")}
+            onClick={(event) => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              if (canLeaveForHub && !canLeaveForHub()) event.preventDefault();
+            }}
+          >
+            <ArrowLeftIcon className="size-4" />
+            <span>Hub</span>
+          </a>
+        </Button>
+      )}
       <SidebarTrigger
         data-testid="toggle-left-sidebar"
         aria-label={t("Toggle left sidebar")}

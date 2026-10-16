@@ -125,6 +125,10 @@ downloads. It captures rendered screenshots. Optional
 otherwise Playwright uses its default browser installation. All temporary Pi
 processes, proxy servers and test workspaces are cleaned up by the harness.
 
+## Hub navigation and immediate metadata refresh
+
+`tests/session-registration.test.ts` uses real Unix IPC to cover bounded/coalesced rename refresh, epoch fencing and both mirror rename entries. `tests/session-hub.test.ts` executes portal JS with a minimal DOM for stable cards and merged history-return refresh, and real HTTP/IPC for proof/retirement gaps, first-successor binding and deadlines. The PiClient test verifies the route notification; React scope timing is additionally checked by real Hub handoff E2E, not certified by the stub alone. `tests/connection-path.test.ts` restricts the return-home link to exact Hub entries. The Hub browser flow tests immediate rename/return, cancellation with unsent text and attachments, native back and one initial Git request. See [Hub navigation validation](validation/hub-navigation.md).
+
 ## Web companion
 
 `tests/session-usage.test.ts` covers actual response-model grouping, cache/reasoning subset semantics, mixed/unknown pricing, summaries, malformed values, and bounded model rows. `tests/usage-stats-client.test.ts` checks reply parsing and session/runtime/disconnect fences. `tests/whale-pet.test.ts` covers visible-viewport positioning and optional local storage. Local image validation tests are separate from actual IndexedDB browser evidence.

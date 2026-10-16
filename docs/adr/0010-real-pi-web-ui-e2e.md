@@ -357,6 +357,10 @@ resent and already saved files survive. Empty sessions defer JSONL creation,
 so replacement assertions compare actual `state_sync` identities, not file counts.
 Desktop/mobile screenshots are inspected separately, not counted as E2E proof.
 
+## Hub return and rename regression
+
+The real Hub scenarios cover desktop/mobile return-home links, unsent text and attachment cancellation, immediate rename acknowledgement followed by Hub return without waiting for the 15s lease renewal, stable cards/focus across polls, native browser back and immediate text submission after lifecycle handoff. `pageshow(persisted)` is also dispatched deterministically for the refresh handler; this does not certify that every browser used BFCache. New proof-gap/deadline tests use real HTTP and Unix IPC; a limited browser trace diagnosis does not claim visibility of the registry IPC timeline. See [navigation validation](../validation/hub-navigation.md).
+
 ## References
 
 - `AGENTS.md`

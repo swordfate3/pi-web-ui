@@ -195,7 +195,8 @@ export function WhalePet({
     origin: WhalePosition;
     moved: boolean;
   } | null>(null);
-  const manuallyPositionedRef = useRef(readWhalePosition(() => safeLocalStorage()) !== null);
+  // Keep the user's intent separate from the temporary, viewport-clamped display point.
+  const preferredPositionRef = useRef(readWhalePosition(() => safeLocalStorage()));
   const lastPositionResetKeyRef = useRef(positionResetKey);
   const suppressClickRef = useRef(false);
   const positionRef = useRef(position);
@@ -206,7 +207,8 @@ export function WhalePet({
     dragRef.current = null;
     suppressClickRef.current = drag.moved || cancelled;
     if (drag.target.hasPointerCapture(drag.pointerId)) drag.target.releasePointerCapture(drag.pointerId);
-    if (drag.moved) writeWhalePosition(() => safeLocalStorage(), positionRef.current);
+    if (drag.moved && preferredPositionRef.current)
+      writeWhalePosition(() => safeLocalStorage(), preferredPositionRef.current);
   }, []);
   const petSize = useCallback((currentMode: WhaleMode) => {
     const pet = petRef.current;
@@ -326,7 +328,7 @@ export function WhalePet({
     if (lastPositionResetKeyRef.current !== positionResetKey) {
       lastPositionResetKeyRef.current = positionResetKey;
       finishDrag(true);
-      manuallyPositionedRef.current = false;
+      preferredPositionRef.current = null;
       try {
         safeLocalStorage()?.removeItem(WHALE_POSITION_STORAGE_KEY);
       } catch {
@@ -342,8 +344,8 @@ export function WhalePet({
       const visible = viewport();
       const size = petSize(mode);
       setPosition((current) => {
-        const next = manuallyPositionedRef.current
-          ? clampWhalePosition(current, visible, size)
+        const next = preferredPositionRef.current
+          ? clampWhalePosition(preferredPositionRef.current, visible, size)
           : defaultWhalePosition(composer?.getBoundingClientRect() ?? null, visible, size);
         return next.x === current.x && next.y === current.y ? current : next;
       });
@@ -508,9 +510,11 @@ export function WhalePet({
     if (!drag.moved && Math.hypot(dx, dy) < 5) return;
     drag.moved = true;
     suppressClickRef.current = true;
-    manuallyPositionedRef.current = true;
     const nextViewport = viewport();
-    setPosition(clampWhalePosition({ x: drag.origin.x + dx, y: drag.origin.y + dy }, nextViewport, petSize(mode)));
+    const next = clampWhalePosition({ x: drag.origin.x + dx, y: drag.origin.y + dy }, nextViewport, petSize(mode));
+    preferredPositionRef.current = next;
+    positionRef.current = next;
+    setPosition(next);
   };
   const onDragPointerEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
     const drag = dragRef.current;
@@ -528,17 +532,16 @@ export function WhalePet({
       ArrowLeft: { x: -distance, y: 0 },
       ArrowRight: { x: distance, y: 0 },
     }[event.key];
-    manuallyPositionedRef.current = true;
-    const nextViewport = viewport();
-    setPosition((current) => {
-      const next = clampWhalePosition(
-        { x: current.x + (delta?.x ?? 0), y: current.y + (delta?.y ?? 0) },
-        nextViewport,
-        petSize(mode),
-      );
-      writeWhalePosition(() => safeLocalStorage(), next);
-      return next;
-    });
+    const current = positionRef.current;
+    const next = clampWhalePosition(
+      { x: current.x + (delta?.x ?? 0), y: current.y + (delta?.y ?? 0) },
+      viewport(),
+      petSize(mode),
+    );
+    preferredPositionRef.current = next;
+    positionRef.current = next;
+    writeWhalePosition(() => safeLocalStorage(), next);
+    setPosition(next);
   };
 
   if (mode === "hidden" || suspended) return null;

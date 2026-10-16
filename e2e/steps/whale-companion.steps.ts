@@ -229,6 +229,75 @@ Then("我验证手机鲸鱼娘边界和本地素材刷新恢复", async () => {
   expect(await p.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   expect(uploadRequests).toBe(0);
 });
+Then("我验证键盘式视口收缩与恢复位置", async () => {
+  const p = current();
+  const pet = p.getByTestId("whale-pet");
+  const stored = () => p.evaluate(() => localStorage.getItem("pi-web-ui-whale-position"));
+  const y = async () => (await pet.boundingBox())?.y;
+  const shrink = () => p.setViewportSize({ width: 390, height: 430 });
+  const expand = () => p.setViewportSize({ width: 390, height: 844 });
+  await expectDefaultPosition();
+  // Default anchoring is recomputed rather than persisted on resize.
+  await shrink();
+  await expectDefaultPosition();
+  await expand();
+  await expectDefaultPosition();
+  expect(await stored()).toBeNull();
+  // Manual preference must survive temporary viewport clamping, modal suspension and reload.
+  await p.getByTestId("whale-drag").focus();
+  await p.keyboard.press("ArrowDown");
+  const originalY = await y();
+  const originalPreference = await stored();
+  expect(originalY).toBeGreaterThan(500);
+  await shrink();
+  await expect.poll(y).toBeLessThan(320);
+  expect(await stored()).toBe(originalPreference);
+  await p.getByTestId("open-settings").click();
+  await p.getByRole("button", { name: "Close dialog", exact: true }).last().click();
+  await p.reload();
+  await expect.poll(y).toBeLessThan(320);
+  expect(await stored()).toBe(originalPreference);
+  await expand();
+  await expect.poll(y).toBeCloseTo(originalY as number, 0);
+  // A deliberate move while the viewport is small becomes the new preference.
+  await shrink();
+  await expect.poll(y).toBeLessThan(320);
+  await p.getByTestId("whale-drag").focus();
+  await p.keyboard.press("ArrowUp");
+  const newY = await y();
+  const newPreference = await stored();
+  expect(newPreference).not.toBe(originalPreference);
+  await expand();
+  await expect.poll(y).toBeCloseTo(newY as number, 0);
+  // Also cover visualViewport-only shrink/pan without changing layout dimensions.
+  await p.getByTestId("whale-drag").focus();
+  for (let i = 0; i < 12; i++) await p.keyboard.press("Shift+ArrowDown");
+  const visualOriginalY = await y();
+  const visualPreference = await stored();
+  await p.evaluate(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) throw new Error("visualViewport unavailable");
+    Object.defineProperty(viewport, "height", { configurable: true, value: 430 });
+    Object.defineProperty(viewport, "offsetTop", { configurable: true, value: 40 });
+    viewport.dispatchEvent(new Event("resize"));
+    viewport.dispatchEvent(new Event("scroll"));
+  });
+  await expect.poll(y).toBeLessThan(351);
+  expect(await stored()).toBe(visualPreference);
+  await p.evaluate(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) throw new Error("visualViewport unavailable");
+    Reflect.deleteProperty(viewport, "height");
+    Reflect.deleteProperty(viewport, "offsetTop");
+    viewport.dispatchEvent(new Event("resize"));
+    viewport.dispatchEvent(new Event("scroll"));
+  });
+  await expect.poll(y).toBeCloseTo(visualOriginalY as number, 0);
+  expect(await stored()).toBe(visualPreference);
+  expect(usageRequests).toBe(0);
+  expect(uploadRequests).toBe(0);
+});
+
 Then("我验证缩放边界和拖动途中会话切换", async () => {
   const p = current();
   const cdp = await p.context().newCDPSession(p);

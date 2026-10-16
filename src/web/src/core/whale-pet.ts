@@ -23,6 +23,22 @@ export function clampWhalePosition(
   };
 }
 
+/** Rest above the composer's right edge; use a viewport fallback when history hides it. */
+export function defaultWhalePosition(
+  anchor: { right: number; top: number } | null,
+  viewport: WhaleViewport,
+  size: WhaleSize,
+): WhalePosition {
+  return clampWhalePosition(
+    {
+      x: (anchor?.right ?? viewport.left + viewport.width - 24) - size.width,
+      y: (anchor?.top ?? viewport.top + viewport.height - 180) - size.height - 8,
+    },
+    viewport,
+    size,
+  );
+}
+
 /** Place a card above its pet when possible, otherwise below, and keep it in view. */
 export function placeWhaleCard(
   anchor: { left: number; top: number; right: number; bottom: number },

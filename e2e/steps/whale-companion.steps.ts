@@ -44,6 +44,66 @@ async function open(browser: import("@playwright/test").Browser, mobile: boolean
 When("我打开桌面鲸鱼娘的真实 Pi 页面", async ({ browser }) => open(browser, false));
 When("我打开手机鲸鱼娘的真实 Pi 页面", async ({ browser }) => open(browser, true));
 
+async function expectDefaultPosition() {
+  const p = current();
+  await expect
+    .poll(async () => {
+      const pet = await p.getByTestId("whale-pet").boundingBox();
+      const anchor = await p.locator("[data-whale-anchor]").boundingBox();
+      if (!pet || !anchor) return false;
+      return (
+        Math.abs(pet.x + pet.width - anchor.x - anchor.width) < 2 && Math.abs(pet.y + pet.height + 8 - anchor.y) < 2
+      );
+    })
+    .toBe(true);
+}
+
+async function verifyDirectDrag(mobile: boolean) {
+  const p = current();
+  await expectDefaultPosition();
+  const before = await p.getByTestId("whale-pet").boundingBox();
+  if (!before) throw new Error("Whale bounds unavailable");
+  const x = before.x + before.width / 2;
+  const y = before.y + before.height / 2;
+  if (mobile) {
+    const cdp = await p.context().newCDPSession(p);
+    try {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x - 80, y: y - 90 }] });
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    } finally {
+      await cdp.detach();
+    }
+  } else {
+    await p.mouse.move(x, y);
+    await p.mouse.down();
+    await p.mouse.move(x - 80, y - 90, { steps: 8 });
+    await p.mouse.up();
+  }
+  await expect.poll(async () => (await p.getByTestId("whale-pet").boundingBox())?.x).toBeCloseTo(before.x - 80, 0);
+  await expect(p.getByTestId("whale-usage-card")).toHaveCount(0);
+  expect(usageRequests).toBe(0);
+  await p.reload();
+  await expect.poll(async () => (await p.getByTestId("whale-pet").boundingBox())?.x).toBeCloseTo(before.x - 80, 0);
+  // The reset must work even though settings temporarily unmounts the pet DOM.
+  await p.getByTestId("open-settings").click();
+  await p.getByTestId("whale-position-reset").click();
+  await p.getByRole("button", { name: "Close dialog", exact: true }).last().click();
+  await expectDefaultPosition();
+  expect(await p.evaluate(() => localStorage.getItem("pi-web-ui-whale-position"))).toBeNull();
+  await p.reload();
+  await expectDefaultPosition();
+  // Growing the input moves the automatic anchor, without making it a manual preference.
+  const oldHeight = await p.locator("[data-whale-anchor]").evaluate((element) => element.clientHeight);
+  await p.getByTestId("message-input").fill("line\n".repeat(8));
+  await expect
+    .poll(() => p.locator("[data-whale-anchor]").evaluate((element) => element.clientHeight))
+    .toBeGreaterThan(oldHeight);
+  await expectDefaultPosition();
+  await p.getByTestId("message-input").fill("");
+  await expectDefaultPosition();
+}
+
 async function importIdle() {
   const p = current();
   await p.getByTestId("open-settings").click();
@@ -91,6 +151,7 @@ async function openCard() {
 Then("我验证鲸鱼娘本地素材、会话用量与显示生命周期", async () => {
   const p = current();
   expect(usageRequests).toBe(0);
+  await verifyDirectDrag(false);
   await importIdle();
   await rejectUnsafeImage();
   await p.emulateMedia({ reducedMotion: "reduce" });
@@ -140,6 +201,7 @@ Then("我验证鲸鱼娘本地素材、会话用量与显示生命周期", async
 });
 Then("我验证手机鲸鱼娘边界和本地素材刷新恢复", async () => {
   const p = current();
+  await verifyDirectDrag(true);
   await importIdle();
   await p.reload();
   await expect(p.getByTestId("whale-pet").locator("img")).toBeVisible();
@@ -167,6 +229,92 @@ Then("我验证手机鲸鱼娘边界和本地素材刷新恢复", async () => {
   expect(await p.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   expect(uploadRequests).toBe(0);
 });
+Then("我验证缩放边界和拖动途中会话切换", async () => {
+  const p = current();
+  const cdp = await p.context().newCDPSession(p);
+  try {
+    await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 3 });
+    await expect.poll(() => p.evaluate(() => window.visualViewport?.width ?? innerWidth)).toBeLessThan(640);
+    await p.getByTestId("whale-drag").focus();
+    for (let i = 0; i < 50; i++) await p.keyboard.press("Shift+ArrowRight");
+    const bounds = await p.getByTestId("whale-pet").boundingBox();
+    const visible = await p.evaluate(() => ({
+      left: visualViewport?.offsetLeft ?? 0,
+      width: visualViewport?.width ?? innerWidth,
+    }));
+    if (!bounds) throw new Error("Whale bounds unavailable");
+    expect(bounds.width).toBe(160); // Layout viewport remains desktop even when visualViewport is narrow.
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(visible.left + visible.width - 11);
+  } finally {
+    await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+    await cdp.detach();
+  }
+  await p.getByTestId("open-settings").click();
+  await p.getByTestId("whale-position-reset").click();
+  await p.getByRole("button", { name: "Close dialog", exact: true }).last().click();
+  await expectDefaultPosition();
+  const before = await p.getByTestId("whale-pet").boundingBox();
+  if (!before) throw new Error("Whale bounds unavailable");
+  await p.mouse.move(before.x + 60, before.y + 65);
+  await p.mouse.down();
+  await p.mouse.move(before.x - 50, before.y - 40, { steps: 8 });
+  // A second actual WebSocket client switches the real Pi session while the pointer remains held.
+  await p.evaluate(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        let socket: WebSocket;
+        let firstId = "";
+        let finished = false;
+        let reconnect: ReturnType<typeof setTimeout> | undefined;
+        const finish = (error?: Error) => {
+          finished = true;
+          clearTimeout(timer);
+          clearTimeout(reconnect);
+          socket.close();
+          if (error) reject(error);
+          else resolve();
+        };
+        const timer = setTimeout(() => finish(new Error("Session switch timed out")), 15_000);
+        const connect = () => {
+          if (finished) return;
+          socket = new WebSocket(`${location.origin.replace("http", "ws")}/ws`);
+          // Real Pi replacement disposes sockets; reconnect only for observation, never re-dispatch /new.
+          socket.onclose = () => {
+            if (!finished) reconnect = setTimeout(connect, 100);
+          };
+          socket.onmessage = ({ data }) => {
+            const message = JSON.parse(String(data));
+            if (message.type === "res" && message.id === "whale-switch" && !message.ok) {
+              finish(new Error(`Session switch rejected: ${message.error}`));
+              return;
+            }
+            if (message.type === "event" && message.event === "webui_command_error") {
+              finish(new Error("Session command failed"));
+              return;
+            }
+            if (message.type !== "event" || message.event !== "state_sync") return;
+            if (!firstId) {
+              firstId = message.payload.sessionId;
+              socket.send(
+                JSON.stringify({ type: "req", id: "whale-switch", method: "prompt", params: { message: "/new" } }),
+              );
+            } else if (message.payload.sessionId !== firstId) finish();
+          };
+        };
+        connect();
+      }),
+  );
+  await expect(p.getByRole("log")).not.toContainText("SYNTHETIC_USAGE_RESPONSE");
+  await p.mouse.up();
+  await expect(p.getByTestId("whale-usage-card")).toHaveCount(0);
+  expect(usageRequests).toBe(0);
+  const moved = await p.getByTestId("whale-pet").boundingBox();
+  if (!moved) throw new Error("Whale bounds unavailable");
+  expect(moved.x).toBeLessThan(before.x);
+  await p.reload();
+  await expect.poll(async () => (await p.getByTestId("whale-pet").boundingBox())?.x).toBeCloseTo(moved.x, 0);
+});
+
 Then("我验证素材恢复竞态与部分持久化失败警告", async () => {
   const p = current();
   await importIdle();

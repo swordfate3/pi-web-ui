@@ -172,6 +172,7 @@ export function App() {
   const [modelSearch, setModelSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const whaleAssets = useWhaleAssets();
+  const [whalePositionResetKey, setWhalePositionResetKey] = useState(0);
   const [whaleMode, setWhaleMode] = useState<WhaleMode>(() => {
     const mode = readPreference("pi-web-ui-whale-mode");
     return mode === "hidden" || mode === "compact" ? mode : "full";
@@ -1392,6 +1393,7 @@ export function App() {
           onModeChange={changeWhaleMode}
           reduceMotion={whaleReduceMotion}
           images={whaleAssets.images}
+          positionResetKey={whalePositionResetKey}
           suspended={Boolean(
             modelOpen ||
               settingsOpen ||
@@ -1425,6 +1427,7 @@ export function App() {
                 onModeChange={changeWhaleMode}
                 reduceMotion={whaleReduceMotion}
                 onReduceMotionChange={changeWhaleMotion}
+                onResetPosition={() => setWhalePositionResetKey((key) => key + 1)}
                 assets={whaleAssets}
               />
             }

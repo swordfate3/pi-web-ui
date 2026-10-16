@@ -31,8 +31,14 @@
   border-radius: 54% 46% 48% 52% / 47% 51% 49% 53%;
   background: radial-gradient(ellipse at 50% 74%, rgb(232 250 252 / 92%) 0 35%, rgb(232 250 252 / 0%) 70%);
   color: inherit;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
   text-align: center;
+}
+
+.whale-pet__body:active {
+  cursor: grabbing;
 }
 
 .whale-pet__body:focus-visible,

@@ -116,7 +116,7 @@ export function ChatInput({
   if (viewingHistory) {
     return (
       <footer className="shrink-0 bg-background px-3 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-5">
-        <div className="mx-auto w-full max-w-3xl text-center text-muted-foreground text-sm py-4">
+        <div data-whale-anchor className="mx-auto w-full max-w-3xl text-center text-muted-foreground text-sm py-4">
           {t("Viewing history")}
         </div>
       </footer>
@@ -125,7 +125,7 @@ export function ChatInput({
 
   return (
     <footer className="shrink-0 bg-background px-3 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-5">
-      <div className="relative mx-auto w-full max-w-3xl">
+      <div data-whale-anchor className="relative mx-auto w-full max-w-3xl">
         {!disabled && suggestions.length > 0 && (
           <div className="absolute right-0 bottom-full left-0 z-50 mb-2 max-h-64 overflow-y-auto rounded-xl border bg-popover p-1 text-popover-foreground shadow-sm">
             {suggestions.map((suggestion, index) => (

@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useLanguage } from "../../core/i18n";
 import { usePiWebUiStore } from "../../core/store";
 import type { ChatItem, UsageStatsResult, UsageStatsTotals } from "../../core/types";
 import {
   clampWhalePosition,
+  defaultWhalePosition,
   placeWhaleCard,
   readWhalePosition,
+  WHALE_POSITION_STORAGE_KEY,
   type WhalePosition,
   type WhaleViewport,
   writeWhalePosition,
@@ -140,8 +142,6 @@ const words: Record<"en" | "zh-CN", WhaleTranslations> = {
   },
 };
 
-const DEFAULT_BOTTOM_DESKTOP = 230;
-const DEFAULT_BOTTOM_MOBILE = 235;
 const PET_SIZE_DESKTOP = { width: 160, height: 160 };
 const PET_SIZE_MOBILE = { width: 112, height: 108 };
 const PET_SIZE_COMPACT = { width: 76, height: 76 };
@@ -153,12 +153,14 @@ export function WhalePet({
   reduceMotion,
   suspended = false,
   images,
+  positionResetKey = 0,
 }: {
   mode: WhaleMode;
   onModeChange: (mode: WhaleMode) => void;
   reduceMotion: boolean;
   suspended?: boolean;
   images?: WhalePetImages;
+  positionResetKey?: number;
 }) {
   const language = useLanguage();
   const text = words[language];
@@ -187,13 +189,29 @@ export function WhalePet({
   const cardRef = useRef<HTMLElement>(null);
   const dragRef = useRef<{
     pointerId: number;
+    target: HTMLButtonElement;
     startX: number;
     startY: number;
     origin: WhalePosition;
     moved: boolean;
   } | null>(null);
+  const manuallyPositionedRef = useRef(readWhalePosition(() => safeLocalStorage()) !== null);
+  const lastPositionResetKeyRef = useRef(positionResetKey);
+  const suppressClickRef = useRef(false);
   const positionRef = useRef(position);
   positionRef.current = position;
+  const finishDrag = useCallback((cancelled: boolean) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+    suppressClickRef.current = drag.moved || cancelled;
+    if (drag.target.hasPointerCapture(drag.pointerId)) drag.target.releasePointerCapture(drag.pointerId);
+    if (drag.moved) writeWhalePosition(() => safeLocalStorage(), positionRef.current);
+  }, []);
+  const petSize = useCallback((currentMode: WhaleMode) => {
+    const pet = petRef.current;
+    return pet ? { width: pet.offsetWidth, height: pet.offsetHeight } : getPetSize(currentMode);
+  }, []);
   const patTimerRef = useRef<number | null>(null);
   const generationRef = useRef(0);
   const requestInFlightRef = useRef(false);
@@ -269,8 +287,9 @@ export function WhalePet({
   useEffect(() => {
     return () => {
       if (patTimerRef.current !== null) window.clearTimeout(patTimerRef.current);
+      finishDrag(true);
     };
-  }, []);
+  }, [finishDrag]);
 
   useEffect(() => {
     if (mode === "hidden" || suspended) {
@@ -302,39 +321,60 @@ export function WhalePet({
     };
   }, [cardOpen, mode, suspended]);
 
-  useEffect(() => {
-    if (mode === "hidden") {
-      setCardOpen(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: session replacement remounts ChatInput's anchor DOM.
+  useLayoutEffect(() => {
+    if (lastPositionResetKeyRef.current !== positionResetKey) {
+      lastPositionResetKeyRef.current = positionResetKey;
+      finishDrag(true);
+      manuallyPositionedRef.current = false;
+      try {
+        safeLocalStorage()?.removeItem(WHALE_POSITION_STORAGE_KEY);
+      } catch {
+        // Privacy/sandbox modes can deny storage; the in-page reset still works.
+      }
+    }
+    if (mode === "hidden" || suspended) {
+      finishDrag(true);
       return;
     }
-    const nextViewport = viewport();
-    setPosition((current) => {
-      const clamped = clampWhalePosition(current, nextViewport, getPetSize(mode, nextViewport.width));
-      writeWhalePosition(() => safeLocalStorage(), clamped);
-      return clamped;
-    });
-    const onResize = () => {
-      const nextViewport = viewport();
-      const nextSize = getPetSize(mode, nextViewport.width);
+    const composer = document.querySelector("[data-whale-anchor]");
+    const updatePosition = () => {
+      const visible = viewport();
+      const size = petSize(mode);
       setPosition((current) => {
-        const clamped = clampWhalePosition(current, nextViewport, nextSize);
-        writeWhalePosition(() => safeLocalStorage(), clamped);
-        return clamped;
+        const next = manuallyPositionedRef.current
+          ? clampWhalePosition(current, visible, size)
+          : defaultWhalePosition(composer?.getBoundingClientRect() ?? null, visible, size);
+        return next.x === current.x && next.y === current.y ? current : next;
       });
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(positionCard);
     };
     let frame = 0;
+    const onResize = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        updatePosition();
+        positionCard();
+      });
+    };
+    updatePosition();
+    const observer = new ResizeObserver(onResize);
+    if (composer) observer.observe(composer);
+    const footer = composer?.closest("footer");
+    if (footer) observer.observe(footer);
+    observer.observe(document.body);
     window.addEventListener("resize", onResize);
+    window.addEventListener("scroll", onResize, true);
     window.visualViewport?.addEventListener("resize", onResize);
     window.visualViewport?.addEventListener("scroll", onResize);
     return () => {
+      observer.disconnect();
       window.removeEventListener("resize", onResize);
+      window.removeEventListener("scroll", onResize, true);
       window.visualViewport?.removeEventListener("resize", onResize);
       window.visualViewport?.removeEventListener("scroll", onResize);
       cancelAnimationFrame(frame);
     };
-  }, [mode, positionCard, viewport]);
+  }, [mode, positionCard, viewport, positionResetKey, suspended, scopeKey, finishDrag, petSize]);
 
   useEffect(() => {
     if (!cardOpen || suspended || mode === "hidden") return;
@@ -446,11 +486,14 @@ export function WhalePet({
   }, [canRequest, chatStatus, hasActiveTool]);
 
   const onDragPointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (event.button !== 0 || mode === "hidden") return;
+    if (event.button !== 0 || mode === "hidden" || dragRef.current) return;
     event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
+    suppressClickRef.current = false;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       pointerId: event.pointerId,
+      target: event.currentTarget,
       startX: event.clientX,
       startY: event.clientY,
       origin: position,
@@ -464,22 +507,15 @@ export function WhalePet({
     const dy = event.clientY - drag.startY;
     if (!drag.moved && Math.hypot(dx, dy) < 5) return;
     drag.moved = true;
+    suppressClickRef.current = true;
+    manuallyPositionedRef.current = true;
     const nextViewport = viewport();
-    setPosition(
-      clampWhalePosition(
-        { x: drag.origin.x + dx, y: drag.origin.y + dy },
-        nextViewport,
-        getPetSize(mode, nextViewport.width),
-      ),
-    );
+    setPosition(clampWhalePosition({ x: drag.origin.x + dx, y: drag.origin.y + dy }, nextViewport, petSize(mode)));
   };
   const onDragPointerEnd = (event: React.PointerEvent<HTMLButtonElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    dragRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId))
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    if (drag.moved) writeWhalePosition(() => safeLocalStorage(), positionRef.current);
+    finishDrag(event.type !== "pointerup");
   };
 
   const moveWithKeyboard = (event: React.KeyboardEvent<HTMLButtonElement>) => {
@@ -492,12 +528,13 @@ export function WhalePet({
       ArrowLeft: { x: -distance, y: 0 },
       ArrowRight: { x: distance, y: 0 },
     }[event.key];
+    manuallyPositionedRef.current = true;
     const nextViewport = viewport();
     setPosition((current) => {
       const next = clampWhalePosition(
         { x: current.x + (delta?.x ?? 0), y: current.y + (delta?.y ?? 0) },
         nextViewport,
-        getPetSize(mode, nextViewport.width),
+        petSize(mode),
       );
       writeWhalePosition(() => safeLocalStorage(), next);
       return next;
@@ -529,6 +566,7 @@ export function WhalePet({
             onKeyDown={moveWithKeyboard}
             onPointerCancel={onDragPointerEnd}
             onPointerDown={onDragPointerDown}
+            onLostPointerCapture={onDragPointerEnd}
             onPointerMove={onDragPointerMove}
             onPointerUp={onDragPointerEnd}
             title={text.drag}
@@ -572,7 +610,16 @@ export function WhalePet({
           aria-label={`${text.openUsage}: ${activityLabel(activity, text)}`}
           className="whale-pet__body"
           data-testid="whale-pet-body"
-          onClick={() => {
+          onPointerDown={onDragPointerDown}
+          onPointerMove={onDragPointerMove}
+          onPointerUp={onDragPointerEnd}
+          onPointerCancel={onDragPointerEnd}
+          onLostPointerCapture={onDragPointerEnd}
+          onClick={(event) => {
+            if (event.detail !== 0 && suppressClickRef.current) {
+              suppressClickRef.current = false;
+              return;
+            }
             setCardOpen((open) => !open);
             setPetPat(true);
             if (patTimerRef.current !== null) window.clearTimeout(patTimerRef.current);
@@ -584,6 +631,7 @@ export function WhalePet({
             <img
               alt=""
               aria-hidden="true"
+              draggable={false}
               className="whale-pet__image"
               onError={() => setFailedImages((current) => new Set(current).add(imageSrc))}
               src={imageSrc}
@@ -749,22 +797,17 @@ function isActiveTool(item: ChatItem): boolean {
 function initialPosition(mode: WhaleMode): WhalePosition {
   const stored = readWhalePosition(() => safeLocalStorage());
   const visible = getVisibleViewport();
-  const size = getPetSize(mode, visible.width);
+  const size = getPetSize(mode);
   if (stored) return clampWhalePosition(stored, visible, size);
-  const mobile = visible.width < 640;
-  return clampWhalePosition(
-    {
-      x: visible.left + visible.width - size.width - (mobile ? 16 : 24),
-      y: visible.top + visible.height - size.height - (mobile ? DEFAULT_BOTTOM_MOBILE : DEFAULT_BOTTOM_DESKTOP),
-    },
-    visible,
-    size,
-  );
+  return defaultWhalePosition(null, visible, size);
 }
 
-function getPetSize(mode: WhaleMode, width: number) {
+function getPetSize(mode: WhaleMode) {
   if (mode === "compact") return PET_SIZE_COMPACT;
-  return width < 640 ? PET_SIZE_MOBILE : PET_SIZE_DESKTOP;
+  // CSS breakpoints use the layout viewport, never visualViewport's zoomed width.
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 639px)").matches
+    ? PET_SIZE_MOBILE
+    : PET_SIZE_DESKTOP;
 }
 
 function getVisibleViewport(): WhaleViewport {

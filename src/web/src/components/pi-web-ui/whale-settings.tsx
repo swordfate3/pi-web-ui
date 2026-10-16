@@ -8,12 +8,14 @@ export function WhaleSettings({
   onModeChange,
   reduceMotion,
   onReduceMotionChange,
+  onResetPosition,
   assets,
 }: {
   mode: WhaleMode;
   onModeChange: (mode: WhaleMode) => void;
   reduceMotion: boolean;
   onReduceMotionChange: (value: boolean) => void;
+  onResetPosition: () => void;
   assets: WhaleAssetsState;
 }) {
   const zh = useLanguage() === "zh-CN";
@@ -34,14 +36,22 @@ export function WhaleSettings({
           </button>
         ))}
       </div>
+      <button
+        type="button"
+        className="rounded-md border px-3 py-2 text-sm"
+        data-testid="whale-position-reset"
+        onClick={onResetPosition}
+      >
+        {zh ? "恢复到输入框右上方" : "Reset above input's right corner"}
+      </button>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={reduceMotion} onChange={(e) => onReduceMotionChange(e.target.checked)} />
         {zh ? "减少桌宠动画（也遵循系统设置）" : "Reduce companion animation (also respects system preference)"}
       </label>
       <p className="text-muted-foreground text-xs">
         {zh
-          ? "仅网页内悬浮；点击互动不调用模型、不消耗 Token。关闭后可在这里重新开启。"
-          : "Only floats inside this page. Interactions never call a model or use tokens. Re-enable here after closing."}
+          ? "默认停在输入框右上方；拖动角色或把手可移动并记住位置，点击查看用量。互动不调用模型、不消耗 Token。关闭后可在这里重新开启。"
+          : "Defaults above the input’s right corner. Drag the character or handle to move and remember its position; click for usage. No model calls or tokens. Re-enable here after closing."}
       </p>
       <WhaleAssetSettings assets={assets} />
     </section>

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   clampWhalePosition,
+  defaultWhalePosition,
   placeWhaleCard,
   readWhalePosition,
   WHALE_POSITION_STORAGE_KEY,
@@ -14,6 +15,28 @@ test("clamps pet position within a viewport and honors non-zero viewport offsets
   assert.deepEqual(clampWhalePosition({ x: 500, y: -40 }, viewport, size), { x: 308, y: 42 });
   assert.deepEqual(clampWhalePosition({ x: Number.NaN, y: Infinity }, viewport, size), { x: 32, y: 42 });
   assert.deepEqual(clampWhalePosition({ x: 50, y: 60 }, viewport, { width: 500, height: 400 }), { x: 32, y: 42 });
+});
+
+test("defaults above the input's right corner and clamps narrow or keyboard-shrunken viewports", () => {
+  const desktop = { left: 0, top: 0, width: 1440, height: 900 };
+  assert.deepEqual(defaultWhalePosition({ right: 1104, top: 740 }, desktop, { width: 160, height: 160 }), {
+    x: 944,
+    y: 572,
+  });
+  const mobile = { left: 0, top: 0, width: 390, height: 844 };
+  assert.deepEqual(defaultWhalePosition({ right: 378, top: 680 }, mobile, { width: 112, height: 108 }), {
+    x: 266,
+    y: 564,
+  });
+  assert.deepEqual(defaultWhalePosition({ right: 378, top: 10 }, mobile, { width: 112, height: 108 }), {
+    x: 266,
+    y: 12,
+  });
+  assert.deepEqual(defaultWhalePosition(null, desktop, { width: 160, height: 160 }), { x: 1256, y: 552 });
+  assert.deepEqual(
+    defaultWhalePosition({ right: 900, top: 680 }, { ...mobile, top: 100, height: 200 }, { width: 112, height: 108 }),
+    { x: 266, y: 180 },
+  );
 });
 
 test("places the card near the pet, flips when the preferred side does not fit, and clamps edges", () => {

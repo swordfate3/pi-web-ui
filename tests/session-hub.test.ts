@@ -7,11 +7,71 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { WebSocket, WebSocketServer } from "ws";
 import { createSessionRegistration } from "../extensions/session-registration.ts";
 import { initializeHub, issueSession, readHubConfig, revokeSession } from "../hub/config.ts";
+import { portalJs } from "../hub/portal.ts";
 import { startHub } from "../hub/server.ts";
 import { PiClient } from "../src/web/src/core/pi-client.ts";
+
+test("portal removes only the legacy middle-dot eight-hex suffix, not route identities or arbitrary project names", async () => {
+  class Element {
+    textContent = "";
+    title = "";
+    href = "";
+    className = "";
+    value = "";
+    children: Element[] = [];
+    append(...children: Element[]) {
+      this.children.push(...children);
+    }
+    replaceChildren() {
+      this.children = [];
+    }
+    addEventListener() {}
+  }
+  const elements = new Map<string, Element>();
+  const get = (id: string) => {
+    if (!elements.has(id)) elements.set(id, new Element());
+    return elements.get(id) as Element;
+  };
+  const labels = [
+    "pi_projects · ae32751f",
+    "Folder · ABCDEF12",
+    "keep-ae32751f",
+    "keep · abcdefg1",
+    "keep · 123456789",
+    "keep · title",
+    " · ae32751f",
+  ];
+  const sessions = labels.map((label, i) => ({
+    label,
+    sessionName: "会话名字",
+    path: `/s/${String(i).padStart(32, "0")}/`,
+    since: 0,
+  }));
+  runInNewContext(portalJs, {
+    document: { getElementById: get, createElement: () => new Element(), addEventListener() {} },
+    fetch: async () => ({ ok: true, json: async () => ({ sessions }) }),
+    setInterval() {},
+    AbortSignal,
+    Date,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const cards = get("sessions").children;
+  assert.deepEqual(
+    cards.map((card) => card.children[1].textContent),
+    ["pi_projects", "Folder", ...labels.slice(2)],
+  );
+  assert.deepEqual(
+    cards.map((card) => card.children[3].href),
+    sessions.map((s) => s.path),
+  );
+  assert.equal(cards[0].children[1].title, "pi_projects");
+  assert.equal(cards[0].children[2].children[0].textContent, "会话名字");
+  assert.equal(sessions[0].label, labels[0], "original registry metadata is not rewritten");
+});
 
 function exchange(socketPath: string, value: Record<string, unknown>) {
   return new Promise<{ ok: boolean; error?: string; result?: { url: string } }>((resolve, reject) => {

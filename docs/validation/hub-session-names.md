@@ -24,6 +24,16 @@
 
 仓库外截图：`downloads/playwright-mcp/hub-names-{desktop,mobile,mobile-long}.png`，均直接read；不以自动E2E截图替代。初次favicon console404不属于API失败，页面随后实际操作、改名和导航成功。PID130083及所属自有Hub/Pi已正常SIGTERM清理；不再提供临时服务。
 
+## 后续修正：旧启动器把 ID 写入项目标签
+
+用户报告实际仍显示 `pi_projects · ae32751f`。只读检查发现旧启动器原始 label 已包含 ` · 8hex`，不是卡片第二行 generation；初版仅替换第二行，遗漏真实标签格式。基于已发布 `ea93b7e` 修正 portal 的纯显示逻辑：精确移除末尾 ` · [a-f0-9]{8}`（大小写均可），标题、tooltip、搜索一致，API label／grant／generation／链接不改。不把任意项目名称按所有分隔符粗暴截断；移除后空串回退原文。新修正本地未提交／未部署，不能因旧申请 deployed 声称已生效。
+
+- 新单测执行真实 portalJs 于隔离最小DOM：正常／大写旧后缀去除、非匹配格式和空项保留、原始label不mutation、会话名和链接不变。专项Hub17/17；完整268单测（267通过、1可选GiB跳过）。
+- 五项真实Pi Hub Chromium 5/5，fixture改用实际同形的旧标签，严格断言标题和tooltip无后缀、隐藏ID不被搜索、新名字仍可搜索、改名／退出／新建／恢复交接正常。
+- build／manifest、补充types0、Biome199文件无error（既有5warning）、源码whitespace通过。未重跑全部浏览器、后端或安装生命周期。
+- 独立Browser临时 `127.0.0.1:44771`，两真实Pi；旧label为 `pi_projects · ae32751f`，用真实 `/name` 更新后卡片标题 `pi_projects`、第二行 `Hub名称与GIF支持`。1440×900／390×844截图 `downloads/playwright-mcp/hub-label-{desktop,mobile}.png` 均直接read，布局无横向溢出。PID135742已正常停止，不操作真实Hub或用户会话。
+- 日志 `/tmp/pi-hub-label-{unit-targeted,unit,check,types,build,browser}.log`。这只是兼容旧标签的展示规则，不自动迁移旧启动器；若用户本来故意把同形后缀用作项目名称，展示也会去掉，原始登记元数据不丢失。
+
 ## 限制与证据
 
 - 没有公网、实体手机、Safari／Firefox、旧外部registry验证；没有读取或迁移用户实际Hub配置／凭据／会话内容。

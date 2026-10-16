@@ -347,6 +347,11 @@
 - 可选sessionName登记字段兼容旧客户端，规范控制字符／256长度上限；API显式投影、浏览器textContent安全显示。沿用latestCtx生命周期与原授权证明，不读聊天正文，不修改凭据。
 - 专项26/26、默认267单测（266通过／1条件跳过）、最终Hub5＋鲸鱼6共11 Chromium、build／hash／补充types通过；只读限定审查无P2+，桌面／手机及长名HTML样式文本截图直接查看，自有临时服务停止。见[验证报告](validation/hub-session-names.md)。保留未发布GIF改动，本轮无提交、推送、安装或运行实例重启。
 
+## 27. 修正旧 Hub 标签内嵌短 ID 的遗漏
+
+- 实际旧label本身为 `pi_projects · ae32751f`，初版保留label导致ID仍显示；portal纯展示精确去除末尾中点分隔8hex，标题／tooltip／搜索一致。API label、授权、路由和会话名不变。
+- 新portal运行单测含非匹配／空标签保护；268默认项（267通过／1条件跳过）、Hub真实Pi5/5、构建／hash／补充types通过。独立Browser桌面／手机使用真实同形旧label+真实/name截图直接查看，自有服务停止。详见[Hub名字报告](validation/hub-session-names.md)。本次本地未提交、push或部署，不借用前次已完成申请。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。

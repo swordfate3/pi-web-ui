@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 138,
-    "sha256": "1a7209c7e05981b76769fb78b3df042f2631298c9f739bcaba80374393a7f5c5",
+    "sha256": "d06b5ce4efc386b36450a4d1081b0d146912508564474e7b6729a4d035b52ad3",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -62,7 +62,7 @@
       },
       {
         "path": "hub/portal.ts",
-        "sha256": "c582d7aa84523a3e3afff81d501b62f7dda62b118ca977c8777da7bf0359c070"
+        "sha256": "3dc7116d1d288fcd8a95e68ba0cb9080ee83b9c9efbc0494966d3aa69c7ed5bf"
       },
       {
         "path": "hub/server.ts",
@@ -560,7 +560,7 @@
   },
   "outputs": {
     "count": 673,
-    "sha256": "844ce36934247cbe5edd8ac1e3e0a1c7c9ad531955169b83e033295415490a03",
+    "sha256": "f190fac67da6b80bcc7e1c9e45429377e156d1d8d79ffeafb3757daa7e1b95fe",
     "files": [
       {
         "path": "assets/abap-BF8NL95m.js",
@@ -3228,7 +3228,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "8c2c14fc9a55ebfee42a725d11f972c72db241e1c33395e32baec90c9716dd7a"
+        "sha256": "30c97211cafd2f88a92a7f8a300eaadb0c2367076e79a8d88a9f4807dc3c6491"
       },
       {
         "path": "icons/pi-web-ui-192.png",

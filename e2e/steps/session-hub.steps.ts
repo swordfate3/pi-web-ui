@@ -26,7 +26,7 @@ async function manager() {
 When("我在 {string} 打开有两个真实 Pi 的总管首页", async ({ browser }, viewport: string) => {
   screen = viewport;
   const managerCli = await manager();
-  for (const label of ["工作项目 Alpha", "移动端 Beta"]) {
+  for (const label of ["工作项目 Alpha · ae32751f", "移动端 Beta · b1234567"]) {
     const capability = managerCli.issue(label);
     capabilities.push(capability);
     agents.push(await startPiWebUi("chat-lifecycle", { registration: capability }));
@@ -59,6 +59,12 @@ Then("首页清晰显示两个会话并保存总管截图", async ({ $testInfo }
   await expect(page().locator(".card")).toHaveCount(2);
   await expect(page().getByRole("heading", { name: "所有会话，一个入口。" })).toBeVisible();
   await expect(page().getByText("● 总管已连接")).toBeVisible();
+  await expect(page().locator(".card h3")).toHaveText(["工作项目 Alpha", "移动端 Beta"]);
+  await expect(page().locator(".card h3").first()).toHaveAttribute("title", "工作项目 Alpha");
+  await page().getByRole("searchbox").fill("ae32751f");
+  await expect(page().locator(".card")).toHaveCount(0);
+  await page().getByRole("searchbox").fill("");
+  await expect(page().locator(".card")).toHaveCount(2);
   await expect(page().locator(".session-name")).toHaveText(["Pi Web UI E2E", "Pi Web UI E2E"]);
   const api = await (await page().request.get(`${hub?.url}api/sessions`)).json();
   for (const session of api.sessions)

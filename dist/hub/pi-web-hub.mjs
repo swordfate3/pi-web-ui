@@ -204,9 +204,12 @@ var portalJs = `(() => {
   const get = (id) => document.getElementById(id);
   let items = [];
   let loading = false;
+  // Legacy launchers append a short run ID to the grant's project label.
+  // Display-only: keep the original API label and capability route untouched.
+  const projectLabel = (label) => label.replace(/ · [a-f0-9]{8}$/i, '').trim() || label;
   function render() {
     const query = get('search').value.toLocaleLowerCase();
-    const visible = items.filter((s) => s.label.toLocaleLowerCase().includes(query) || (s.sessionName || '未命名会话').toLocaleLowerCase().includes(query));
+    const visible = items.filter((s) => projectLabel(s.label).toLocaleLowerCase().includes(query) || (s.sessionName || '未命名会话').toLocaleLowerCase().includes(query));
     get('sessions').replaceChildren();
     get('count').textContent = String(items.length);
     get('empty').hidden = items.length !== 0;
@@ -217,7 +220,7 @@ var portalJs = `(() => {
       const icon = document.createElement('span'); icon.className = 'project-icon'; icon.textContent = '↗';
       const status = document.createElement('span'); status.className = 'online'; status.textContent = '在线';
       top.append(icon, status);
-      const title = document.createElement('h3'); title.textContent = session.label; title.title = session.label;
+      const title = document.createElement('h3'); title.textContent = projectLabel(session.label); title.title = title.textContent;
       const meta = document.createElement('p'); meta.className = 'meta';
       const name = document.createElement('span'); name.className = 'session-name'; name.textContent = session.sessionName || '未命名会话'; name.title = name.textContent;
       const since = document.createElement('span'); since.textContent = ' · ' + new Date(session.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

@@ -15,6 +15,7 @@ export type WhaleAssetErrorCode =
   | "clear-unavailable";
 export type WhaleAssetsState = {
   images: Partial<Record<WhaleAssetSlot, string>>;
+  previewImages: Partial<Record<WhaleAssetSlot, string>>;
   importAsset: (slot: WhaleAssetSlot, file: File) => Promise<void>;
   clearAssets: () => Promise<void>;
   busy: boolean;
@@ -32,6 +33,24 @@ const OPERATION_TIMEOUT_MS = 3000;
 
 type AssetState = Partial<Record<WhaleAssetSlot, string>>;
 type AssetBlobs = Partial<Record<WhaleAssetSlot, Blob>>;
+type AssetUrls = { originals: AssetState; previews: AssetState };
+const emptyUrls = (): AssetUrls => ({ originals: {}, previews: {} });
+
+function releaseUrls(urls: AssetUrls): void {
+  for (const url of [...Object.values(urls.originals), ...Object.values(urls.previews)]) {
+    if (url) URL.revokeObjectURL(url);
+  }
+}
+
+function createAssetUrls(original: Blob, preview: Blob): { original: string; preview: string } {
+  const originalUrl = URL.createObjectURL(original);
+  try {
+    return { original: originalUrl, preview: URL.createObjectURL(preview) };
+  } catch (error) {
+    URL.revokeObjectURL(originalUrl);
+    throw error;
+  }
+}
 
 class WhaleAssetFailure extends Error {
   readonly code: WhaleAssetErrorCode;
@@ -72,8 +91,31 @@ export function isWebpSignature(bytes: Uint8Array): boolean {
   );
 }
 
-export function useWhaleAssets(): WhaleAssetsState {
-  const [images, setImages] = useState<AssetState>({});
+/** GIF87a/GIF89a only; the filename and media type do not establish format. */
+export function isGifSignature(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 6 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38 &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  );
+}
+
+export function useWhaleAssets(reduceMotion = false): WhaleAssetsState {
+  const [urls, setUrls] = useState<AssetUrls>(emptyUrls);
+  const [systemReduced, setSystemReduced] = useState(
+    () => typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true,
+  );
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setSystemReduced(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [persistent, setPersistent] = useState(false);
@@ -81,7 +123,7 @@ export function useWhaleAssets(): WhaleAssetsState {
   const temporaryRef = useRef(new Set<WhaleAssetSlot>());
   const activeRef = useRef(true);
   const revisionRef = useRef(0);
-  const urlsRef = useRef<AssetState>({});
+  const urlsRef = useRef<AssetUrls>(emptyUrls());
   const queueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingRef = useRef(1); // The initial IndexedDB read is also busy work.
 
@@ -96,25 +138,32 @@ export function useWhaleAssets(): WhaleAssetsState {
   const restoreAssets = useCallback(async (revision: number, preserveError = false) => {
     try {
       const blobs = await readAssets();
-      const validated: AssetBlobs = {};
-      for (const slot of WHALE_ASSET_SLOTS) {
-        const blob = blobs[slot];
-        if (blob && (await isValidStoredImage(blob))) validated[slot] = blob;
-      }
-      if (!activeRef.current || revision !== revisionRef.current) return;
-      const nextUrls: AssetState = {};
+      const nextUrls = emptyUrls();
       try {
         for (const slot of WHALE_ASSET_SLOTS) {
-          const blob = validated[slot];
-          if (blob) nextUrls[slot] = URL.createObjectURL(blob);
+          const blob = blobs[slot];
+          if (!blob) continue;
+          let validated: Awaited<ReturnType<typeof validateWhaleImage>>;
+          try {
+            validated = await validateWhaleImage(blob);
+          } catch {
+            continue; // Invalid stored data is never rendered as an image.
+          }
+          const pair = createAssetUrls(new Blob([blob], { type: validated.mimeType }), validated.preview);
+          nextUrls.originals[slot] = pair.original;
+          nextUrls.previews[slot] = pair.preview;
         }
       } catch {
-        for (const url of Object.values(nextUrls)) if (url) URL.revokeObjectURL(url);
+        releaseUrls(nextUrls);
         throw new WhaleAssetFailure("read-unavailable");
       }
-      for (const url of Object.values(urlsRef.current)) if (url) URL.revokeObjectURL(url);
+      if (!activeRef.current || revision !== revisionRef.current) {
+        releaseUrls(nextUrls);
+        return;
+      }
+      releaseUrls(urlsRef.current);
       urlsRef.current = nextUrls;
-      setImages(nextUrls);
+      setUrls(nextUrls);
       setPersistent(true);
       if (!preserveError) setError(null);
     } catch {
@@ -141,8 +190,8 @@ export function useWhaleAssets(): WhaleAssetsState {
     return () => {
       cancelled = true;
       activeRef.current = false;
-      for (const url of Object.values(urlsRef.current)) if (url) URL.revokeObjectURL(url);
-      urlsRef.current = {};
+      releaseUrls(urlsRef.current);
+      urlsRef.current = emptyUrls();
     };
   }, [endWork, restoreAssets]);
 
@@ -157,7 +206,7 @@ export function useWhaleAssets(): WhaleAssetsState {
         const revision = ++revisionRef.current;
         try {
           if (!WHALE_ASSET_SLOTS.includes(slot)) throw new WhaleAssetFailure("unsupported-file");
-          const mimeType = await validateImport(file);
+          const { mimeType, preview } = await validateWhaleImage(file);
           const blob = new Blob([file], { type: mimeType });
           let saved = false;
           try {
@@ -167,8 +216,16 @@ export function useWhaleAssets(): WhaleAssetsState {
             // Keep the validated Blob usable for this page, but surface that it will not survive reload.
           }
           if (!activeRef.current) return;
-          const url = URL.createObjectURL(blob);
-          replaceUrl(slot, url, urlsRef, setImages);
+          const pair = createAssetUrls(blob, preview);
+          const previous = urlsRef.current;
+          if (previous.originals[slot]) URL.revokeObjectURL(previous.originals[slot]);
+          if (previous.previews[slot]) URL.revokeObjectURL(previous.previews[slot]);
+          const next = {
+            originals: { ...previous.originals, [slot]: pair.original },
+            previews: { ...previous.previews, [slot]: pair.preview },
+          };
+          urlsRef.current = next;
+          setUrls(next);
           if (saved) temporaryRef.current.delete(slot);
           else temporaryRef.current.add(slot);
           setTemporarySlots([...temporaryRef.current]);
@@ -179,7 +236,7 @@ export function useWhaleAssets(): WhaleAssetsState {
           if (activeRef.current) {
             const code = toErrorCode(cause, "decode-failed");
             setError(code);
-            if (revision === revisionRef.current && Object.keys(urlsRef.current).length === 0) {
+            if (revision === revisionRef.current && Object.keys(urlsRef.current.originals).length === 0) {
               await restoreAssets(revision, true);
             }
           }
@@ -206,9 +263,9 @@ export function useWhaleAssets(): WhaleAssetsState {
       setTemporarySlots([]);
       try {
         if (activeRef.current) {
-          for (const url of Object.values(urlsRef.current)) if (url) URL.revokeObjectURL(url);
-          urlsRef.current = {};
-          setImages({});
+          releaseUrls(urlsRef.current);
+          urlsRef.current = emptyUrls();
+          setUrls(emptyUrls());
         }
         try {
           await deleteAssets();
@@ -230,31 +287,30 @@ export function useWhaleAssets(): WhaleAssetsState {
     return task;
   }, [beginWork, endWork]);
 
-  return { images, importAsset, clearAssets, busy, error, persistent, temporarySlots };
-}
-
-function replaceUrl(
-  slot: WhaleAssetSlot,
-  url: string,
-  urlsRef: { current: AssetState },
-  setImages: (images: AssetState) => void,
-): void {
-  const previous = urlsRef.current[slot];
-  if (previous) URL.revokeObjectURL(previous);
-  const next = { ...urlsRef.current, [slot]: url };
-  urlsRef.current = next;
-  setImages(next);
+  return {
+    images: reduceMotion || systemReduced ? urls.previews : urls.originals,
+    previewImages: urls.previews,
+    importAsset,
+    clearAssets,
+    busy,
+    error,
+    persistent,
+    temporarySlots,
+  };
 }
 
 function toErrorCode(cause: unknown, fallback: WhaleAssetErrorCode): WhaleAssetErrorCode {
   return cause instanceof WhaleAssetFailure ? cause.code : fallback;
 }
 
-async function validateImport(file: File): Promise<"image/png" | "image/webp"> {
+export async function validateWhaleImage(file: Blob): Promise<{
+  mimeType: "image/png" | "image/webp" | "image/gif";
+  preview: Blob;
+}> {
   if (typeof file.size !== "number" || file.size <= 0 || file.size > MAX_FILE_BYTES) {
     throw new WhaleAssetFailure(file.size > MAX_FILE_BYTES ? "file-too-large" : "unsupported-file");
   }
-  if (file.type !== "" && file.type !== "image/png" && file.type !== "image/webp") {
+  if (file.type !== "" && !["image/png", "image/webp", "image/gif"].includes(file.type)) {
     throw new WhaleAssetFailure("unsupported-file");
   }
 
@@ -266,30 +322,52 @@ async function validateImport(file: File): Promise<"image/png" | "image/webp"> {
   }
   const isPng = isPngSignature(signature);
   const isWebp = isWebpSignature(signature);
-  if (!isPng && !isWebp) throw new WhaleAssetFailure("invalid-signature");
-  const mimeType = isPng ? "image/png" : "image/webp";
+  const isGif = isGifSignature(signature);
+  if (!isPng && !isWebp && !isGif) throw new WhaleAssetFailure("invalid-signature");
+  const mimeType = isPng ? "image/png" : isWebp ? "image/webp" : "image/gif";
   if (file.type && file.type !== mimeType) throw new WhaleAssetFailure("mime-mismatch");
-  await validateDecodedImage(file);
-  return mimeType;
-}
-
-async function isValidStoredImage(blob: Blob): Promise<boolean> {
-  if (blob.size <= 0 || blob.size > MAX_FILE_BYTES) return false;
-  try {
-    const signature = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
-    if (!isPngSignature(signature) && !isWebpSignature(signature)) return false;
-    await validateDecodedImage(blob);
-    return true;
-  } catch {
-    return false;
+  // Reject oversized GIF logical screens before asking the browser to decode.
+  if (isGif) {
+    if (signature.length < 10) throw new WhaleAssetFailure("invalid-signature");
+    const width = signature[6] | (signature[7] << 8);
+    const height = signature[8] | (signature[9] << 8);
+    if (!width || !height || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION)
+      throw new WhaleAssetFailure("invalid-dimensions");
   }
+  const preview = await decodeStillPreview(file);
+  return { mimeType, preview };
 }
 
-async function validateDecodedImage(blob: Blob): Promise<void> {
+async function decodeStillPreview(blob: Blob): Promise<Blob> {
   if (typeof globalThis.createImageBitmap !== "function") throw new WhaleAssetFailure("decoder-unavailable");
   let bitmap: ImageBitmap;
   try {
-    bitmap = await globalThis.createImageBitmap(blob);
+    bitmap = await new Promise<ImageBitmap>((resolve, reject) => {
+      let settled = false;
+      const timer = globalThis.setTimeout(() => {
+        settled = true;
+        reject(new WhaleAssetFailure("decode-failed"));
+      }, OPERATION_TIMEOUT_MS);
+      Promise.resolve()
+        .then(() => globalThis.createImageBitmap(blob))
+        .then(
+          (decoded) => {
+            if (settled) {
+              decoded.close();
+              return;
+            }
+            settled = true;
+            globalThis.clearTimeout(timer);
+            resolve(decoded);
+          },
+          () => {
+            if (settled) return;
+            settled = true;
+            globalThis.clearTimeout(timer);
+            reject(new WhaleAssetFailure("decode-failed"));
+          },
+        );
+    });
   } catch {
     throw new WhaleAssetFailure("decode-failed");
   }
@@ -302,6 +380,29 @@ async function validateDecodedImage(blob: Blob): Promise<void> {
     ) {
       throw new WhaleAssetFailure("invalid-dimensions");
     }
+    // createImageBitmap decodes the first frame, not a re-encoded animated file.
+    // Keep the original separately; this small PNG is for reduced motion and
+    // always-still settings thumbnails (CSS cannot pause an animated <img>).
+    const scale = Math.min(1, 512 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) throw new WhaleAssetFailure("decoder-unavailable");
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return await new Promise<Blob>((resolve, reject) => {
+      const timer = globalThis.setTimeout(() => reject(new WhaleAssetFailure("decode-failed")), OPERATION_TIMEOUT_MS);
+      try {
+        canvas.toBlob((preview) => {
+          globalThis.clearTimeout(timer);
+          if (preview && preview.type === "image/png") resolve(preview);
+          else reject(new WhaleAssetFailure("decode-failed"));
+        }, "image/png");
+      } catch {
+        globalThis.clearTimeout(timer);
+        reject(new WhaleAssetFailure("decode-failed"));
+      }
+    });
   } finally {
     bitmap.close();
   }

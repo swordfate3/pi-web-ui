@@ -14,7 +14,7 @@ import {
 
 const credential = { run_id: "a".repeat(32), token: "b".repeat(64) };
 const proof = (text: string) => createHmac("sha256", credential.token).update(text).digest("hex");
-type Request = typeof credential & { action: string; generation: string; port?: number };
+type Request = typeof credential & { action: string; generation: string; port?: number; sessionName?: string | null };
 
 async function registry(t: test.TestContext, reply: (request: Request, socket: net.Socket) => void) {
   const dir = mkdtempSync(path.join(tmpdir(), "pi-register-"));
@@ -65,6 +65,36 @@ test("register and unregister speak the existing capability protocol with the ac
   await lifecycle.stop();
   assert.equal(fixture.requests[1].action, "unregister");
   assert.equal(fixture.requests[1].generation, fixture.requests[0].generation);
+});
+
+test("registration renewals read the current display name, sanitize and bound it without rotating the route", async (t) => {
+  const fixture = await registry(t, (_request, socket) =>
+    socket.end('{"ok":true,"result":{"url":"https://gateway.example/"}}\n'),
+  );
+  const lifecycle = new SessionRegistration(credential, fixture.socketPath, { renewMs: 20 });
+  t.after(() => lifecycle.stop());
+  let name: unknown = "  Initial\nname  ";
+  await lifecycle.start(
+    43210,
+    () => {},
+    () => name,
+  );
+  assert.equal(fixture.requests[0].sessionName, "Initial name");
+  const generation = fixture.requests[0].generation;
+  for (const [value, expected] of [
+    ["Renamed 会话", "Renamed 会话"],
+    ["x".repeat(300), "x".repeat(256)],
+    [null, null],
+  ] as const) {
+    const before = fixture.requests.length;
+    name = value;
+    const deadline = Date.now() + 1000;
+    while (!fixture.requests.slice(before).some((req) => req.sessionName === expected)) {
+      assert.ok(Date.now() < deadline, "name renewal did not arrive");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  assert.ok(fixture.requests.every((request) => request.generation === generation));
 });
 
 test("identity requires a signed challenge and gateway generation proofs protect HTTP", async (t) => {

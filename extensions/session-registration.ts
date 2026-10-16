@@ -32,7 +32,12 @@ export class SessionRegistration {
     this.renewMs = options.renewMs ?? 15000;
   }
 
-  private request(action: "register" | "unregister", generation: string, port?: number): Promise<unknown> {
+  private request(
+    action: "register" | "unregister",
+    generation: string,
+    port?: number,
+    sessionName?: string | null,
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const client = net.createConnection(this.socketPath);
       let data = Buffer.alloc(0);
@@ -51,7 +56,7 @@ export class SessionRegistration {
       client.once("close", () => finish(new Error("Pi Web registration unavailable")));
       client.once("connect", () =>
         client.write(
-          `${JSON.stringify({ action, ...this.credential, generation, ...(port === undefined ? {} : { port }) })}\n`,
+          `${JSON.stringify({ action, ...this.credential, generation, ...(port === undefined ? {} : { port, sessionName }) })}\n`,
         ),
       );
       client.on("data", (chunk: Buffer) => {
@@ -77,14 +82,27 @@ export class SessionRegistration {
     });
   }
 
-  async start(port: number, onUrl: (url: string | null) => void): Promise<void> {
+  async start(
+    port: number,
+    onUrl: (url: string | null) => void,
+    getSessionName: () => unknown = () => null,
+  ): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     const epoch = ++this.epoch;
     this.generation = randomBytes(16).toString("hex");
     const refresh = async () => {
       if (epoch !== this.epoch || !this.generation) return;
       try {
-        const reply = (await this.request("register", this.generation, port)) as { url?: unknown };
+        const name = getSessionName();
+        // Display-only metadata, never a route/capability identity or prompt excerpt.
+        const sessionName =
+          typeof name === "string"
+            ? name
+                .replace(/\p{Cc}/gu, " ")
+                .trim()
+                .slice(0, 256) || null
+            : null;
+        const reply = (await this.request("register", this.generation, port, sessionName)) as { url?: unknown };
         const url = validatedPublicUrl(reply?.url);
         if (epoch === this.epoch) onUrl(url);
       } catch (error) {

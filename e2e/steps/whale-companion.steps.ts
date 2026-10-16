@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { type BrowserContext, expect, type Page } from "@playwright/test";
 import { createBdd } from "playwright-bdd";
+import { whaleGif } from "../fixtures/whale-gif";
 import { type PiWebUiHarness, startPiWebUi } from "../harness/pi-process";
 
 const { When, Then, After } = createBdd();
@@ -382,6 +384,161 @@ Then("我验证缩放边界和拖动途中会话切换", async () => {
   expect(moved.x).toBeLessThan(before.x);
   await p.reload();
   await expect.poll(async () => (await p.getByTestId("whale-pet").boundingBox())?.x).toBeCloseTo(moved.x, 0);
+});
+
+async function blobMime(p: Page, image: import("@playwright/test").Locator): Promise<string> {
+  const source = await image.getAttribute("src");
+  if (!source) throw new Error("Whale artwork image has no source");
+  return p.evaluate(async (url) => (await (await fetch(url)).blob()).type, source);
+}
+
+async function storedIdleBytes(p: Page): Promise<Uint8Array> {
+  const bytes = await p.evaluate(
+    () =>
+      new Promise<number[]>((resolve, reject) => {
+        const request = indexedDB.open("pi-web-ui-whale-assets", 1);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          const database = request.result;
+          const transaction = database.transaction("assets", "readonly");
+          const get = transaction.objectStore("assets").get("idle");
+          get.onerror = () => reject(get.error);
+          get.onsuccess = async () => {
+            try {
+              const blob = get.result as Blob | undefined;
+              if (!blob) throw new Error("Idle artwork was not persisted");
+              const content = Array.from(new Uint8Array(await blob.arrayBuffer()));
+              resolve(content);
+            } catch (error) {
+              reject(error);
+            } finally {
+              database.close();
+            }
+          };
+        };
+      }),
+  );
+  return Uint8Array.from(bytes);
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function nativeImageHash(image: import("@playwright/test").Locator): Promise<string> {
+  // Screenshot the rendered <img> itself: Canvas drawImage would only expose an animated image's first frame.
+  return sha256(await image.screenshot());
+}
+
+async function expectAnimatedGif(image: import("@playwright/test").Locator) {
+  await expect(image).toBeVisible();
+  await expect.poll(() => blobMime(current(), image)).toBe("image/gif");
+  await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBe(16);
+}
+
+Then("我验证循环 GIF 播放、减弱动画和本地持久化", async () => {
+  const p = current();
+  expect(usageRequests).toBe(0);
+  expect(uploadRequests).toBe(0);
+  const expectedDigest = sha256(whaleGif);
+  const settings = () => p.getByRole("region", { name: "Local whale artwork" });
+  const thumbnail = () => settings().locator("img").first();
+  const image = () => p.getByTestId("whale-pet").locator("img");
+  const reduceCheckbox = () => p.getByRole("checkbox", { name: /Reduce companion animation/ });
+
+  await p.getByTestId("open-settings").click();
+  await p.getByTestId("whale-asset-idle").setInputFiles({
+    name: "synthetic-two-frame.gif",
+    mimeType: "image/gif",
+    buffer: whaleGif,
+  });
+  await expect(p.getByTestId("whale-assets-status")).toContainText(/saved locally|saved|persistent|browser/i);
+  await expect(thumbnail()).toBeVisible();
+  await expect.poll(() => blobMime(p, thumbnail())).toBe("image/png");
+  const persisted = await storedIdleBytes(p);
+  expect(sha256(persisted)).toBe(expectedDigest);
+  await p.getByRole("button", { name: "Close dialog", exact: true }).last().click();
+  await expectAnimatedGif(image());
+  expect(sha256(await storedIdleBytes(p))).toBe(expectedDigest);
+
+  // The image's native rendering changes between red/blue GIF frames (no Canvas readback).
+  const initialFrameHash = await nativeImageHash(image());
+  await expect
+    .poll(
+      async () => {
+        await p.waitForTimeout(100);
+        return nativeImageHash(image());
+      },
+      { timeout: 5_000 },
+    )
+    .not.toBe(initialFrameHash);
+
+  // System reduced motion shows a static PNG, even if the user's own preference is off.
+  await p.emulateMedia({ reducedMotion: "reduce" });
+  await expect.poll(() => blobMime(p, image())).toBe("image/png");
+  const systemPreviewHash = await nativeImageHash(image());
+  await p.waitForTimeout(300);
+  expect(await nativeImageHash(image())).toBe(systemPreviewHash);
+  expect(sha256(await storedIdleBytes(p))).toBe(expectedDigest);
+  await p.getByTestId("open-settings").click();
+  await expect(reduceCheckbox()).not.toBeChecked();
+  await reduceCheckbox().check();
+  await expect(reduceCheckbox()).toBeChecked();
+  await expect.poll(() => blobMime(p, thumbnail())).toBe("image/png");
+  await reduceCheckbox().uncheck();
+  await expect(reduceCheckbox()).not.toBeChecked();
+  await expect.poll(() => blobMime(p, thumbnail())).toBe("image/png");
+  await p.getByRole("button", { name: "Close dialog", exact: true }).last().click();
+  await expect.poll(() => blobMime(p, image())).toBe("image/png");
+  expect(sha256(await storedIdleBytes(p))).toBe(expectedDigest);
+  await p.emulateMedia({ reducedMotion: "no-preference" });
+  await expectAnimatedGif(image());
+
+  // The user's setting alone has the same display-only effect and does not rewrite IndexedDB.
+  await p.getByTestId("open-settings").click();
+  await reduceCheckbox().check();
+  await expect.poll(() => blobMime(p, thumbnail())).toBe("image/png");
+  await p.getByRole("button", { name: "Close dialog", exact: true }).last().click();
+  await expect.poll(() => blobMime(p, image())).toBe("image/png");
+  expect(sha256(await storedIdleBytes(p))).toBe(expectedDigest);
+  await p.getByTestId("open-settings").click();
+  await reduceCheckbox().uncheck();
+  await p.getByRole("button", { name: "Close dialog", exact: true }).last().click();
+  await expectAnimatedGif(image());
+  expect(sha256(await storedIdleBytes(p))).toBe(expectedDigest);
+
+  // A malformed GIF and a real GIF declared as PNG both fail without replacing the saved original.
+  await p.getByTestId("open-settings").click();
+  const input = p.getByTestId("whale-asset-idle");
+  await input.setInputFiles({
+    name: "broken.gif",
+    mimeType: "image/gif",
+    buffer: Buffer.from([...Buffer.from("GIF89a"), 16, 0, 16, 0, 0, 0, 0]),
+  });
+  await expect(p.getByRole("alert")).toContainText(/GIF|image|file|format|invalid|unsupported|decode/i);
+  await input.setInputFiles({ name: "gif-declared-png.png", mimeType: "image/png", buffer: whaleGif });
+  await expect(p.getByRole("alert")).toContainText(/file type does not match/i);
+  expect(sha256(await storedIdleBytes(p))).toBe(expectedDigest);
+  await expect.poll(() => blobMime(p, thumbnail())).toBe("image/png");
+  await p.getByRole("button", { name: "Close dialog", exact: true }).last().click();
+  await expectAnimatedGif(image());
+  expect(sha256(await storedIdleBytes(p))).toBe(expectedDigest);
+
+  await p.reload();
+  await expectAnimatedGif(image());
+  expect(sha256(await storedIdleBytes(p))).toBe(expectedDigest);
+  const restoredFrameHash = await nativeImageHash(image());
+  await expect
+    .poll(
+      async () => {
+        await p.waitForTimeout(100);
+        return nativeImageHash(image());
+      },
+      { timeout: 5_000 },
+    )
+    .not.toBe(restoredFrameHash);
+  expect(usageRequests).toBe(0);
+  expect(uploadRequests).toBe(0);
 });
 
 Then("我验证素材恢复竞态与部分持久化失败警告", async () => {

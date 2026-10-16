@@ -335,6 +335,18 @@
 - 262 默认单测（261通过／1可选GiB跳过）、68完整 Chromium、最终9定向与离线包2场景、16真实Pi后端、构建／hash／补充types通过。独立Browser1440×900／390×844截图直接查看，临时服务已停。完整证据、验证时点与未测边界见[验证报告](validation/transport-limits.md)。
 - 限定快照审查不等于全量diff审计；旧mirror adapter严格类型问题不在本轮修复范围；未知超大事件／fork或files响应仍fail closed。当前未提交、推送、安装或重载用户实例。
 
+## 25. 鲸鱼娘本地 GIF 与静态首帧
+
+- 本地槽允许 GIF87a/GIF89a，仍限制2 MiB／2048像素、校验magic／MIME／逻辑尺寸／实际解码。IndexedDB与普通src保留原Blob，不上传不调用模型，旧PNG/WebP兼容。
+- 新增仅本页静态PNG首帧，设置缩略图始终静态；用户或系统减少动画时宠物切首帧，关闭后恢复原GIF。双URL资源释放、hydration／导入队列、temporary槽不变；解码截止及迟到bitmap清理防卡死。
+- 265默认单测（264通过／1条件跳过）、前端构建／hash／补充types、68既有Chromium及新GIF专项1/1（分两轮）、离线pack六项鲸鱼6/6通过；GIF原帧差／IDB哈希／motion双向及其他证据见[GIF验证](validation/whale-gif.md)。独立Browser实导入本地idle.gif，在桌面／手机及系统reduce截图直接查看，临时服务已停。本轮未提交、推送、安装或reload。
+
+## 26. Hub 卡片以会话名字替代随机 ID
+
+- 保留项目／文件夹标签，第二行由generation前缀改为Pi会话名字，未命名fallback；搜索匹配名字和标签。登记每15秒读取最新名字，Hub每5秒刷新，改名不改变路由或since。
+- 可选sessionName登记字段兼容旧客户端，规范控制字符／256长度上限；API显式投影、浏览器textContent安全显示。沿用latestCtx生命周期与原授权证明，不读聊天正文，不修改凭据。
+- 专项26/26、默认267单测（266通过／1条件跳过）、最终Hub5＋鲸鱼6共11 Chromium、build／hash／补充types通过；只读限定审查无P2+，桌面／手机及长名HTML样式文本截图直接查看，自有临时服务停止。见[验证报告](validation/hub-session-names.md)。保留未发布GIF改动，本轮无提交、推送、安装或运行实例重启。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。

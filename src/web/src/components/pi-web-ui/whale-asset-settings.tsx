@@ -17,13 +17,13 @@ const slots: Record<WhaleAssetSlot, { en: string; "zh-CN": string }> = {
 
 const errorMessages: Record<WhaleAssetErrorCode, { en: string; "zh-CN": string }> = {
   "unsupported-file": {
-    en: "Choose a PNG or WebP image.",
-    "zh-CN": "请选择 PNG 或 WebP 图片。",
+    en: "Choose a PNG, WebP or GIF image.",
+    "zh-CN": "请选择 PNG、WebP 或 GIF 图片。",
   },
   "file-too-large": { en: "Each image must be no larger than 2 MiB.", "zh-CN": "每张图片不能超过 2 MiB。" },
   "invalid-signature": {
-    en: "The file is not a valid PNG or WebP image.",
-    "zh-CN": "文件内容不是有效的 PNG 或 WebP 图片。",
+    en: "The file is not a valid PNG, WebP or GIF image.",
+    "zh-CN": "文件内容不是有效的 PNG、WebP 或 GIF 图片。",
   },
   "mime-mismatch": { en: "The file type does not match its image data.", "zh-CN": "文件类型与图片内容不匹配。" },
   "invalid-dimensions": {
@@ -75,18 +75,18 @@ export function WhaleAssetSettings({ assets }: { assets: WhaleAssetsState }) {
       <h4 className="font-medium text-sm">{zh ? "本地鲸鱼娘素材" : "Local whale artwork"}</h4>
       <p className="text-muted-foreground text-xs">
         {zh
-          ? "仅 PNG/WebP，每张不超过 2 MiB、宽高不超过 2048 像素。仅保存在此浏览器和当前站点设备；同源的不同 Hub 路径共享，不随 Pi 会话或模型同步，也不会上传。可从下载目录「02桌宠」选择 idle-cute、thinking、tool、success、headpat 对应图片；只导入待机图即可，其他状态会回退到待机图。"
-          : "PNG/WebP only, up to 2 MiB and 2048 × 2048 pixels each. Stored only in this browser on this device: paths on the same origin share assets. Nothing is synced with Pi or a model, or uploaded. Choose the matching idle-cute, thinking, tool, success, or headpat artwork from the downloaded “02桌宠” folder. Idle is enough; other states fall back to idle."}
+          ? "支持 PNG/WebP/GIF，每张不超过 2 MiB、宽高不超过 2048 像素。GIF 保留原动画；减少动画时显示静态首帧，下方缩略图始终静态。仅保存在此浏览器和当前站点设备；同源的不同 Hub 路径共享，不随 Pi 会话或模型同步，也不会上传。静态素材可选「02桌宠」，动画可选「04动态GIF」中的 idle.gif 等。只导入待机图即可，其他状态会回退到待机图。"
+          : "PNG/WebP/GIF, up to 2 MiB and 2048 × 2048 pixels each. GIFs keep their animation; reduced motion uses a still first frame. Thumbnails below are always still. Stored only in this browser on this device: paths on the same origin share assets. Nothing is synced with Pi or a model, or uploaded. Choose still artwork from “02桌宠” or animations such as idle.gif from “04动态GIF”. Idle is enough; other states fall back to idle."}
       </p>
       <div className="grid gap-3 sm:grid-cols-2">
         {WHALE_ASSET_SLOTS.map((slot) => (
           <div className="flex min-w-0 items-center gap-3" key={slot}>
-            {assets.images[slot] ? (
+            {assets.previewImages[slot] ? (
               <img
                 alt=""
                 aria-hidden="true"
                 className="h-12 w-12 shrink-0 rounded object-contain"
-                src={assets.images[slot]}
+                src={assets.previewImages[slot]}
               />
             ) : (
               <span aria-hidden="true" className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-muted">
@@ -96,7 +96,7 @@ export function WhaleAssetSettings({ assets }: { assets: WhaleAssetsState }) {
             <label className="min-w-0 text-sm">
               <span className="mb-1 block font-medium">{slots[slot][language]}</span>
               <input
-                accept="image/png,image/webp"
+                accept="image/png,image/webp,image/gif"
                 aria-label={zh ? `导入${slots[slot][language]}图片` : `Import ${slots[slot].en} image`}
                 className="block w-full text-xs file:mr-2 file:rounded file:border file:px-2 file:py-1"
                 data-testid={`whale-asset-${slot}`}

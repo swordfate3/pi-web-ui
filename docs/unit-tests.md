@@ -8,6 +8,16 @@ npm run test:unit
 
 This includes TypeScript frontend tests and `tests/*.test.mjs` prebuilt-distribution integrity tests. Production install/update lifecycle checks are separate: `node scripts/test-git-install.mjs`.
 
+Hub name metadata regressions live in `tests/session-registration.test.ts` and `tests/session-hub.test.ts`: current-name renewal, nullable/length/type guards, unchanged route identity and legacy registration. The real `session-hub.feature` additionally uses Pi `/name`, searches by the new name and verifies card labels and session isolation; see [Hub names validation](validation/hub-session-names.md).
+
+Whale local-artwork regressions:
+
+```sh
+node --import ./tests/register-ts.mjs --test tests/whale-assets.test.ts tests/whale-pet.test.ts
+```
+
+The asset unit tests validate PNG/WebP/GIF signatures, GIF MIME/logical dimensions, byte budget, decoded dimensions, still-preview scaling and late bitmap cleanup after a decode deadline. Decoder/canvas mocks are not proof of animation playback: the real Pi `whale-companion.feature` additionally imports a synthetic two-frame GIF, checks original IndexedDB bytes, native image frame changes, reload recovery and both system/user reduced-motion behavior. Third-party artwork is not included in fixtures or distribution.
+
 Large live transport and preview-budget regressions:
 
 ```sh

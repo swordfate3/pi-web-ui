@@ -337,6 +337,33 @@ test("a disconnected browser capability expires even when the Pi later registers
   assert.equal((await resolveHandoff(f.hub.url, token)).status, 410);
 });
 
+test("display names update on the same route, are bounded and nullable, and cannot become capability identities", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("Folder");
+  const list = async () => (await (await fetch(`${f.hub.url}api/sessions`)).json()).sessions;
+  const original = (await list())[0];
+  const renew = (sessionName: unknown) =>
+    exchange(f.hub.socketPath, {
+      action: "register",
+      ...a.credential,
+      generation: original.generation,
+      port: a.port,
+      sessionName,
+    });
+  assert.equal(original.sessionName, null);
+  assert.equal((await renew("<img src=x onerror=alert(1)> 会话")).ok, true);
+  let current = (await list())[0];
+  assert.equal(current.sessionName, "<img src=x onerror=alert(1)> 会话");
+  assert.equal(current.path, original.path);
+  assert.equal(current.label, "Folder");
+  for (const invalid of [123, {}, ["name"], "x".repeat(257)]) assert.equal((await renew(invalid)).ok, false);
+  assert.equal((await renew(null)).ok, true);
+  current = (await list())[0];
+  assert.equal(current.sessionName, null);
+  assert.equal(current.path, original.path);
+  assert.equal(current.since, original.since);
+});
+
 test("two separately authorized sessions route HTTP and remove only the stopped generation", async (t) => {
   const f = await fixture(t);
   const a = await f.backend("Project A");

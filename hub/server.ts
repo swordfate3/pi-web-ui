@@ -8,7 +8,14 @@ import { WebSocket, WebSocketServer } from "ws";
 import { type Grant, type HubConfig, privateDirectory, readGrant, readPrivateJson } from "./config.ts";
 import { portalCss, portalHtml, portalJs } from "./portal.ts";
 
-type Session = { grant: Grant; generation: string; port: number; expires: number; since: number };
+type Session = {
+  grant: Grant;
+  generation: string;
+  port: number;
+  expires: number;
+  since: number;
+  sessionName: string | null;
+};
 type Handoff = { grant: Grant; from: string; successor?: string; expires: number };
 const mac = (token: string, value: string) => createHmac("sha256", token).update(value).digest("hex");
 function equal(value: unknown, expected: string) {
@@ -222,6 +229,14 @@ async function startLockedHub(config: HubConfig) {
       Number(value.port) > 65535
     )
       throw new Error("Registration rejected");
+    if (
+      value.sessionName !== undefined &&
+      value.sessionName !== null &&
+      (typeof value.sessionName !== "string" || value.sessionName.length > 256)
+    )
+      throw new Error("Registration rejected");
+    const sessionName =
+      typeof value.sessionName === "string" ? value.sessionName.replace(/\p{Cc}/gu, " ").trim() || null : null;
     const port = Number(value.port);
     if (owner) {
       if (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port)
@@ -236,8 +251,18 @@ async function startLockedHub(config: HubConfig) {
       writeFileSync(ledger, JSON.stringify({ boot, run_id: grant.run_id }), { flag: "wx", mode: 0o600 });
     for (const other of sessions.values())
       if (other.grant.run_id === grant.run_id && other.generation !== generation) retire(other.generation);
-    if (session) session.expires = Date.now() + config.leaseMs;
-    else sessions.set(generation, { grant, generation, port, expires: Date.now() + config.leaseMs, since: Date.now() });
+    if (session) {
+      session.expires = Date.now() + config.leaseMs;
+      session.sessionName = sessionName;
+    } else
+      sessions.set(generation, {
+        grant,
+        generation,
+        port,
+        expires: Date.now() + config.leaseMs,
+        since: Date.now(),
+        sessionName,
+      });
     pruneHandoffs();
     for (const item of handoffs.values()) {
       if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor)
@@ -434,6 +459,7 @@ async function startLockedHub(config: HubConfig) {
           .filter((s): s is Session => Boolean(s))
           .map((s) => ({
             label: s.grant.label,
+            sessionName: s.sessionName,
             generation: s.generation,
             path: `/s/${s.generation}/`,
             since: s.since,

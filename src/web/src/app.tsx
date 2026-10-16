@@ -173,7 +173,6 @@ export function App() {
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const whaleAssets = useWhaleAssets();
   const [whalePositionResetKey, setWhalePositionResetKey] = useState(0);
   const [whaleMode, setWhaleMode] = useState<WhaleMode>(() => {
     const mode = readPreference("pi-web-ui-whale-mode");
@@ -182,6 +181,7 @@ export function App() {
   const [whaleReduceMotion, setWhaleReduceMotion] = useState(
     () => readPreference("pi-web-ui-whale-reduce-motion") === "true",
   );
+  const whaleAssets = useWhaleAssets(whaleReduceMotion);
   const changeWhaleMode = (mode: WhaleMode) => {
     setWhaleMode(mode);
     writePreference("pi-web-ui-whale-mode", mode);

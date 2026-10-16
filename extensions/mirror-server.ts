@@ -2845,18 +2845,22 @@ export default function (pi: ExtensionAPI) {
       );
       if (activeRegistration) {
         let unavailableNotified = false;
-        void activeRegistration.start(port, (url) => {
-          if (server !== activeServer || controller.signal.aborted) return;
-          const previousUrl = mirrorUrl;
-          mirrorUrl = url || SETTINGS.publicUrl || localUrl;
-          mirrorStatusBase = `pi-web-ui: ${mirrorUrl}${url ? "" : " • registration unavailable"}`;
-          updateMirrorStatus();
-          if (url && url !== previousUrl) latestCtx?.ui.notify(`pi-web-ui public: ${url}`, "info");
-          if (!url && !unavailableNotified) {
-            unavailableNotified = true;
-            latestCtx?.ui.notify("Pi Web registration unavailable; local Web is still running", "warning");
-          }
-        });
+        void activeRegistration.start(
+          port,
+          (url) => {
+            if (server !== activeServer || controller.signal.aborted) return;
+            const previousUrl = mirrorUrl;
+            mirrorUrl = url || SETTINGS.publicUrl || localUrl;
+            mirrorStatusBase = `pi-web-ui: ${mirrorUrl}${url ? "" : " • registration unavailable"}`;
+            updateMirrorStatus();
+            if (url && url !== previousUrl) latestCtx?.ui.notify(`pi-web-ui public: ${url}`, "info");
+            if (!url && !unavailableNotified) {
+              unavailableNotified = true;
+              latestCtx?.ui.notify("Pi Web registration unavailable; local Web is still running", "warning");
+            }
+          },
+          () => (latestCtx ? pi.getSessionName() : null),
+        );
       }
     };
 

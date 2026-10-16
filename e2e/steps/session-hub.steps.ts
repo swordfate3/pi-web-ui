@@ -59,6 +59,13 @@ Then("首页清晰显示两个会话并保存总管截图", async ({ $testInfo }
   await expect(page().locator(".card")).toHaveCount(2);
   await expect(page().getByRole("heading", { name: "所有会话，一个入口。" })).toBeVisible();
   await expect(page().getByText("● 总管已连接")).toBeVisible();
+  await expect(page().locator(".session-name")).toHaveText(["Pi Web UI E2E", "Pi Web UI E2E"]);
+  const api = await (await page().request.get(`${hub?.url}api/sessions`)).json();
+  for (const session of api.sessions)
+    expect((await page().locator(".card").allTextContents()).join("\n")).not.toContain(session.generation.slice(0, 8));
+  await page().getByRole("searchbox").fill("Pi Web UI E2E");
+  await expect(page().locator(".card")).toHaveCount(2);
+  await page().getByRole("searchbox").fill("");
   expect(await page().evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(errors).toEqual([]);
   const screenshot = $testInfo.outputPath(`hub-${screen}.png`);
@@ -80,7 +87,30 @@ Then("总管路由中的 Pi 可以收发真实测试消息", async () => {
   await page().getByTestId("submit-message").click();
   await expect(page().getByRole("log")).toContainText("你好，Pi Web UI 已收到消息。");
   expect(errors).toEqual([]);
+  await inputRenameAndCheckHubName();
 });
+
+async function inputRenameAndCheckHubName() {
+  const p = page();
+  const originalPath = new URL(p.url()).pathname;
+  await p.getByTestId("message-input").fill("/name Hub 命名测试 Beta");
+  await p.getByTestId("submit-message").click();
+  await expect(p.getByText("Hub 命名测试 Beta", { exact: true }).first()).toBeVisible();
+  await expect
+    .poll(
+      async () => {
+        const value = await (await p.request.get(`${hub?.url}api/sessions`)).json();
+        return value.sessions.find((session: { path: string }) => session.path === originalPath)?.sessionName;
+      },
+      { timeout: 25000 },
+    )
+    .toBe("Hub 命名测试 Beta");
+  await p.goto(`${hub?.url}sessions/`);
+  await p.getByRole("searchbox").fill("Hub 命名测试");
+  await expect(p.locator(".card")).toHaveCount(1);
+  await expect(p.locator(".session-name")).toHaveText("Hub 命名测试 Beta");
+  await expect(p.locator(".card h3")).toHaveText("移动端 Beta");
+}
 
 Then("新建和恢复会话自动跟随原 Pi 的新链接", async () => {
   const input = page().getByTestId("message-input");

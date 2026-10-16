@@ -17,7 +17,7 @@ Mirror Server remains a thin event transport. It may subscribe to known event so
 For WebSocket delivery, Pi Web UI preserves:
 
 - The original event/channel name.
-- The original event payload, unchanged except for JSON serialization.
+- The original event payload, except for explicit transport projections described below (JSON safety, redundant snapshots and oversized live frames).
 - The ordering in which Mirror Server observes events.
 
 The browser-side app owns feature-specific interpretation. For example, Workspace Artifacts are derived in the browser from `edit` / `write` tool events and session entries; Mirror Server does not emit an `artifact` event.
@@ -71,6 +71,20 @@ Mirror Server must not:
 - Derive display summaries.
 - Merge multiple extension events into one UI event.
 - Reach into extension internals such as raw managers.
+
+## Bounded live transport exception
+
+The application retains a **4 MiB UTF-8 JSON frame limit**, below the Hub's separate 16 MiB limit. Increasing these limits is not the large-session fix. Original Pi messages/session files are not mutated.
+
+`extensions/live-transport.ts` performs only named transport projections:
+
+- `message_update` text/thinking/toolcall deltas omit the duplicate cumulative `payload.message` and `assistantMessageEvent.partial`; the event name, delta, type, content index and other control fields are preserved.
+- `agent_end` omits `messages`; `turn_end` omits `message` and `toolResults`. These fields redundantly repeat previously observed messages/history. Their event names and remaining lifecycle fields are preserved, and the browser already retrieves bounded saved history at these boundaries.
+- Other payloads are unchanged. After serialization, an oversized allowlisted message/tool/turn/compaction event becomes an explicit `transport_omitted` control with `{sessionId,runtimeId,sourceEvent,bytes}`. It is **not** a fake successful source event, tool result or full-content preview. Unsupported/control events and oversized request responses retain fail-closed errors.
+
+The browser validates identity and omission metadata, displays one dismissible notice per scope, and schedules its existing bounded-history synchronization for terminal omissions. Intermediate omissions do not create per-token polling. Notice text does not claim an unsaved streamed message is already recoverable; full persisted data remains in the original session. Session/runtime changes clear the notice; date/cursor and late-response fences remain in effect.
+
+This exception intentionally narrows the earlier raw-payload promise to avoid repeatedly serializing and sending ever-growing duplicate snapshots. It does not add backend artifact/chat interpretation, remote model calls or arbitrary payload truncation. The final guard still serializes non-projected large fields before checking bytes; it is a wire limit, not an O(1)-memory or bounded-serialization-work guarantee.
 
 ## Event Discovery
 

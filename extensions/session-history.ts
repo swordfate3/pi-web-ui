@@ -1,3 +1,5 @@
+import { RECOVERABLE_LIVE_EVENTS } from "./live-transport.ts";
+
 export type HistoryRange = { from: number; to: number };
 export type HistoryQuery = HistoryRange & { before?: string };
 export type HistoryEntry = {
@@ -267,9 +269,29 @@ export function selectSavedSessions<T extends { modified: Date }>(sessions: T[],
   return { sessions: matching.slice(0, limit), total: matching.length, truncated: matching.length > limit };
 }
 
-export function guardHistoryFrame(serialized: string, envelope: unknown): string {
-  if (Buffer.byteLength(serialized) <= FRAME_BYTES) return serialized;
-  const data = envelope as { type?: string; id?: string } | null;
+export function guardHistoryFrame(
+  serialized: string,
+  envelope: unknown,
+  scope?: { sessionId?: string; runtimeId?: string },
+): string {
+  const bytes = Buffer.byteLength(serialized);
+  if (bytes <= FRAME_BYTES) return serialized;
+  const data = envelope as { type?: string; id?: string; event?: string } | null;
+  if (
+    data?.type === "event" &&
+    typeof data.event === "string" &&
+    RECOVERABLE_LIVE_EVENTS.has(data.event) &&
+    typeof scope?.sessionId === "string" &&
+    scope.sessionId.length <= 256 &&
+    typeof scope.runtimeId === "string" &&
+    scope.runtimeId.length <= 256
+  ) {
+    return JSON.stringify({
+      type: "event",
+      event: "transport_omitted",
+      payload: { sessionId: scope.sessionId, runtimeId: scope.runtimeId, sourceEvent: data.event, bytes },
+    });
+  }
   const error = "Web UI message exceeds the transport size limit. Use bounded history or the original session.";
   return JSON.stringify(
     data?.type === "res" && typeof data.id === "string" && data.id.length <= 512

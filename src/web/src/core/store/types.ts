@@ -67,6 +67,9 @@ export type SessionSlice = {
   loadingTreeEntryId: string | null;
   conversationSyncing: boolean;
   conversationSyncError: UiText | null;
+  transportNotice: UiText | null;
+  dismissTransportNotice: () => void;
+  applyTransportOmitted: (payload: Record<string, unknown>) => void;
   lastUsage: Usage | null;
   contextWindowSize: number;
   addSystemMessage: (text: UiText, tone?: SystemTone) => void;

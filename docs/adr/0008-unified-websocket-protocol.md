@@ -107,7 +107,7 @@ interface WsEvent {
 }
 ```
 
-This preserves ADR 0002's event forwarding principle — the `event` field is the event name and `payload` is the original payload unchanged.
+This preserves ADR 0002's thin-transport principle: the `event` field is the source name, except for the explicit scoped `transport_omitted` control for oversized live content. Delta cumulative snapshots and repeated agent/turn message bodies use the documented [bounded live transport projections](0002-web-ui-extension-event-protocol.md#bounded-live-transport-exception). Request responses are never silently truncated into success. Normal history/tree queries remain bounded and preserve exact navigation identities.
 
 Examples:
 ```json

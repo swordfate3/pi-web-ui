@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createSessionSlice } from "../src/web/src/core/store/session-slice.ts";
 import { dispatchPiEvent } from "../src/web/src/core/store/event-dispatch.ts";
+import { createSessionSlice } from "../src/web/src/core/store/session-slice.ts";
 import type { StateSyncPayload } from "../src/web/src/core/types.ts";
 
 const range = { from: 1_700_000_000_000, to: 1_700_086_400_000 };
@@ -32,6 +32,70 @@ function store() {
   });
   return state;
 }
+
+test("transport omission is scoped, deduplicates notices, and only terminal events schedule bounded recovery", () => {
+  const state = store();
+  const calls: unknown[] = [];
+  state.requestConversationSync = (options) => {
+    calls.push(options);
+  };
+  const payload = { sessionId: "s", runtimeId: "r", sourceEvent: "message_update", bytes: 5 * 1024 * 1024 };
+  const dispatch = (value: Record<string, unknown>) =>
+    dispatchPiEvent(state as never, { type: "event", event: "transport_omitted", payload: value });
+  for (const bad of [
+    { ...payload, sessionId: "old" },
+    { ...payload, runtimeId: "old" },
+    { ...payload, bytes: 1 },
+    { ...payload, sourceEvent: "extension_ui_request" },
+  ])
+    dispatch(bad);
+  assert.equal(state.transportNotice, null);
+  dispatch(payload);
+  dispatch(payload);
+  assert.ok(state.transportNotice);
+  assert.equal(calls.length, 0);
+  assert.equal(state.items.length, 0, "notices are not injected as fake Pi messages");
+  dispatch({ ...payload, sourceEvent: "tool_execution_end" });
+  assert.deepEqual(calls, [{ debounce: true }]);
+  state.applyStateSync({ sessionId: "s", runtimeId: "r", entries: [], treeNodes: [] });
+  assert.ok(state.transportNotice, "same scope history refresh retains the explicit notice");
+  state.dismissTransportNotice();
+  assert.equal(state.transportNotice, null);
+  dispatch(payload);
+  state.applyStateSync({ sessionId: "new", runtimeId: "r2", entries: [], treeNodes: [] });
+  assert.equal(state.transportNotice, null);
+});
+
+test("burst terminal omissions coalesce and a failed bounded recovery stays visible without automatic retry", async (t) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout, clearTimeout } });
+  t.after(() => {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  });
+  const state = store();
+  let calls = 0;
+  state.send = async () => {
+    calls++;
+    throw new Error("synthetic bounded recovery unavailable");
+  };
+  for (let i = 0; i < 20; i++)
+    state.applyTransportOmitted({
+      sessionId: "s",
+      runtimeId: "r",
+      sourceEvent: "tool_execution_end",
+      bytes: 5 * 1024 * 1024,
+    });
+  assert.ok(state.transportNotice);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(calls, 1);
+  assert.equal(state.conversationSyncError, "synthetic bounded recovery unavailable");
+  assert.equal(state.conversationSyncing, false);
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(calls, 1);
+  assert.ok(state.transportNotice);
+  state.clearConversationTimers();
+});
 
 test("history requests use numeric selected dates and page changes replace, never append", async () => {
   const state = store();

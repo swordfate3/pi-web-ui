@@ -1,5 +1,14 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "Large live content was omitted from Web transport. Bounded previews sync when saved; full data remains in the original session.":
+    "大型实时内容未通过网页传输，保存后将同步有界预览；完整数据仍保留在原始会话中。",
+  "Dismiss transport notice": "关闭传输提示",
+  "Git diff is too large for Web preview. Narrow the changes or inspect it locally.":
+    "Git 差异过大，无法在网页预览。请缩小变更范围或在本地查看。",
+  "Git diff preview is unavailable because an untracked file could not be read. Retry or inspect it locally.":
+    "未能读取某个未跟踪文件，无法提供完整差异预览。请重试或在本地查看。",
+  "File preview is too large for Web transport. Download the file instead.":
+    "文件预览过大，无法通过网页传输，请改为下载文件。",
   "Download this file?": "是否下载此文件？",
   "Save this project file to your device?": "是否将此项目文件下载到你的设备？",
   "Yes, download": "是，下载",

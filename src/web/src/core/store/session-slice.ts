@@ -112,6 +112,38 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
     loadingTreeEntryId: null,
     conversationSyncing: false,
     conversationSyncError: null,
+    transportNotice: null,
+    dismissTransportNotice: () => set({ transportNotice: null }),
+    applyTransportOmitted: (payload) => {
+      if (
+        payload.sessionId !== get().sessionId ||
+        payload.runtimeId !== get().runtimeId ||
+        !Number.isSafeInteger(payload.bytes) ||
+        (payload.bytes as number) <= 4 * 1024 * 1024 ||
+        ![
+          "message_start",
+          "message_update",
+          "message_end",
+          "tool_execution_start",
+          "tool_execution_update",
+          "tool_execution_end",
+          "turn_end",
+          "auto_compaction_end",
+        ].includes(String(payload.sourceEvent))
+      )
+        return;
+      set({
+        transportNotice: uiText(
+          "Large live content was omitted from Web transport. Bounded previews sync when saved; full data remains in the original session.",
+        ),
+      });
+      // Intermediate updates need no polling: turn_end/agent_end already sync.
+      // Terminal omissions recover once from persisted history using normal scope/date fences.
+      if (
+        ["message_end", "tool_execution_end", "turn_end", "auto_compaction_end"].includes(String(payload.sourceEvent))
+      )
+        void get().requestConversationSync({ debounce: true });
+    },
     lastUsage: null,
     contextWindowSize: 0,
 
@@ -134,6 +166,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
           historyLoading: false,
           historyError: null,
           conversationSyncing: false,
+          transportNotice: null,
           ...(sessionChanged
             ? {
                 historyRange: recentHistoryRange(),

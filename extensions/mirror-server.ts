@@ -26,6 +26,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { type ConnectionSettings, localWebUrl, resolveConnectionConfig } from "./connection-config.ts";
 import { listenWithFallback } from "./connection-listener.ts";
 import { attachmentDisposition, WorkspaceDownloads } from "./file-downloads.ts";
+import { projectLiveEvent } from "./live-transport.ts";
 import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
@@ -765,10 +766,16 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   // Helper: send to one client
   // ═══════════════════════════════════════
+  function serializeFrame(data: unknown) {
+    const projected = projectLiveEvent(data);
+    return guardHistoryFrame(stringifyForBrowser(projected), projected, {
+      sessionId: latestCtx?.sessionManager.getSessionId(),
+      runtimeId,
+    });
+  }
+
   function sendTo(ws: WritableSocket, data: unknown) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(guardHistoryFrame(stringifyForBrowser(data), data));
-    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(serializeFrame(data));
   }
 
   // ═══════════════════════════════════════
@@ -779,7 +786,7 @@ export default function (pi: ExtensionAPI) {
     for (const client of clients) {
       if (client.readyState === WebSocket.OPEN) {
         // No open clients means no serialization; otherwise serialize only once.
-        json ??= guardHistoryFrame(stringifyForBrowser(data), data);
+        json ??= serializeFrame(data);
         client.send(json);
       }
     }
@@ -2401,6 +2408,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   function getGitDiff(ctx: ExtensionContext | null, requestedPath?: string): GitDiffResult {
+    const maxResponseBytes = 3 * 1024 * 1024;
+    const responseSafetyMargin = 1024;
+    const tooLargeError = "Git diff is too large for Web preview. Narrow the changes or inspect it locally.";
     let workspaceDir = path.resolve(process.cwd());
     if (ctx) {
       try {
@@ -2433,7 +2443,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    const gitOptions = { cwd: gitRoot, encoding: "utf8" as const, maxBuffer: MAX_GIT_OUTPUT_BYTES };
+    const gitOptions = { cwd: gitRoot, encoding: "utf8" as const, maxBuffer: maxResponseBytes };
     const pathArgs = requestedRelativePath ? ["--", requestedRelativePath] : [];
     const outputs = new Map<string, string>();
     const commands: Array<[string, string[]]> = [
@@ -2445,11 +2455,19 @@ export default function (pi: ExtensionAPI) {
     ];
     for (const [name, args] of commands) {
       const result = spawnSync("git", args, gitOptions);
-      if (result.error) throw result.error;
+      if (result.error) {
+        if (
+          (name === "staged" || name === "unstaged" || name === "untracked") &&
+          (result.error as NodeJS.ErrnoException).code === "ENOBUFS"
+        )
+          throw new Error(tooLargeError);
+        throw result.error;
+      }
       if (result.status !== 0 && name !== "branch") {
         throw new Error(String(result.stderr || `git ${args.join(" ")} failed`).trim());
       }
-      outputs.set(name, typeof result.stdout === "string" ? result.stdout : "");
+      const output = typeof result.stdout === "string" ? result.stdout : "";
+      outputs.set(name, output);
     }
 
     const untrackedPaths = (outputs.get("untracked") || "")
@@ -2457,49 +2475,90 @@ export default function (pi: ExtensionAPI) {
       .filter(Boolean)
       .filter((relativePath) => !requestedRelativePath || relativePath === requestedRelativePath);
     const parts: string[] = [];
+    let diffJsonBytes = 0;
+    const jsonStringContentBytes = (value: string) => Buffer.byteLength(JSON.stringify(value)) - 2;
+    const addPart = (part: string) => {
+      const bytes = jsonStringContentBytes(part) + (parts.length ? 4 : 0);
+      if (diffJsonBytes + bytes > maxResponseBytes - responseSafetyMargin) throw new Error(tooLargeError);
+      parts.push(part);
+      diffJsonBytes += bytes;
+    };
     const staged = (outputs.get("staged") || "").trimEnd();
     const unstaged = (outputs.get("unstaged") || "").trimEnd();
 
-    if (staged) parts.push(`## Staged changes\n\n${staged}`);
-    if (unstaged) parts.push(`## Working tree changes\n\n${unstaged}`);
+    if (staged) addPart(`## Staged changes\n\n${staged}`);
+    if (unstaged) addPart(`## Working tree changes\n\n${unstaged}`);
     if (untrackedPaths.length) {
       const untrackedDiffs: string[] = [];
+      let untrackedJsonBytes = 0;
+      const untrackedHeading = "## Untracked files\n\n";
+      const assertUntrackedFits = (jsonBytes: number) => {
+        const total =
+          diffJsonBytes +
+          (parts.length ? 4 : 0) +
+          jsonStringContentBytes(untrackedHeading) +
+          untrackedJsonBytes +
+          untrackedDiffs.length * 4 +
+          jsonBytes;
+        if (total > maxResponseBytes - responseSafetyMargin) throw new Error(tooLargeError);
+      };
+      const addUntrackedDiff = (diff: string) => {
+        const jsonBytes = jsonStringContentBytes(diff);
+        assertUntrackedFits(jsonBytes);
+        untrackedDiffs.push(diff);
+        untrackedJsonBytes += jsonBytes;
+      };
       for (const relativePath of untrackedPaths) {
         const absolutePath = path.resolve(gitRoot, relativePath);
         try {
           const stat = fs.statSync(absolutePath);
           if (!stat.isFile()) continue;
           if (stat.size > MAX_FILE_CONTENT_BYTES) {
-            untrackedDiffs.push(`diff --git a/${relativePath} b/${relativePath}\nnew file mode 100644\n[large file]`);
+            addUntrackedDiff(`diff --git a/${relativePath} b/${relativePath}\nnew file mode 100644\n[large file]`);
             continue;
           }
           const content = fs.readFileSync(absolutePath, "utf8");
           if (content.includes("\0")) {
-            untrackedDiffs.push(`diff --git a/${relativePath} b/${relativePath}\nnew file mode 100644\n[binary file]`);
+            addUntrackedDiff(`diff --git a/${relativePath} b/${relativePath}\nnew file mode 100644\n[binary file]`);
             continue;
           }
           const lines = content.split(/\r?\n/);
           if (lines.at(-1) === "") lines.pop();
-          untrackedDiffs.push(
-            [
-              `diff --git a/${relativePath} b/${relativePath}`,
-              "new file mode 100644",
-              "--- /dev/null",
-              `+++ b/${relativePath}`,
-              `@@ -0,0 +1,${lines.length} @@`,
-              ...lines.map((line) => `+${line}`),
-            ].join("\n"),
+          // Account for JSON escaping before allocating all prefixed diff lines.
+          const header = [
+            `diff --git a/${relativePath} b/${relativePath}`,
+            "new file mode 100644",
+            "--- /dev/null",
+            `+++ b/${relativePath}`,
+            `@@ -0,0 +1,${lines.length} @@`,
+          ].join("\n");
+          let estimatedJsonBytes = jsonStringContentBytes(header);
+          if (lines.length) {
+            estimatedJsonBytes += 2;
+            for (const line of lines) estimatedJsonBytes += 1 + jsonStringContentBytes(line) + 2;
+            estimatedJsonBytes -= 2;
+          }
+          assertUntrackedFits(estimatedJsonBytes);
+          const diff = lines.length ? `${header}\n${lines.map((line) => `+${line}`).join("\n")}` : header;
+          addUntrackedDiff(diff);
+        } catch (error) {
+          if (error instanceof Error && error.message === tooLargeError) throw error;
+          throw new Error(
+            "Git diff preview is unavailable because an untracked file could not be read. Retry or inspect it locally.",
           );
-        } catch {}
+        }
       }
-      if (untrackedDiffs.length) parts.push(`## Untracked files\n\n${untrackedDiffs.join("\n\n")}`);
+      if (untrackedDiffs.length) addPart(`${untrackedHeading}${untrackedDiffs.join("\n\n")}`);
     }
 
-    return {
+    const result = {
       isRepo: true,
       branch: (outputs.get("branch") || outputs.get("head") || "").trim() || null,
       diff: parts.join("\n\n"),
     };
+    const responseBytes = Buffer.byteLength(JSON.stringify({ type: "res", id: "", ok: true, result }));
+    if (responseBytes > maxResponseBytes - responseSafetyMargin) throw new Error(tooLargeError);
+    return result;
   }
 
   function getFileContent(ctx: ExtensionContext | null, requestedPath: string): FileContentResult {
@@ -2591,16 +2650,20 @@ export default function (pi: ExtensionAPI) {
 
     const stat = fs.statSync(absolutePath);
     if (!stat.isFile()) throw new Error("Not a file");
-    if (stat.size > MAX_FILE_CONTENT_BYTES) throw new Error("File is too large to preview");
+    const tooLargeError = "File preview is too large for Web transport. Download the file instead.";
+    if (stat.size > MAX_FILE_CONTENT_BYTES) throw new Error(tooLargeError);
     const content = fs.readFileSync(absolutePath, "utf8");
     if (content.includes("\0")) throw new Error("Binary file cannot be previewed");
     const relativePath = path.relative(workspaceDir, absolutePath).replace(/\\/g, "/");
-    return {
+    const result = {
       path: relativePath || path.basename(absolutePath),
       name: path.basename(absolutePath),
       size: stat.size,
       content,
     };
+    if (Buffer.byteLength(JSON.stringify({ type: "res", id: "", ok: true, result })) > 3 * 1024 * 1024 - 1024)
+      throw new Error(tooLargeError);
+    return result;
   }
 
   function getFileList(dirPath: string) {

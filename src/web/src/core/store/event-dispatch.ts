@@ -15,6 +15,9 @@ export function dispatchPiEvent(store: PiWebUiStore, data: WsEvent) {
 
   const event = { type: data.event, ...payload } as RpcEvent;
   switch (event.type) {
+    case "transport_omitted":
+      store.applyTransportOmitted(payload);
+      break;
     case "agent_start":
       store.applyAgentStart();
       break;

@@ -8,6 +8,14 @@ npm run test:unit
 
 This includes TypeScript frontend tests and `tests/*.test.mjs` prebuilt-distribution integrity tests. Production install/update lifecycle checks are separate: `node scripts/test-git-install.mjs`.
 
+Large live transport and preview-budget regressions:
+
+```sh
+node --import ./tests/register-ts.mjs --test tests/live-transport.test.ts tests/history-store.test.ts tests/git-preview-budget.test.ts
+```
+
+These use synthetic JSON, an in-memory store, and an isolated temporary Git workspace/local mock-extension WebSocket. They do not read user session text. `transport-large.feature` separately runs real Pi with a faux provider over direct/Hub connections, checking >4 MiB tool arguments/results, original persisted JSONL/file integrity, bounded frame sizes, terminal synchronization and dismissible notice. See [validation and limitations](validation/transport-limits.md).
+
 Only session-tree tests:
 
 ```sh

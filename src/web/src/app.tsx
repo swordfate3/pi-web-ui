@@ -88,6 +88,8 @@ export function App() {
   const loadingTreeEntryId = usePiWebUiStore((state) => state.loadingTreeEntryId);
   const conversationSyncing = usePiWebUiStore((state) => state.conversationSyncing);
   const conversationSyncError = usePiWebUiStore((state) => state.conversationSyncError);
+  const transportNotice = usePiWebUiStore((state) => state.transportNotice);
+  const dismissTransportNotice = usePiWebUiStore((state) => state.dismissTransportNotice);
   const availableModels = usePiWebUiStore((state) => state.availableModels);
   const showThinking = usePiWebUiStore((state) => state.showThinking);
   const autoCompaction = usePiWebUiStore((state) => state.autoCompaction);
@@ -1271,6 +1273,23 @@ export function App() {
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
             <HistoryControls />
+            {transportNotice && (
+              <div
+                role="status"
+                data-testid="transport-notice"
+                className="flex shrink-0 items-start gap-2 border-b bg-muted/40 px-4 py-2 text-sm"
+              >
+                <p className="min-w-0 flex-1">{renderUiText(transportNotice)}</p>
+                <button
+                  type="button"
+                  aria-label={t("Dismiss transport notice")}
+                  onClick={dismissTransportNotice}
+                  className="shrink-0 rounded px-2"
+                >
+                  ×
+                </button>
+              </div>
+            )}
             <div className="relative min-h-0 flex-1">
               <Conversation className="h-full">
                 <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-4 py-8 sm:px-6">

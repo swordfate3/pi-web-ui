@@ -10,7 +10,9 @@ import fileUploadResponses from "./responses/file-upload.ts";
 import languageMarkdownResponses from "./responses/language-markdown.ts";
 import largeToolOutputResponses from "./responses/large-tool-output.ts";
 import toolFailureResponses from "./responses/tool-failure.ts";
+import transportLargeResponses from "./responses/transport-large.ts";
 import workspaceArtifactResponses from "./responses/workspace-artifact.ts";
+import { transportContent } from "./transport-data.ts";
 
 const responsesByName = {
   "chat-lifecycle": chatLifecycleResponses,
@@ -18,6 +20,7 @@ const responsesByName = {
   "daily-commands": dailyCommandsResponses,
   "language-markdown": languageMarkdownResponses,
   "large-tool-output": largeToolOutputResponses,
+  "transport-large": transportLargeResponses,
   "slash-commands": chatLifecycleResponses,
   "duplicate-artifact": duplicateArtifactResponses,
   "external-artifact": externalArtifactResponses,
@@ -37,7 +40,12 @@ export default function (pi: ExtensionAPI) {
     models: [{ id: "faux-1", name: "Faux E2E", reasoning: true }],
     // Large tool arguments are transport fixtures, not token-by-token stress.
     // Keep baseline and optimized runs on the same deterministic chunk size.
-    tokenSize: fixtureForChunking() === "large-tool-output" ? { min: 8192, max: 8192 } : { min: 64, max: 64 },
+    tokenSize:
+      fixtureForChunking() === "transport-large"
+        ? { min: 131072, max: 131072 }
+        : fixtureForChunking() === "large-tool-output"
+          ? { min: 8192, max: 8192 }
+          : { min: 64, max: 64 },
   });
   const model = faux.getModel();
   const fixtureName = process.env.PI_WEB_UI_E2E_FIXTURE || "chat-lifecycle";
@@ -57,11 +65,22 @@ export default function (pi: ExtensionAPI) {
       thinkingLevelMap: { xhigh: "xhigh", max: "max" },
       input: registeredModel.input,
       cost: registeredModel.cost,
-      contextWindow: fixtureForChunking() === "large-tool-output" ? 4_000_000 : registeredModel.contextWindow,
+      contextWindow: ["large-tool-output", "transport-large"].includes(fixtureForChunking() ?? "")
+        ? 4_000_000
+        : registeredModel.contextWindow,
       maxTokens: registeredModel.maxTokens,
       baseUrl: registeredModel.baseUrl,
     })),
   });
+
+  if (fixtureName === "transport-large") {
+    // Synthetic result middleware exercises real tool_execution/message events
+    // without invoking any provider or reading external data.
+    pi.on("tool_result", (event) => {
+      if (event.toolName === "write" && event.input.path === "transport-large.txt")
+        return { content: [{ type: "text", text: `TRANSPORT_RESULT_${transportContent}` }] };
+    });
+  }
 
   pi.on("session_shutdown", () => {
     faux.unregister();

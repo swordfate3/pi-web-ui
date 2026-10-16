@@ -21,7 +21,7 @@ Per `docs/adr/0001-pi-extension-output-policy.md`: never write to `stdout`/`stde
 
 ### Event forwarding — thin transport
 
-Per `docs/adr/0002-web-ui-extension-event-protocol.md`: Mirror Server forwards events unchanged. Never interpret extension payloads into Pi Web UI product concepts inside the extension. The browser owns feature interpretation.
+Per `docs/adr/0002-web-ui-extension-event-protocol.md`: Mirror Server forwards events without feature interpretation. Only its documented transport projections may remove duplicate cumulative snapshots or replace oversized known live content with a scoped explicit omission control; Pi source data is never mutated. Never interpret extension payloads into Pi Web UI product concepts inside the extension. The browser owns feature interpretation.
 
 ### Mandatory Skill Usage
 

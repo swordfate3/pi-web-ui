@@ -9,8 +9,10 @@ import {
 } from "@/components/ai-elements/message";
 import { cn } from "@/lib/utils";
 import { t, useLanguage } from "../../core/i18n";
+import type { MessageVersionGroup } from "../../core/message-versions";
 import type { ChatItem } from "../../core/types";
 import { ImagePreviewStrip } from "./image-preview-strip";
+import { MessageVersionPager } from "./message-version-pager";
 
 export function UserMessageView({
   actionsVisible,
@@ -18,12 +20,16 @@ export function UserMessageView({
   onBranch,
   onCopy,
   onEdit,
+  versionGroup,
+  onSwitchVersion,
 }: {
   actionsVisible?: boolean;
   item: ChatItem & { kind: "message"; role: "user" };
   onBranch?: (entryId: string) => Promise<void> | void;
   onCopy: (text: string) => Promise<void> | void;
   onEdit?: (entryId: string) => void;
+  versionGroup?: MessageVersionGroup;
+  onSwitchVersion?: (entryId: string, version: { userEntryId: string; targetEntryId: string | null }) => void;
 }) {
   useLanguage();
   const [copied, setCopied] = useState(false);
@@ -47,6 +53,7 @@ export function UserMessageView({
       <MessageActions
         className={cn("self-end flex-wrap opacity-100 transition-opacity", actionsVisible && "opacity-100")}
       >
+        <MessageVersionPager entryId={item.entryId} group={versionGroup} onSwitchVersion={onSwitchVersion} />
         {canCopy && (
           <MessageAction label={t("Copy message")} onClick={copyMessage} tooltip={t("Copy")}>
             {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}

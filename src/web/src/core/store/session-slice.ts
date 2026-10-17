@@ -89,8 +89,13 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
         if (sync.sessionId !== source.sessionId || (source.runtimeId && sync.runtimeId !== source.runtimeId)) return;
         get().applyStateSync(sync, { requested: true });
       } catch (error) {
-        if (generation === historyGeneration && sameIdentity(source))
-          set({ historyError: errorUiText(error, uiText("Could not load history")) });
+        if (generation === historyGeneration && sameIdentity(source)) {
+          if (before && error instanceof Error && error.message === "Unknown history cursor for this date range") {
+            // A branch switch may retire this page cursor, but an ordinary append
+            // leaves it valid. Fall back only when the server proves it is unknown.
+            void get().loadHistory(range);
+          } else set({ historyError: errorUiText(error, uiText("Could not load history")) });
+        }
       } finally {
         if (generation === historyGeneration && sameIdentity(source)) set({ historyLoading: false });
       }

@@ -545,5 +545,20 @@ export const messages = {
   "Open link": "打开链接",
   "Clipboard API not available": "剪贴板 API 不可用",
   "Failed to load screen stream": "加载屏幕流失败",
+  "Invalid message versions response": "消息版本响应格式无效。",
+  "Invalid message version switch response": "消息版本切换响应格式无效。",
+  "Switching versions switches the entire branch. Files are not rolled back and no model is requested.":
+    "切换版本会切换整条对话分支，不回滚文件，也不调用模型。",
+  "Previous message version": "上一个消息版本",
+  "Next message version": "下一个消息版本",
+  "Message versions": "消息版本",
+  "Wait for Pi to be ready and run /webui to switch message versions.":
+    "请等待 Pi 空闲，并运行 /webui 以切换消息版本。",
+  "Message version switch was not confirmed. Check the active branch before trying again.":
+    "消息版本切换未获确认。请先检查当前分支，不要直接重复切换。",
+  "Message versions are unavailable. Refresh the conversation to try again.":
+    "暂时无法读取消息版本。请刷新对话后重试。",
+  "Some message versions are not shown. Use Tree to explore other branches.":
+    "部分消息版本未显示，可通过 Tree 查看其他分支。",
 } as const;
 export type MessageKey = keyof typeof messages;

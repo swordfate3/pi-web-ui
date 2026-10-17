@@ -30,6 +30,8 @@ import { downloadExport } from "./core/export-download";
 import { copyText, isEditableTarget } from "./core/format";
 import { recentHistoryRange } from "./core/history-dates";
 import { t, useLanguage, workspaceUploadText } from "./core/i18n";
+import { parseMessageVersionSwitch, versionSwitchDeadline } from "./core/message-versions";
+import { loadMessageVersionHistory } from "./core/message-versions-scope";
 import { PiClient } from "./core/pi-client";
 import {
   canDispatchQueuedPrompt,
@@ -55,6 +57,7 @@ import type {
   SessionStatsResult,
 } from "./core/types";
 import { errorUiText, renderUiText, UiError, uiRelativeTime, uiText } from "./core/ui-text";
+import { useMessageVersions } from "./core/use-message-versions";
 import { useWhaleAssets } from "./core/whale-assets";
 import {
   MAX_WORKSPACE_UPLOAD_BYTES,
@@ -207,6 +210,8 @@ export function App() {
     draftVersion: number;
   } | null>(null);
   const treeNavigationScopeRef = useRef(`${sessionId ?? ""}\0${runtimeId ?? ""}`);
+  const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
+  const messageVersions = useMessageVersions(items, versionsRefreshKey);
 
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
@@ -1402,6 +1407,108 @@ export function App() {
     ],
   );
 
+  const switchMessageVersion = useCallback(
+    async (entryId: string, version: { userEntryId: string; targetEntryId: string | null }) => {
+      const current = usePiWebUiStore.getState();
+      const group = messageVersions.versions.get(entryId);
+      if (
+        !messageActionsEnabled ||
+        !current.sessionId ||
+        !current.runtimeId ||
+        current.connection !== "connected" ||
+        !current.advancedFeatures ||
+        current.chatStatus !== "ready" ||
+        current.conversationSyncing ||
+        current.historyLoading ||
+        current.leafId !== leafId ||
+        current.sessionId !== sessionId ||
+        current.runtimeId !== runtimeId ||
+        !version.targetEntryId ||
+        !group?.versions.some((v) => v.userEntryId === version.userEntryId && v.targetEntryId === version.targetEntryId)
+      )
+        return;
+      if (hasSelectedFiles || queuedMessages.length || uploadingAttachments || attachmentHandoff) {
+        window.alert(t("Send or clear your draft, queued messages and attachments before revising a message."));
+        return;
+      }
+      if (
+        draftTextRef.current.trim() &&
+        !window.confirm(t("Switch branches and keep the current draft? Files are not rolled back."))
+      )
+        return;
+      const operation = acquireTreeNavigation(entryId);
+      if (!operation) return;
+      const targetEntryId = version.targetEntryId;
+      const scope = { sessionId: current.sessionId, runtimeId: current.runtimeId };
+      const range = { ...current.historyRange };
+      const before = current.historyBefore;
+      const syncSelectedPage = async () => {
+        // Keep dates but start the new branch at its newest page. loadHistory
+        // increments historyGeneration, fencing all pre-switch cursor reads.
+        await versionSwitchDeadline(
+          loadMessageVersionHistory({ ...range, before }, usePiWebUiStore.getState(), () =>
+            navigationIsCurrent(operation),
+          ),
+        );
+      };
+      try {
+        const ack = parseMessageVersionSwitch(
+          await versionSwitchDeadline(
+            compactSend("switch_message_version", {
+              ...scope,
+              sourceLeafId: current.leafId,
+              entryId,
+              userEntryId: version.userEntryId,
+              targetEntryId,
+            }),
+          ),
+          { sessionId: current.sessionId, runtimeId: current.runtimeId, targetEntryId },
+        );
+        if ("cancelled" in ack || !navigationIsCurrent(operation)) return;
+        // Wait for the selected date range's newest page, not an old branch cursor.
+        pendingFocusEntryIdRef.current = version.userEntryId;
+        await syncSelectedPage();
+      } catch (err) {
+        if (navigationIsCurrent(operation)) {
+          setError(
+            errorUiText(
+              err,
+              uiText("Message version switch was not confirmed. Check the active branch before trying again."),
+            ),
+          );
+          // Read-only reconciliation only. A timeout is not permission to replay navigation.
+          try {
+            await syncSelectedPage();
+          } catch {
+            /* Keep the explicit unknown/failure notice. */
+          }
+        }
+      } finally {
+        if (treeNavigationRef.current?.token === operation.token) {
+          treeNavigationRef.current = null;
+          if (usePiWebUiStore.getState().loadingTreeEntryId === entryId) setLoadingTreeEntryId(null);
+          setVersionsRefreshKey((key) => key + 1);
+        }
+      }
+    },
+    [
+      messageVersions.versions,
+      messageActionsEnabled,
+      leafId,
+      sessionId,
+      runtimeId,
+      hasSelectedFiles,
+      queuedMessages.length,
+      uploadingAttachments,
+      attachmentHandoff,
+      acquireTreeNavigation,
+      navigationIsCurrent,
+      compactSend,
+      setError,
+      setLoadingTreeEntryId,
+    ],
+  );
+
   const continueBranch = useCallback(
     async (entryId: string) => {
       const current = usePiWebUiStore.getState();
@@ -1628,7 +1735,18 @@ export function App() {
             <div className="relative min-h-0 flex-1">
               <Conversation className="h-full">
                 <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-4 py-8 sm:px-6">
+                  {(messageVersions.unavailable || messageVersions.limited) && (
+                    <p role="status" className="text-center text-muted-foreground text-xs">
+                      {t(
+                        messageVersions.unavailable
+                          ? "Message versions are unavailable. Refresh the conversation to try again."
+                          : "Some message versions are not shown. Use Tree to explore other branches.",
+                      )}
+                    </p>
+                  )}
                   <ChatList
+                    versions={messageVersions.versions}
+                    onSwitchVersion={messageActionsEnabled && !conversationSyncing ? switchMessageVersion : undefined}
                     items={items}
                     highlightedEntryId={highlightedEntryId}
                     onBranch={messageActionsEnabled ? branchFromMessage : undefined}

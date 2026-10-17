@@ -29,6 +29,7 @@ import { listenWithFallback } from "./connection-listener.ts";
 import { attachmentDisposition, WorkspaceDownloads } from "./file-downloads.ts";
 import { projectLiveEvent } from "./live-transport.ts";
 import { matchesRevisionDispatch, resolveMessageRevision, revisionContent } from "./message-revision.ts";
+import { resolveMessageVersions } from "./message-versions.ts";
 import { startRuntimeControl, taintRuntimeInput } from "./runtime-control.ts";
 import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
@@ -1661,6 +1662,91 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function requireVersionScope(params: Record<string, unknown>) {
+    requireRevisionIdentity(params);
+    if (
+      (params.sourceLeafId !== null && typeof params.sourceLeafId !== "string") ||
+      params.sourceLeafId !== latestCtx?.sessionManager.getLeafId()
+    )
+      throw new Error("Session leaf changed. Request message versions again.");
+  }
+
+  function getMessageVersions(params: Record<string, unknown>) {
+    requireVersionScope(params);
+    if (!latestCtx) throw new Error("No context available");
+    return {
+      sessionId: params.sessionId,
+      runtimeId,
+      sourceLeafId: params.sourceLeafId,
+      ...resolveMessageVersions(
+        latestCtx.sessionManager.getEntries(),
+        params.entryIds,
+        latestCtx.sessionManager.getLeafId(),
+      ),
+    };
+  }
+
+  async function switchMessageVersion(params: Record<string, unknown>) {
+    requireVersionScope(params);
+    requireSessionAction("message version switching");
+    // handleRequest counts this mutation too. All earlier awaits must finish.
+    if (activeBrowserMutations > 1) throw new Error("Another browser mutation is still in progress.");
+    if (!latestCtx || !latestExecuteCtx) throw new Error("No command context available");
+    const resolved = resolveMessageVersions(
+      latestCtx.sessionManager.getEntries(),
+      [params.entryId],
+      latestCtx.sessionManager.getLeafId(),
+    );
+    const version = resolved.groups[0]?.versions.find((item) => item.userEntryId === params.userEntryId);
+    if (!version?.targetEntryId || version.targetEntryId !== params.targetEntryId)
+      throw new Error("Message version target changed or is unavailable. Request message versions again.");
+    const target = latestCtx.sessionManager.getEntry(version.targetEntryId);
+    if (!target || target.type === "custom_message" || (target.type === "message" && target.message.role === "user"))
+      throw new Error("Invalid message version target");
+    const targetId = target.id;
+    const ack = { switched: true, sessionId: params.sessionId, runtimeId, leafId: targetId };
+    if (latestCtx.sessionManager.getLeafId() === targetId) return ack;
+    const epoch = lifecycleEpoch;
+    const treeVersion = revisionTreeVersion;
+    const attempt = { cancelled: false };
+    revisionAttempt = attempt;
+    sessionReplacementPending = true;
+    try {
+      const result = await latestExecuteCtx.navigateTree(targetId, { summarize: false });
+      if (result.cancelled) return { cancelled: true };
+      // No captured command/event ctx survives the await. Only fresh latestCtx
+      // and a matching lifecycle/leaf can acknowledge the completed switch.
+      requireRevisionIdentity(params);
+      if (
+        epoch !== lifecycleEpoch ||
+        revisionAttempt !== attempt ||
+        attempt.cancelled ||
+        !latestCtx ||
+        revisionTreeVersion !== treeVersion + 1 ||
+        latestCtx.sessionManager.getLeafId() !== targetId ||
+        !latestCtx.isIdle() ||
+        latestCtx.hasPendingMessages()
+      )
+        throw new Error("Message version navigation was not confirmed");
+      return ack;
+    } catch {
+      throw new Error(
+        "Message version switch failed or its outcome is unknown. Check the session; do not automatically retry.",
+      );
+    } finally {
+      // Never clear a replacement lifecycle's lock or broadcast from stale ctx.
+      if (epoch === lifecycleEpoch && revisionAttempt === attempt) {
+        revisionAttempt = null;
+        sessionReplacementPending = false;
+        try {
+          if (runtimeActive && latestCtx) broadcast(buildStateSnapshot(latestCtx));
+        } catch {
+          // ACK depends on confirmed navigation, not delivery of a best-effort snapshot.
+        }
+      }
+    }
+  }
+
   // ═══════════════════════════════════════
   // Handle commands from browser clients
   // ═══════════════════════════════════════
@@ -2411,6 +2497,16 @@ export default function (pi: ExtensionAPI) {
           }
           acceptSessionAction(`/webui-fork-session ${action}${action === "fork" ? ` ${entryId}` : ""}`);
           sendTo(ws, success({ action, entryId }));
+          break;
+        }
+
+        case "get_message_versions": {
+          sendTo(ws, success(getMessageVersions(params)));
+          break;
+        }
+
+        case "switch_message_version": {
+          sendTo(ws, success(await switchMessageVersion(params)));
           break;
         }
 

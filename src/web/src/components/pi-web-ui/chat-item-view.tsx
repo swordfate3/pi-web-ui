@@ -5,10 +5,12 @@ import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-e
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput } from "@/components/ai-elements/tool";
 import { cn } from "@/lib/utils";
 import { t, useLanguage } from "../../core/i18n";
+import type { MessageVersionGroup } from "../../core/message-versions";
 import { formatToolSummary, isToolExpandable, isToolHistoryPreview } from "../../core/tool-summary";
 import type { ChatItem } from "../../core/types";
 import { renderUiText } from "../../core/ui-text";
 import { FileMessageResponse } from "./file-message-response";
+import { MessageVersionPager } from "./message-version-pager";
 
 export function ChatItemView({
   item,
@@ -16,12 +18,16 @@ export function ChatItemView({
   onRegenerate,
   onToggleTool,
   showThinking,
+  versionGroup,
+  onSwitchVersion,
 }: {
   item: ChatItem;
   onCopy: (text: string) => Promise<void> | void;
   onRegenerate?: (entryId: string) => void;
   onToggleTool: (id: string, open: boolean) => void;
   showThinking: boolean;
+  versionGroup?: MessageVersionGroup;
+  onSwitchVersion?: (entryId: string, version: { userEntryId: string; targetEntryId: string | null }) => void;
 }) {
   useLanguage();
   const [copied, setCopied] = useState(false);
@@ -110,8 +116,9 @@ export function ChatItemView({
           {item.text}
         </FileMessageResponse>
       </MessageContent>
-      {(canCopy || canRegenerate) && (
+      {(canCopy || canRegenerate || (versionGroup && versionGroup.total > 1)) && (
         <MessageActions className="self-start flex-wrap opacity-100 transition-opacity">
+          <MessageVersionPager entryId={item.entryId} group={versionGroup} onSwitchVersion={onSwitchVersion} />
           {canCopy && (
             <MessageAction label={t("Copy message")} onClick={copyMessage} tooltip={t("Copy")}>
               {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}

@@ -1,5 +1,7 @@
 # Unit and connection tests
 
+Saved message-version paging regressions: `tests/message-versions.test.ts` covers the complete raw graph resolver and mock WS navigation guards, `tests/message-versions-client.test.ts` validates bounded metadata/strict ACK/deadlines, and `tests/message-versions-scope.test.ts` exercises read scope checks and a real session slice with an old branch cursor read arriving after the new page. The real Pi `message-revision.feature` covers user/answer pager agreement, branch restoration including later dialogue, draft confirmation/cancellation, rapid duplicate clicks, refresh persistence and unchanged prompt/revision counts while navigating. See [message-version validation](validation/message-versions.md) for final results and evidence boundaries.
+
 Run all commands from the repository root with the supported Node 22.19+ (verified with Node 24). Full suite (tree, i18n, rendering/cache and sidebar logic):
 
 ```sh

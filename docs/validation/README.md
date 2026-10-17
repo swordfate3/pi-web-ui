@@ -2,6 +2,8 @@
 
 人工报告集中在此目录：
 
+- [消息版本翻页](message-versions.md)：问题／回答下 `‹ 2 / 2 ›` 切整条分支、完整原始关系索引、cursor 修复与 scope 防护；337 项单测（1 skip）、71 Chromium、离线 runtime 2/2、桌面／手机视觉，本地未发布。
+
 - [每轮编辑与重新生成](message-revision.md)：完整原问题、单次 preview、分支保留／切换、busy／unknown 防护与真实 Pi 桌面手机验证；本地未发布，最终证据及限制见报告。
 
 - [Hub 导航与即时改名](hub-navigation.md)：返回入口、草稿确认、加载反馈、卡片稳定与交接竞态修复；286单测（1条件跳过）、完整69 Chromium、离线Hub5/5及桌面／手机视觉，本地未发布。

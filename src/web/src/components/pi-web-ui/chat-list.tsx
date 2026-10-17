@@ -3,6 +3,7 @@ import { memo, useCallback } from "react";
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { cn } from "@/lib/utils";
 import { t, useLanguage } from "../../core/i18n";
+import type { MessageVersionGroup } from "../../core/message-versions";
 import type { ChatItem } from "../../core/types";
 import { ChatItemView } from "./chat-item-view";
 import { FileDownloadBoundary } from "./file-message-response";
@@ -18,9 +19,12 @@ type ChatListProps = {
   onToggleTool: (id: string, open: boolean) => void;
   registerItemElement: (item: ChatItem, node: HTMLElement | null) => void;
   showThinking: boolean;
+  versions?: ReadonlyMap<string, MessageVersionGroup>;
+  onSwitchVersion?: (entryId: string, version: { userEntryId: string; targetEntryId: string | null }) => void;
 };
 
-type ChatRowProps = Omit<ChatListProps, "items" | "highlightedEntryId"> & {
+type ChatRowProps = Omit<ChatListProps, "items" | "highlightedEntryId" | "versions"> & {
+  versionGroup?: MessageVersionGroup;
   item: ChatItem;
   highlighted: boolean;
 };
@@ -37,6 +41,8 @@ const ChatRow = memo(function ChatRow({
   onToggleTool,
   registerItemElement,
   showThinking,
+  versionGroup,
+  onSwitchVersion,
 }: ChatRowProps) {
   const register = useCallback(
     (node: HTMLDivElement | null) => registerItemElement(item, node),
@@ -59,6 +65,8 @@ const ChatRow = memo(function ChatRow({
           onBranch={item.entryId ? onBranch : undefined}
           onEdit={item.entryId ? onEdit : undefined}
           onCopy={onCopy}
+          versionGroup={versionGroup}
+          onSwitchVersion={onSwitchVersion}
         />
       ) : (
         <ChatItemView
@@ -67,13 +75,15 @@ const ChatRow = memo(function ChatRow({
           onRegenerate={item.entryId ? onRegenerate : undefined}
           onToggleTool={onToggleTool}
           showThinking={showThinking}
+          versionGroup={versionGroup}
+          onSwitchVersion={onSwitchVersion}
         />
       )}
     </div>
   );
 });
 
-export const ChatList = memo(function ChatList({ items, highlightedEntryId, ...props }: ChatListProps) {
+export const ChatList = memo(function ChatList({ items, highlightedEntryId, versions, ...props }: ChatListProps) {
   // The empty state subscribes here; each message subscribes independently, so memo
   // boundaries never freeze translated UI or translated system/error messages.
   useLanguage();
@@ -97,6 +107,8 @@ export const ChatList = memo(function ChatList({ items, highlightedEntryId, ...p
           )}
           item={item}
           key={item.id}
+          onSwitchVersion={props.onSwitchVersion}
+          versionGroup={item.entryId ? versions?.get(item.entryId) : undefined}
         />
       ))}
     </FileDownloadBoundary>

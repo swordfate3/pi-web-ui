@@ -11,7 +11,7 @@
 
 ## 可选：从手机应用已安装的 Pi 更新
 
-此功能开发在 `codex/pi-runtime-restart`，不代表既有部署已经升级。
+此功能随本仓库 `main` 分发；源码可用不代表既有部署已经升级或启用。
 
 ```text
 浏览器管理授权 → Hub → 门禁生命周期策略 → 容器内固定管理器
@@ -119,28 +119,33 @@ guard 是镜像中 root 所有、不可由共享卷替换的固定 Node preload�
 
 ## 本地快速开始
 
-### 从当前功能分支安装
+### 从 main 安装与更新
 
-本实现目前位于 `codex/portable-web-connection`，未合并 main，也未发布到
-上游 npm 包。在**运行 Pi 的同一环境**中安装；Pi 在 Docker 中时，以下命令
+本仓库 `main` 包含 Web 扩展和独立 Hub，未发布到上游 npm 包。
+在**运行 Pi 的同一环境**中安装；Pi 在 Docker 中时，以下命令
 应在对应容器终端执行，而不是宿主机的另一个 Pi 配置环境：
 
 ```bash
-pi install git:github.com/swordfate3/pi-web-ui@codex/portable-web-connection
+pi install git:github.com/swordfate3/pi-web-ui@main
 ```
 
-该分支已整合预构建发布改造：普通 Git 安装只需生产依赖，`prepare` 使用
+仓库已整合预构建发布改造：普通 Git 安装只需生产依赖，`prepare` 使用
 Node 核验随源码交付的网页资源，无需 `npm_config_include=dev`。
 后续更新同一来源可执行：
 
 ```bash
-pi update git:github.com/swordfate3/pi-web-ui@codex/portable-web-connection
+pi update git:github.com/swordfate3/pi-web-ui@main
 ```
 
+更新命令应与 Pi 中登记的来源一致：未带 `@main` 安装的来源，更新时也不带后缀。
+仍固定到旧功能分支的来源需要显式迁移到 `main`，不能靠更新旧分支获得新代码。
 如果之前启用了本地 release 或 npm 版，应检查 Pi 的 packages/extensions
 配置，只启用一份 Web 扩展；安装 Git 源不会自动替你停用另外的本地副本。
-更新后重新启动 Pi 最稳妥。拉取扩展不会自动启动总管、增加 Docker 挂载，
-也不会修改现有 WSL 服务或公网网关。保留旧服务时，新总管须另选空闲端口，
+更新后重新启动 Pi 最稳妥。拉取扩展不会自动更新或重启独立 Hub/Gate 容器、
+重建 Pi 容器、启用生命周期策略、启动总管或增加 Docker 挂载，
+也不会修改现有 WSL 服务或公网网关。通过镜像部署的 Hub 仍需单独部署包含
+新产物的镜像；运行管理还需完成上面的独立授权与受管启动器接入。
+保留旧服务时，新总管须另选空闲端口，
 并使用独立 runtime/state，不能与旧路由同时占用默认 16180。
 
 ### 启动总管与登记 Pi

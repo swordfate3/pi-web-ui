@@ -36,6 +36,8 @@ pi update git:github.com/swordfate3/pi-web-ui
 
 Then manually run `/reload`, `/webui` and refresh the browser. This update does not automatically reload an already-running Pi session. See [installation/release checks](docs/releasing.md) for the maintainer workflow.
 
+An extension update does not replace or restart a separately deployed Hub/Gate Docker container, recreate existing Pi containers, or enable managed restarts. Deploy the Hub image separately and complete the independent management authorization described in the [Hub guide](docs/hub.md) and [managed-restart operating contract](docs/managed-pi-restart.md). If your installed Git source pins an older feature branch, explicitly migrate that source to `main`; updating the old branch does not select `main`.
+
 The upstream version is also available from npm (it does not include this fork's unpublished changes):
 
 ```bash

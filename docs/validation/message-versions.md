@@ -54,4 +54,6 @@
 - 不提供每个 user 内任意 assistant 分叉的独立版本列表；此次按当前 edit/regenerate 所形成的 user siblings 分组。更细历史选择仍用 Tree。
 - 旧 Tree 的日期／节点预算不变；pager 关系来自全条目，但显示聊天仍是有界历史。非常大的分组省略，不保证无限版本 UI。
 - 未验证公网、实体手机、Safari/Firefox、真实付费 provider、所有第三方 hook 或所有异常长历史布局。本轮未重新跑全部独立后端 integration 文件；手动 Browser 使用隔离 faux Pi 合成数据，不是完整 Playwright／真实 Pi E2E。
-- 本次用户授权范围包含推送 `publish/main` 和更新本机 Git 安装包；不包含 Hub/pi-gate 部署或重启，也不包含自动 reload 当前 Pi。发布与安装完成状态应在下方追加准确 commit/ref 与 package prepare 结果。
+- 最终发布提交 `5dee430ee7eb03c920ac34c837de9164ed748464` 已推送至 `swordfate3/pi-web-ui` 的 `publish/main`，并核实远端 ref 与之相同。
+- Pi 管理的本机 Git 包 `/home/node/.pi/agent/git/github.com/swordfate3/pi-web-ui` 已经 `pi update git:github.com/swordfate3/pi-web-ui --no-approve` 更新；已核实安装 HEAD 相同、worktree clean，`npm run prepare` 再次通过。该路径在 `/home/node/.pi` 持久卷内。未 reload 当前运行的 Pi。
+- 未申请或执行 Hub/pi-gate 部署、Hub 重启，也未改动其他运行服务。本次授权只覆盖 Git 远端和本机包。

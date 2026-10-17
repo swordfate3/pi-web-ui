@@ -376,7 +376,7 @@
 
 - 问题和 AI 回答操作栏增加 `‹ 2 / 2 ›`，按原始用户 parent 分组，编辑与重答共用版本序号；翻页切整条已保存分支，问题、回答及后续对话同步切换，不生成模型请求、不回滚文件。原始 entries metadata 索引不依赖有界 Tree 预览，超预算整组省略提示。
 - strict ACK、session/runtime/source leaf、busy/异步 mutation、草稿/附件/队列及导航 token 保护；独立审查发现并修复旧分支 cursor 复用于新分支导致空页，保留日期但读新分支最新一页，旧 page generation 失效。
-- 原 `39176c9` 基线验证为337单测（336通过／1可选skip）、71/71完整源码Chromium、离线抽取包真实Pi2/2；仅代表旧树。合并到远端 `0e69509`（包含 Hub restart 改动）后，最终验证记录为415单测（414通过／1可选skip）、233文件静态检查0 error、build／dist hash／connection types及真实 Pi Git install/update/tarball/Hub lifecycle fixture通过；因缺少匹配 Chromium 未运行完整 Playwright E2E。合成 faux Pi 的桌面／手机 Browser 交互与视觉检查通过。独立只读复核检查最终 cursor 恢复逻辑未发现确认问题。见[验证报告](validation/message-versions.md)。
+- 原 `39176c9` 基线验证为337单测（336通过／1可选skip）、71/71完整源码Chromium、离线抽取包真实Pi2/2；仅代表旧树。合并到远端 `0e69509`（包含 Hub restart 改动）后，415单测（414通过／1可选skip）、233文件静态检查0 error、build／dist hash／connection types及真实 Pi Git install/update/tarball/Hub lifecycle fixture通过；因缺少匹配 Chromium 未运行完整 Playwright E2E。合成 faux Pi 的桌面／手机 Browser 交互与视觉检查通过。独立只读复核检查最终 cursor 恢复逻辑未发现确认问题。提交 `5dee430ee7eb03c920ac34c837de9164ed748464` 已推送 `publish/main`，Pi 管理的本机 Git 安装包已更新并复核 `prepare`；未重载当前 Pi、未部署或重启 Hub。见[验证报告](validation/message-versions.md)。
 
 ## 后续工作与已知限制
 

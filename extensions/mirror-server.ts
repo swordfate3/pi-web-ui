@@ -21,6 +21,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
   SessionManager,
+  VERSION,
 } from "@earendil-works/pi-coding-agent";
 import { WebSocket, WebSocketServer } from "ws";
 import { type ConnectionSettings, localWebUrl, resolveConnectionConfig } from "./connection-config.ts";
@@ -28,6 +29,7 @@ import { listenWithFallback } from "./connection-listener.ts";
 import { attachmentDisposition, WorkspaceDownloads } from "./file-downloads.ts";
 import { projectLiveEvent } from "./live-transport.ts";
 import { matchesRevisionDispatch, resolveMessageRevision, revisionContent } from "./message-revision.ts";
+import { startRuntimeControl, taintRuntimeInput } from "./runtime-control.ts";
 import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
@@ -358,6 +360,9 @@ export default function (pi: ExtensionAPI) {
   let revisionDispatchUnknown = false;
   // Keep pre-existing async browser mutations ineligible to race revision navigation.
   let activeBrowserMutations = 0;
+  let activeHttpMutations = 0;
+  let runtimeControl: Awaited<ReturnType<typeof startRuntimeControl>>;
+  let runtimeStopping = false;
   // Protocol: replacement acknowledgements mean accepted, never completed.
   // Resume completes on state_sync.sessionId === targetSessionId; reload keeps
   // that ID and completes only on a different state_sync.runtimeId. Both clear
@@ -390,6 +395,41 @@ export default function (pi: ExtensionAPI) {
   const fileDownloads = new WorkspaceDownloads();
   const workspaceUploads = new WorkspaceUploads();
   let activeExport: { controller: AbortController; done: Promise<unknown> } | null = null;
+
+  const runtimeMetadata = () =>
+    runtimeControl && latestCtx && runtimeActive
+      ? {
+          runtimeId,
+          sessionId: latestCtx.sessionManager.getSessionId(),
+          leafId: latestCtx.sessionManager.getLeafId(),
+          version: VERSION,
+          managed: true as const,
+        }
+      : undefined;
+
+  pi.on("input", (_event, ctx) => {
+    latestCtx = ctx;
+    if (runtimeStopping || runtimeControl?.prepared) {
+      ctx.ui.notify("Pi is preparing to restart. Nothing was sent; wait for reconnection.", "warning");
+      return { action: "handled" };
+    }
+    return { action: "continue" };
+  });
+  pi.on("user_bash", (_event, ctx) => {
+    latestCtx = ctx;
+    taintRuntimeInput();
+  });
+  for (const event of [
+    "session_before_switch",
+    "session_before_fork",
+    "session_before_tree",
+    "session_before_compact",
+  ] as const) {
+    pi.on(event, (_event, ctx) => {
+      latestCtx = ctx;
+      if (runtimeStopping || runtimeControl?.prepared) return { cancel: true };
+    });
+  }
 
   function clearSessionAction() {
     if (revisionDispatchTimer) clearTimeout(revisionDispatchTimer);
@@ -1264,6 +1304,39 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
     runtimeActive = true;
+    runtimeStopping = false;
+    if (!runtimeControl) {
+      try {
+        runtimeControl = await startRuntimeControl(process.env, () => {
+          const current = latestCtx;
+          if (!current || !runtimeActive) return null;
+          return {
+            run_id: process.env.PI_RUNTIME_RUN_ID ?? "",
+            runtime_id: runtimeId,
+            session_id: current.sessionManager.getSessionId(),
+            leaf_id: current.sessionManager.getLeafId(),
+            session_file: current.sessionManager.getSessionFile() ?? null,
+            cwd: current.cwd,
+            version: VERSION,
+            idle: current.isIdle(),
+            pending: current.hasPendingMessages(),
+            busy: !!(
+              sessionReplacementPending ||
+              revisionAttempt ||
+              revisionDispatchUnknown ||
+              activeExport ||
+              activeBrowserMutations ||
+              activeHttpMutations
+            ),
+            provider: current.model?.provider ?? null,
+            model: current.model?.id ?? null,
+            thinking: pi.getThinkingLevel(),
+          };
+        });
+      } catch {
+        latestCtx?.ui.notify("Managed Pi restart is unavailable; check the private runtime configuration.", "warning");
+      }
+    }
     lifecycleEpoch++;
     revisionAttempt = null;
     revisionPreviews = new WeakMap();
@@ -1614,6 +1687,11 @@ export default function (pi: ExtensionAPI) {
       !["abort", "health", "sync_request", "extension_ui_response"].includes(request.method);
     try {
       if (
+        (runtimeStopping || runtimeControl?.prepared) &&
+        (mutates || request.method === "abort" || request.method === "extension_ui_response")
+      )
+        throw new Error("Pi is preparing to restart. Wait for reconnection; nothing was sent.");
+      if (
         (revisionAttempt || revisionDispatchUnknown) &&
         !request.method.startsWith("get_") &&
         !["abort", "health", "sync_request", "extension_ui_response"].includes(request.method)
@@ -1696,6 +1774,7 @@ export default function (pi: ExtensionAPI) {
             break;
           }
           if (slashCommand && params.executePiCommand === true && images.length === 0) {
+            taintRuntimeInput();
             const registeredCommand = pi.getCommands().some((command) => command.name === commandName);
             if (!registeredCommand) {
               sendTo(ws, error(`Unknown Pi command: /${commandName}`));
@@ -1820,6 +1899,10 @@ export default function (pi: ExtensionAPI) {
               break;
             }
           }
+          // SDK command expansion also runs on the fallback (including while
+          // streaming). Its void API acknowledges before async handlers finish;
+          // the optional UI flag is not a command-completion safety boundary.
+          if (images.length === 0 && message.startsWith("/")) taintRuntimeInput();
           const commandContext = latestCtx;
           if (commandContext && !commandContext.isIdle()) {
             const behavior = typeof params.streamingBehavior === "string" ? params.streamingBehavior : "steer";
@@ -2399,16 +2482,28 @@ export default function (pi: ExtensionAPI) {
     urlPath = urlPath.split("?")[0];
 
     if (urlPath.startsWith("/api/uploads")) {
+      if (runtimeStopping || runtimeControl?.prepared) {
+        res.writeHead(409, { "Cache-Control": "no-store" }).end();
+        return;
+      }
       const scope = runtimeActive && latestCtx && !sessionReplacementPending ? sessionScope(latestCtx) : undefined;
+      activeHttpMutations++;
       void serveWorkspaceUpload(
         req,
         res,
         workspaceUploads,
         scope,
-        () => !!scope && !sessionReplacementPending && scopeIsCurrent(scope),
+        () =>
+          !!scope &&
+          !runtimeStopping &&
+          !runtimeControl?.prepared &&
+          !sessionReplacementPending &&
+          scopeIsCurrent(scope),
         SETTINGS.publicUrl ? new URL(SETTINGS.publicUrl).origin : `http://${req.headers.host}`,
         !!registration && typeof req.headers["x-pi-web-proof"] === "string",
-      );
+      ).finally(() => {
+        activeHttpMutations--;
+      });
       return;
     }
 
@@ -3082,6 +3177,7 @@ export default function (pi: ExtensionAPI) {
             }
           },
           () => (latestCtx ? pi.getSessionName() : null),
+          runtimeMetadata,
         );
       }
     };
@@ -3113,7 +3209,11 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   // Cleanup on shutdown
   // ═══════════════════════════════════════
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
+    runtimeStopping = true;
+    if (event.reason !== "quit" && runtimeControl?.prepared) taintRuntimeInput();
+    await runtimeControl?.close(event.reason === "quit");
+    runtimeControl = undefined;
     runtimeActive = false;
     lifecycleEpoch++;
     revisionAttempt = null;

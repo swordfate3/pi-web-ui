@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
 import path from "node:path";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import net, { isIP } from "node:net";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
@@ -88,8 +88,163 @@ function localWebUrl(host, port) {
 }
 var init_connection_config = __esmMin((() => {}));
 //#endregion
+//#region hub/lifecycle.ts
+function lifecycleConfig(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid lifecycle provider");
+	const v = value;
+	if (Object.keys(v).sort().join(",") !== "credentialFile,endpoint" || typeof v.endpoint !== "string" || typeof v.credentialFile !== "string" || !path.isAbsolute(v.credentialFile) || v.credentialFile.includes("\0")) throw new Error("Invalid lifecycle provider");
+	const endpoint = new URL(v.endpoint);
+	if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash || !endpoint.port) throw new Error("Invalid lifecycle provider");
+	return {
+		endpoint: endpoint.origin,
+		credentialFile: v.credentialFile
+	};
+}
+var hex$2, text$1, GateLifecycle;
+var init_lifecycle = __esmMin((() => {
+	init_config();
+	hex$2 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+	text$1 = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
+	GateLifecycle = class {
+		config;
+		constructor(config) {
+			this.config = lifecycleConfig(config);
+		}
+		async request(method, route, value) {
+			const credential = readPrivateJson(this.config.credentialFile);
+			if (!credential || typeof credential.token !== "string" || !/^[a-f0-9]{64}$/.test(credential.token)) throw new Error("Lifecycle provider unavailable");
+			const body = value ? JSON.stringify(value) : void 0;
+			return new Promise((resolve, reject) => {
+				let done = false;
+				const finish = (result) => {
+					if (done) return;
+					done = true;
+					clearTimeout(timer);
+					request.destroy();
+					if (result) resolve(result);
+					else reject(/* @__PURE__ */ new Error("Lifecycle provider rejected or unavailable"));
+				};
+				const request = http.request(new URL(route, this.config.endpoint), {
+					method,
+					agent: false,
+					headers: {
+						Authorization: `Bearer ${credential.token}`,
+						"Content-Type": "application/json",
+						...body ? { "Content-Length": Buffer.byteLength(body) } : {}
+					}
+				}, (response) => {
+					if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+						finish();
+						return;
+					}
+					let raw = Buffer.alloc(0);
+					response.on("data", (chunk) => {
+						raw = Buffer.concat([raw, chunk]);
+						if (raw.length > 16384) finish();
+					});
+					response.on("error", () => finish());
+					response.on("end", () => {
+						try {
+							const result = JSON.parse(raw.toString("utf8"));
+							if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error();
+							finish(result);
+						} catch {
+							finish();
+						}
+					});
+				});
+				const timer = setTimeout(() => finish(), 5e3);
+				request.on("error", () => finish());
+				request.end(body);
+			});
+		}
+		async target(runId) {
+			if (!hex$2(runId)) throw new Error("Invalid lifecycle identity");
+			const value = await this.request("GET", `/v1/pi-lifecycle/runs/${runId}`);
+			if (value.managed === false) return { managed: false };
+			if (value.managed !== true || value.run_id !== runId || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id) || !text$1(value.version) || typeof value.idle !== "boolean" || typeof value.pending !== "boolean" || typeof value.busy !== "boolean" || ![
+				"auto",
+				"manual",
+				"disabled"
+			].includes(value.mode)) throw new Error("Invalid lifecycle target");
+			return {
+				managed: true,
+				run_id: runId,
+				runtime_id: value.runtime_id,
+				session_id: value.session_id,
+				leaf_id: value.leaf_id,
+				version: value.version,
+				idle: value.idle,
+				pending: value.pending,
+				busy: value.busy,
+				mode: value.mode
+			};
+		}
+		job(value) {
+			if (!hex$2(value.id) || !hex$2(value.run_id) || typeof value.status !== "string" || ![
+				"pending",
+				"queued",
+				"running",
+				"succeeded",
+				"failed",
+				"recovery_required",
+				"rejected",
+				"stale"
+			].includes(value.status) || typeof value.stage !== "string" || !/^[a-z_]{1,64}$/.test(value.stage)) throw new Error("Invalid lifecycle result");
+			const result = {
+				id: value.id,
+				run_id: value.run_id,
+				status: value.status,
+				stage: value.stage
+			};
+			if (value.started_at !== void 0) {
+				if (!Number.isSafeInteger(value.started_at) || Number(value.started_at) <= 0 || Number(value.started_at) > Date.now() + 5e3) throw new Error("Invalid lifecycle start time");
+				result.started_at = Number(value.started_at);
+			} else if (value.status === "running" || value.status === "succeeded") throw new Error("Missing lifecycle start time");
+			for (const key of [
+				"runtime_id",
+				"session_id",
+				"old_runtime_id",
+				"new_runtime_id",
+				"old_version",
+				"expected_version",
+				"new_version"
+			]) if (value[key] !== void 0) {
+				if (!text$1(value[key])) throw new Error("Invalid lifecycle result");
+				result[key] = value[key];
+			}
+			if (value.leaf_id !== void 0) {
+				if (value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle result");
+				result.leaf_id = value.leaf_id;
+			}
+			return result;
+		}
+		async restart(value) {
+			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$2(value.run_id) || !hex$2(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
+			const result = this.job(await this.request("POST", "/v1/pi-lifecycle/restarts", value));
+			if (result.run_id !== value.run_id) throw new Error("Lifecycle target changed");
+			return result;
+		}
+		async operation(id) {
+			if (!hex$2(id)) throw new Error("Invalid lifecycle identity");
+			const job = this.job(await this.request("GET", `/v1/pi-lifecycle/restarts/${id}`));
+			if (job.id !== id) throw new Error("Lifecycle operation changed");
+			return job;
+		}
+	};
+}));
+//#endregion
 //#region hub/config.ts
-init_connection_config();
+var config_exports = /* @__PURE__ */ __exportAll({
+	initializeHub: () => initializeHub,
+	issueSession: () => issueSession,
+	managementConfig: () => managementConfig,
+	privateDirectory: () => privateDirectory,
+	readGrant: () => readGrant,
+	readHubConfig: () => readHubConfig,
+	readPrivateJson: () => readPrivateJson,
+	revokeSession: () => revokeSession
+});
 function privateDirectory(directory) {
 	mkdirSync(directory, {
 		recursive: true,
@@ -134,6 +289,8 @@ function readHubConfig(file) {
 	const publicUrl = value.publicUrl === void 0 ? void 0 : validatedPublicUrl(value.publicUrl);
 	if (publicUrl && new URL(publicUrl).pathname !== "/") throw new Error("Hub public URL must use the domain root");
 	if (process.platform === "win32") throw new Error("Bundled hub currently requires Unix IPC (Linux/macOS); standalone Pi Web still works");
+	const lifecycle = value.lifecycle === void 0 ? void 0 : lifecycleConfig(value.lifecycle);
+	const management = value.management === void 0 ? void 0 : managementConfig(value.management, port, publicUrl);
 	return {
 		stateDir,
 		runtimeDir,
@@ -141,7 +298,20 @@ function readHubConfig(file) {
 		host,
 		port,
 		leaseMs,
-		publicUrl
+		publicUrl,
+		...lifecycle ? { lifecycle } : {},
+		...management ? { management } : {}
+	};
+}
+function managementConfig(value, chatPort, chatPublicUrl) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid management configuration");
+	const v = value;
+	if (Object.keys(v).some((key) => !["port", "publicUrl"].includes(key)) || !Number.isInteger(v.port) || Number(v.port) < 0 || Number(v.port) > 65535 || v.port !== 0 && v.port === chatPort) throw new Error("Management requires a distinct port");
+	const publicUrl = v.publicUrl === void 0 ? void 0 : validatedPublicUrl(v.publicUrl);
+	if (publicUrl && (!chatPublicUrl || new URL(publicUrl).pathname !== "/" || new URL(publicUrl).origin === new URL(chatPublicUrl).origin)) throw new Error("Management requires a distinct canonical public origin");
+	return {
+		port: Number(v.port),
+		...publicUrl ? { publicUrl } : {}
 	};
 }
 function validHost(host) {
@@ -189,17 +359,196 @@ function revokeSession(config, runId) {
 		revoked: true
 	})}\n`, { mode: 384 });
 }
+var init_config = __esmMin((() => {
+	init_connection_config();
+	init_lifecycle();
+}));
+//#endregion
+//#region hub/management.ts
+init_config();
+var digest = (value) => createHash("sha256").update(value).digest("hex");
+var hex$1 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var equal$1 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+var stateFile = (config) => path.join(config.stateDir, "management.json");
+function readState(config) {
+	const file = stateFile(config);
+	if (!existsSync(file)) return void 0;
+	const value = readPrivateJson(file);
+	if (!hex$1(value.epoch, 64) || value.pairHash !== null && !hex$1(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
+	return value;
+}
+function saveState(config, value) {
+	privateDirectory(config.stateDir);
+	const temporary = path.join(config.stateDir, `.management-${randomBytes(12).toString("hex")}`);
+	const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 384);
+	try {
+		writeFileSync(fd, `${JSON.stringify(value)}\n`);
+	} finally {
+		closeSync(fd);
+	}
+	try {
+		renameSync(temporary, stateFile(config));
+	} finally {
+		if (existsSync(temporary)) unlinkSync(temporary);
+	}
+}
+/** Trusted CLI only: return a short-lived code to its administrator's terminal. */
+function issueManagementCode(config, now = Date.now()) {
+	const code = randomBytes(16).toString("hex");
+	const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
+	const expires = now + 6e5;
+	saveState(config, {
+		epoch,
+		pairHash: digest(code),
+		expires,
+		failures: 0
+	});
+	return {
+		code,
+		expiresAt: expires
+	};
+}
+function revokeManagement(config) {
+	saveState(config, {
+		epoch: randomBytes(32).toString("hex"),
+		pairHash: null,
+		expires: 0,
+		failures: 0
+	});
+}
+/** Additional management privilege, deliberately separate from gateway/list access. */
+var HubManagement = class {
+	sessions = /* @__PURE__ */ new Map();
+	config;
+	now;
+	secure;
+	cookieName;
+	constructor(config, now = Date.now) {
+		this.config = config;
+		this.now = now;
+		this.secure = config.management?.publicUrl?.startsWith("https:") ?? false;
+		this.cookieName = this.secure ? "__Host-pi-hub-management" : "pi_hub_management_local";
+	}
+	session(request) {
+		const values = (request.headers.cookie ?? "").split(";").map((item) => item.trim()).filter((item) => item.startsWith(`${this.cookieName}=`));
+		if (values.length !== 1) return void 0;
+		const token = values[0].slice(this.cookieName.length + 1);
+		if (!hex$1(token, 64)) return void 0;
+		const key = digest(token);
+		const session = this.sessions.get(key);
+		let state;
+		try {
+			state = readState(this.config);
+		} catch {
+			return;
+		}
+		if (!session || session.expires <= this.now() || !state || session.epoch !== state.epoch) {
+			this.sessions.delete(key);
+			return;
+		}
+		return {
+			key,
+			...session
+		};
+	}
+	status(request) {
+		const session = this.session(request);
+		return session ? {
+			authorized: true,
+			csrf: session.csrf,
+			expiresAt: session.expires
+		} : { authorized: false };
+	}
+	authorize(request, write = false) {
+		const session = this.session(request);
+		const csrf = request.headers["x-pi-hub-csrf"];
+		if (!session || write && (typeof csrf !== "string" || !hex$1(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Management authorization required");
+		return session;
+	}
+	revalidate(request, expected, write = false) {
+		const current = this.authorize(request, write);
+		if (current.key !== expected.key || current.epoch !== expected.epoch || current.csrf !== expected.csrf || current.expires !== expected.expires) throw new Error("Management authorization changed");
+	}
+	unlock(code) {
+		const state = readState(this.config);
+		if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10) throw new Error("Management unlock rejected");
+		if (!hex$1(code, 32) || !equal$1(digest(code), state.pairHash)) {
+			saveState(this.config, {
+				...state,
+				failures: state.failures + 1
+			});
+			throw new Error("Management unlock rejected");
+		}
+		saveState(this.config, {
+			...state,
+			pairHash: null,
+			expires: 0
+		});
+		for (const [key, value] of this.sessions) if (value.expires <= this.now()) this.sessions.delete(key);
+		if (this.sessions.size >= 64) throw new Error("Management unlock rejected");
+		const token = randomBytes(32).toString("hex");
+		const csrf = randomBytes(32).toString("hex");
+		const expires = this.now() + 18e5;
+		this.sessions.set(digest(token), {
+			epoch: state.epoch,
+			expires,
+			csrf
+		});
+		return {
+			csrf,
+			expiresAt: expires,
+			cookie: this.cookie(token, 1800)
+		};
+	}
+	logout(request) {
+		const session = this.authorize(request, true);
+		this.sessions.delete(session.key);
+		return this.cookie("", 0);
+	}
+	cookie(token, maxAge) {
+		return `${this.cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${this.secure ? "; Secure" : ""}`;
+	}
+};
+//#endregion
+//#region extensions/runtime-metadata.ts
+/** Display/identity metadata, never proof that a container is authorized for control. */
+function readRuntimeMetadata(value) {
+	if (value === void 0) return void 0;
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid runtime metadata");
+	const v = value;
+	const valid = (item) => typeof item === "string" && item.length > 0 && item.length <= 256 && !/\p{Cc}/u.test(item);
+	if (Object.keys(v).sort().join(",") !== "leafId,managed,runtimeId,sessionId,version" || v.managed !== true || !valid(v.runtimeId) || !valid(v.sessionId) || v.leafId !== null && !valid(v.leafId) || !valid(v.version)) throw new Error("Invalid runtime metadata");
+	return {
+		runtimeId: v.runtimeId,
+		sessionId: v.sessionId,
+		leafId: v.leafId,
+		version: v.version,
+		managed: true
+	};
+}
 //#endregion
 //#region hub/portal.ts
 var portalHtml = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pi · 会话总览</title><link rel="stylesheet" href="/hub.css"><script src="/hub.js" defer><\/script></head>
+<title>Pi · 会话总览</title><link rel="stylesheet" href="/hub.css"><script src="/hub-management.js" defer><\/script><script src="/hub.js" defer><\/script></head>
 <body><main><header><a class="brand" href="/sessions/" aria-label="Pi 会话首页"><span class="logo">π</span> Pi Web <span class="tag">HUB</span></a><span id="health" role="status">正在连接</span></header>
 <section class="intro"><span class="eyebrow">你的工作，随时接续</span><h1>所有会话，一个入口。</h1><p>选择正在运行的 Pi，在手机与电脑之间继续工作。</p></section>
+<details class="management"><summary>运行管理 <span id="management-status" role="status">正在检查能力</span></summary><p>只重启选中的 Pi 进程，加载已安装的更新；不重新创建容器、不下载更新。仅支持已保存且空闲的会话。</p><p id="management-help">管理员在 Hub 的可信终端运行 <code>pi-web-hub pair --config 配置文件</code>，生成一次性管理码（10 分钟有效）。网页登录不等于重启授权。</p><form id="management-unlock"><label for="management-code">一次性管理码</label><div class="controls"><input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="输入 32 位管理码" required><button type="submit">解锁管理</button></div></form><button id="management-logout" type="button" hidden>锁定管理</button><p id="management-notice" role="status" aria-live="polite"></p><div id="management-results" aria-live="polite"></div></details>
 <section class="toolbar" aria-label="会话操作"><div><h2>在线会话 <span id="count">0</span></h2><p id="updated">等待登记</p></div><div class="controls"><label><span class="sr-only">搜索会话</span><input id="search" type="search" placeholder="搜索项目或会话…"></label><button id="refresh" type="button">刷新</button></div></section>
 <div id="notice" role="status"></div><section id="sessions" class="grid" aria-label="在线 Pi 会话"></section>
 <section id="empty" class="empty" hidden><span class="empty-icon">π</span><h3>还没有在线会话</h3><p>为 Pi 配置本总管的登记 socket 和独立凭据。<br>已启动的会话会自动出现在这里。</p></section>
 <footer><span>每个会话独立连接 · 退出一个不影响其他会话</span><span>Pi Web Hub</span></footer></main></body></html>`;
+function renderPortalHtml(admin, chatUrl, managementUrl) {
+	const escapeHtml = (s) => s.replace(/[&<>"']/g, (c) => ({
+		"&": "&amp;",
+		"<": "&lt;",
+		">": "&gt;",
+		"\"": "&quot;",
+		"'": "&#39;"
+	})[c] ?? c);
+	if (admin) return portalHtml.replace("<head>", `<head><meta name="pi-chat-origin" content="${escapeHtml(chatUrl)}">`);
+	return portalHtml.replace("<script src=\"/hub-management.js\" defer><\/script>", "").replace(/<details class="management">[\s\S]*?<\/details>/, managementUrl ? `<p class="management"><a href="${escapeHtml(managementUrl)}sessions/" rel="noopener noreferrer">打开运行管理 ↗</a></p>` : "");
+}
 var portalJs = `(() => {
   const get = (id) => document.getElementById(id);
   let items = [];
@@ -237,13 +586,16 @@ var portalJs = `(() => {
       const name = document.createElement('span'); name.className = 'session-name'; name.textContent = session.sessionName || '未命名会话'; name.title = name.textContent;
       const since = document.createElement('span'); since.textContent = ' · ' + new Date(session.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       meta.append(name, since);
+      if (session.runtime) {
+        const version = document.createElement('span'); version.textContent = ' · Pi ' + session.runtime.version + (session.runtime.managed ? ' · 受管运行' : ' · 不支持重启'); meta.append(version);
+      }
       const link = document.createElement('a'); link.className = 'open'; link.href = session.path; link.textContent = '打开会话 ↗';
       link.addEventListener('click', (event) => {
         if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         resetNavigation(); link.textContent = '正在打开…'; link.setAttribute('aria-busy', 'true');
         navigationTimer = setTimeout(resetNavigation, 10000);
       });
-      card.append(top, title, meta, link); get('sessions').append(card);
+      card.append(top, title, meta, link); window.piHubManagement?.attach(card, session); get('sessions').append(card);
     }
   }
   async function refresh(afterCurrent = false) {
@@ -269,12 +621,404 @@ var portalJs = `(() => {
     if (event.persisted) refresh(true);
   });
   get('search').addEventListener('input', render); get('refresh').addEventListener('click', () => refresh(true));
+  window.addEventListener('pi-hub-management', () => { lastRender = ''; render(); });
   refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 5000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });
 })();`;
+var portalManagementCss = `.management{border:1px solid #dce5d7;background:#ffffffa8;border-radius:14px;padding:16px 20px;margin:0 0 28px;font-size:13px;line-height:1.7}.management summary{cursor:pointer;font-weight:600}.management summary span{font-weight:400;color:#718076;margin-left:10px}.management p{color:#657768;margin:12px 0}.management form label{display:block;margin-bottom:7px}.management .controls{flex-wrap:wrap}.management input{flex:1;max-width:360px;width:auto;min-width:0}.management button{min-height:42px}.management code{overflow-wrap:anywhere}.restart{display:block;width:100%;margin-top:10px;background:transparent;color:#64795e;font-size:12px}.restart-result{border-top:1px solid #e1e7dd;padding:10px 0}.restart-result p{overflow-wrap:anywhere}.restart-result .open{width:fit-content}#management-notice{color:#97613c}@media(max-width:600px){.management{padding:14px 16px}.management input{width:100%;flex-basis:100%;max-width:none}.management summary span{display:block;margin-left:0}.management .controls button{width:100%}}`;
+/** Separate trusted Hub script: never served by an individual Pi backend. */
+var portalManagementJs = `(() => {
+  const get = (id) => document.getElementById(id);
+  let auth = { available: false, authorized: false };
+  const operations = new Map();
+  let polling = false;
+  const notice = (text) => { get('management-notice').textContent = text; };
+  const changed = () => window.dispatchEvent(new Event('pi-hub-management'));
+  async function api(route, value) {
+    const response = await fetch('/api/management/' + route, { method: value === undefined ? 'GET' : 'POST', cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(7000),
+      headers: { 'Content-Type': 'application/json', ...(auth.csrf ? { 'X-Pi-Hub-Csrf': auth.csrf } : {}) }, body: value === undefined ? undefined : JSON.stringify(value) });
+    if (!response.ok) {
+      if (response.status === 401) { auth.authorized = false; auth.csrf = undefined; updateAuth(); }
+      throw new Error('管理请求未完成');
+    }
+    return response.json();
+  }
+  function updateAuth() {
+    get('management-status').textContent = !auth.available ? '未配置' : auth.authorized ? '已解锁 · 30 分钟有效' : '已锁定';
+    get('management-unlock').hidden = !auth.available || auth.authorized;
+    get('management-logout').hidden = !auth.authorized;
+    get('management-help').textContent = !auth.available ? '本 Hub 尚未接入门禁的独立重启接口。旧容器需使用新镜像重新启动一次，不能通过 /reload 获得此能力。' : '管理员在 Hub 的可信终端运行 pi-web-hub pair --config 配置文件，生成一次性管理码。管理授权与网页登录分开，过期后需重新解锁。';
+    changed();
+  }
+  function save() {
+    try { sessionStorage.setItem('pi-hub-restarts', JSON.stringify([...operations.values()].filter((o) => !o.done).map(({ id, generation, label }) => ({ id, generation, label })))); } catch {}
+  }
+  function renderResults() {
+    get('management-results').replaceChildren();
+    for (const op of operations.values()) {
+      const row = document.createElement('div'); row.className = 'restart-result';
+      const text = document.createElement('p');
+      const labels = { pending: '等待管理员审批', queued: '已排队', running: '正在重启并核对原会话', succeeded: '已恢复原会话', failed: '失败，请检查后手动处理', recovery_required: '结果不确定，需要管理员检查', rejected: '已拒绝', stale: '身份或授权已变化' };
+      text.textContent = op.label + ' · ' + (labels[op.status] || '结果未知，正在查询；不会重复执行') + (op.new_version ? ' · Pi ' + op.new_version : '');
+      row.append(text);
+      if (op.status === 'succeeded' && typeof op.path === 'string' && /^\\/s\\/[a-f0-9]{32}\\/$/.test(op.path)) {
+        const link = document.createElement('a'); link.href = new URL(op.path, document.querySelector('meta[name="pi-chat-origin"]').content).href; link.className = 'open'; link.textContent = '打开恢复后的会话 ↗'; row.append(link);
+      } else if (op.status === 'succeeded') {
+        const unavailable = document.createElement('p'); unavailable.textContent = '重启已成功完成；当前恢复链接不可用（会话可能已继续、切换或退出）。请从在线会话列表选择当前会话。'; row.append(unavailable);
+      }
+      get('management-results').append(row);
+    }
+  }
+  async function poll() {
+    if (polling || !auth.authorized || !auth.available) return;
+    polling = true;
+    try {
+      for (const op of operations.values()) {
+        if (op.done) continue;
+        try {
+          const result = await api('restarts/' + op.id);
+          delete op.path;
+          Object.assign(op, result);
+          op.done = ['succeeded', 'failed', 'recovery_required', 'rejected', 'stale'].includes(op.status);
+        } catch { op.status = 'unknown'; }
+      }
+      save(); renderResults();
+    } finally { polling = false; }
+  }
+  window.piHubManagement = { attach(card, session) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'restart'; button.textContent = '重启 Pi · 应用已安装更新';
+    button.disabled = !auth.available || !auth.authorized || [...operations.values()].some((o) => o.generation === session.generation && !o.done);
+    button.addEventListener('click', async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      let submitted = false;
+      try {
+        const target = await api('targets/' + session.generation);
+        if (!target.managed) { notice('此容器不支持进程重启，请先用新镜像重新启动一次。'); return; }
+        if (target.mode === 'disabled') { notice('门禁尚未启用该能力，需要管理员配置独立生命周期策略。'); return; }
+        if (!target.idle || target.pending || target.busy) { notice('此会话正在工作，或终端/未知命令使本进程无法证明可安全重启。工作完成后仍不可用时，需要在本地启动新的 Pi 进程；等待、取消和 /reload 不会清除输入不确定性。'); return; }
+        if (!window.confirm('确认重启选中的 Pi？\\n项目：' + session.label + '\\n会话：' + (session.sessionName || '未命名') + '\\n当前 Pi：' + target.version + '\\n将加载已安装版本并恢复原会话及分支。网页会短暂断开；不会更新其他会话。' + (target.mode === 'manual' ? '\\n门禁仍需管理员审批。' : ''))) return;
+        if (operations.size >= 64) { notice('本页操作记录已满，请重新打开管理页。'); return; }
+        const id = [...crypto.getRandomValues(new Uint8Array(16))].map((v) => v.toString(16).padStart(2, '0')).join('');
+        const op = { id, generation: session.generation, label: session.label, status: 'unknown', done: false };
+        operations.set(id, op); save(); renderResults(); submitted = true;
+        try { Object.assign(op, await api('restarts', { generation: session.generation, runtimeId: target.runtime_id, sessionId: target.session_id, leafId: target.leaf_id, idempotencyKey: id })); }
+        catch { notice('未收到提交结果，将按原操作编号查询。不要重新点击重启。'); }
+        renderResults();
+      } catch { notice('无法确认目标或授权已过期，请刷新管理状态后重试。'); }
+      finally { if (!submitted) button.disabled = !auth.available || !auth.authorized; }
+    });
+    card.append(button);
+  } };
+  get('management-unlock').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const input = get('management-code'); const code = input.value.trim(); input.value = '';
+    try { const result = await api('unlock', { code }); auth = { ...auth, ...result }; updateAuth(); notice('管理已解锁。请在对应会话卡片选择重启。'); void poll(); }
+    catch { notice('管理码无效、已使用或过期，请从可信终端重新获取。'); }
+  });
+  get('management-logout').addEventListener('click', async () => {
+    try { await api('logout', {}); auth.authorized = false; auth.csrf = undefined; updateAuth(); notice('管理已锁定。已提交操作仍由门禁处理。'); }
+    catch { notice('锁定请求未完成，请关闭此页并让管理员撤销管理授权。'); }
+  });
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('pi-hub-restarts') || '[]');
+    if (Array.isArray(saved)) for (const o of saved.slice(0, 64)) if (/^[a-f0-9]{32}$/.test(o.id) && /^[a-f0-9]{32}$/.test(o.generation) && typeof o.label === 'string' && o.label.length <= 256) operations.set(o.id, { id: o.id, generation: o.generation, label: o.label, done: false, status: 'unknown' });
+  } catch {}
+  void (async () => { try { auth = await api('status'); updateAuth(); renderResults(); await poll(); } catch { notice('无法查询运行管理能力。'); } })();
+  setInterval(poll, 2000);
+})();`;
 var portalCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#21312c;background:#f6f8f5;font-synthesis:none}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 90% 0,#e6efdf,transparent 55%)}main{max-width:1080px;margin:auto;padding:32px 40px 24px;min-height:100dvh}header{display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:650;color:inherit;text-decoration:none}.logo{display:grid;place-items:center;border-radius:12px;background:#234c3c;color:#e8f3dd;width:42px;height:42px;font:32px Georgia,serif}.tag{font-size:10px;letter-spacing:2px;color:#758478;border:1px solid #d7dfd5;border-radius:5px;padding:4px 6px}#health{font-size:12px;color:#697c70}.connected{color:#347652!important}.disconnected{color:#a35437!important}.intro{padding:68px 0 48px}.eyebrow{font-size:12px;letter-spacing:2px;color:#718478}h1{margin:14px 0 16px;font-size:clamp(30px,4vw,46px);font-weight:600;letter-spacing:-1.5px}.intro p{margin:0;color:#718076;font-size:15px;line-height:1.8}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}h2{font-size:17px;font-weight:600;margin:0}#count{display:inline-grid;place-items:center;min-width:25px;height:23px;margin-left:8px;background:#e2ebe0;border-radius:7px;color:#476347;font-size:12px}#updated{font-size:12px;color:#879287;margin:8px 0 0}.controls{display:flex;gap:10px}input,button{font:inherit;border:1px solid #dce3d9;border-radius:9px;background:#fff;padding:11px 14px;font-size:13px;color:#415447}input{width:230px}button{cursor:pointer}button:hover{background:#eef3eb}button:disabled{opacity:.55}input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #93ad91;outline-offset:3px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}.card{background:#ffffffdc;border:1px solid #e0e7dc;border-radius:16px;padding:24px;box-shadow:0 6px 24px #29412c04;min-width:0}.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.project-icon{display:grid;place-items:center;width:40px;height:40px;background:#edf3e8;color:#587452;border-radius:11px;font-size:23px}.online{font-size:11px;color:#39734e;background:#eff5eb;border-radius:20px;padding:5px 10px}.online:before{content:'●';font-size:8px;margin-right:5px}.card h3{font-size:18px;font-weight:600;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{font-size:12px;color:#899587;margin:10px 0 24px;display:flex;min-width:0}.session-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta>span:last-child{flex-shrink:0}.open{display:block;text-align:center;color:#365b42;background:#f2f6ee;border:1px solid #e4ebdf;text-decoration:none;border-radius:8px;padding:11px;font-size:13px}.open:hover{background:#e7efdf}.empty{text-align:center;border:1px dashed #d6dfd0;border-radius:16px;padding:55px 20px;background:#ffffff70}.empty-icon{font:44px Georgia,serif;color:#8a9e82}.empty h3{font-size:17px;font-weight:500;margin:18px 0 10px}.empty p{font-size:13px;color:#7a8978;line-height:1.9}#notice{font-size:13px;color:#a35c3d;line-height:1.6;margin-bottom:14px}#notice:empty{display:none}footer{display:flex;justify-content:space-between;gap:15px;border-top:1px solid #e0e6db;margin-top:48px;padding-top:20px;font-size:11px;color:#96a18f}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}[hidden]{display:none!important}@media(max-width:600px){main{padding:24px 20px}header{gap:8px}.brand{font-size:17px;gap:8px}.logo{width:36px;height:36px;font-size:27px}#health{font-size:11px}.intro{padding:48px 0 34px}h1{letter-spacing:-1px;line-height:1.35}.toolbar{flex-direction:column;align-items:stretch;gap:18px}.controls label{flex:1;min-width:0}input{width:100%;min-width:0}.grid{grid-template-columns:1fr}.card{padding:22px}.card-top{margin-bottom:18px}footer{flex-direction:column;margin-top:32px;line-height:1.6}}`;
 //#endregion
+//#region hub/restart-api.ts
+init_config();
+init_lifecycle();
+var hex = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+var text = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
+async function body(request) {
+	if (request.headers["content-type"]?.split(";")[0].trim() !== "application/json") throw new Error();
+	const data = await new Promise((resolve, reject) => {
+		let data = Buffer.alloc(0);
+		const finish = (error) => {
+			clearTimeout(timer);
+			request.off("data", onData);
+			request.off("end", onEnd);
+			request.off("error", onError);
+			request.off("aborted", onError);
+			if (error) reject(error);
+			else resolve(data);
+		};
+		const onData = (chunk) => {
+			data = Buffer.concat([data, chunk]);
+			if (data.length > 8192) {
+				request.resume();
+				finish(/* @__PURE__ */ new Error());
+			}
+		};
+		const onEnd = () => finish();
+		const onError = () => finish(/* @__PURE__ */ new Error());
+		const timer = setTimeout(onError, 5e3);
+		request.on("data", onData);
+		request.once("end", onEnd);
+		request.once("error", onError);
+		request.once("aborted", onError);
+	});
+	const value = JSON.parse(data.toString("utf8"));
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+	return value;
+}
+function createRestartApi(config, hooks) {
+	const management = new HubManagement(config);
+	const provider = config.lifecycle ? new GateLifecycle(config.lifecycle) : void 0;
+	const receipts = path.join(config.stateDir, "restarts");
+	if (provider) privateDirectory(receipts);
+	const file = (id) => {
+		if (!hex(id)) throw new Error();
+		return path.join(receipts, `${id}.json`);
+	};
+	const read = (id) => {
+		const value = readPrivateJson(file(id));
+		if (value.id !== id || !hex(value.run_id) || !hex(value.generation) || value.idempotency_key !== id || !text(value.runtime_id) || !text(value.session_id) || value.leaf_id !== null && !text(value.leaf_id)) throw new Error();
+		return value;
+	};
+	const save = (value) => {
+		if (readdirSync(receipts).filter((name) => /^[a-f0-9]{32}\.json$/.test(name)).length >= 1e3) throw new Error();
+		const fd = openSync(file(value.id), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 384);
+		try {
+			writeFileSync(fd, `${JSON.stringify(value)}\n`);
+		} finally {
+			closeSync(fd);
+		}
+	};
+	const resolve = async (id, submitted) => {
+		if (!provider) throw new Error();
+		const receipt = read(id);
+		if (!hooks.granted(receipt.run_id)) throw new Error();
+		const job = submitted ?? await provider.operation(id);
+		if (job.run_id !== receipt.run_id || !hooks.granted(receipt.run_id)) throw new Error();
+		const clockFile = path.join(receipts, `${id}.started.json`);
+		if (job.started_at !== void 0 && !existsSync(clockFile)) writeFileSync(clockFile, JSON.stringify({ started_at: job.started_at }), {
+			flag: "wx",
+			mode: 384
+		});
+		if (existsSync(clockFile) && readPrivateJson(clockFile).started_at !== job.started_at) throw new Error();
+		const result = {
+			id,
+			status: job.status,
+			stage: job.stage
+		};
+		const failed = (stage) => {
+			hooks.clearHandoff(id);
+			return {
+				...result,
+				status: "failed",
+				stage
+			};
+		};
+		if ([
+			"failed",
+			"recovery_required",
+			"rejected",
+			"stale"
+		].includes(job.status)) hooks.clearHandoff(id);
+		for (const key of [
+			"old_version",
+			"expected_version",
+			"new_version"
+		]) if (job[key]) result[key] = job[key];
+		if (job.status === "succeeded") {
+			if (job.old_runtime_id !== receipt.runtime_id || job.session_id !== receipt.session_id || job.leaf_id !== receipt.leaf_id || !job.new_runtime_id || job.new_runtime_id === receipt.runtime_id || !job.new_version || job.new_version !== job.expected_version) return failed("restored_identity_mismatch");
+			if (job.started_at === void 0) throw new Error();
+			const deadline = job.started_at + 21e4;
+			const verifiedFile = path.join(receipts, `${id}.verified.json`);
+			const completed = existsSync(verifiedFile) ? readPrivateJson(verifiedFile) : void 0;
+			if (completed && (completed.id !== id || completed.run_id !== receipt.run_id || completed.generation !== receipt.generation || completed.old_runtime_id !== receipt.runtime_id || completed.session_id !== receipt.session_id || completed.leaf_id !== receipt.leaf_id || completed.started_at !== job.started_at || !Number.isSafeInteger(completed.at) || completed.at >= deadline || completed.at < job.started_at || completed.at > Date.now() || completed.runtimeId !== job.new_runtime_id || completed.version !== job.new_version || typeof completed.path !== "string" || !/^\/s\/[a-f0-9]{32}\/$/.test(completed.path))) throw new Error();
+			if (!completed && Date.now() >= deadline) return failed("registration_timeout");
+			let route;
+			try {
+				route = await hooks.successor(receipt.run_id, job.new_runtime_id, receipt.session_id, receipt.leaf_id, job.new_version);
+			} catch (error) {
+				if (!completed) throw error;
+			}
+			if (!hooks.granted(receipt.run_id)) throw new Error();
+			if (completed) {
+				if (route === completed.path) result.path = route;
+				return result;
+			}
+			if (Date.now() >= deadline) return failed("registration_timeout");
+			if (route) {
+				if (!existsSync(verifiedFile)) writeFileSync(verifiedFile, JSON.stringify({
+					id,
+					run_id: receipt.run_id,
+					generation: receipt.generation,
+					old_runtime_id: receipt.runtime_id,
+					session_id: receipt.session_id,
+					leaf_id: receipt.leaf_id,
+					started_at: job.started_at,
+					at: Date.now(),
+					path: route,
+					runtimeId: job.new_runtime_id,
+					version: job.new_version
+				}), {
+					flag: "wx",
+					mode: 384
+				});
+				result.path = route;
+			} else {
+				result.status = "running";
+				result.stage = "waiting_for_registration";
+			}
+		}
+		return result;
+	};
+	return {
+		resolve,
+		async handle(request, response, sameOrigin) {
+			const pathname = request.url?.split("?")[0] ?? "";
+			if (!pathname.startsWith("/api/management/")) return false;
+			const reply = (status, value, cookie) => {
+				response.writeHead(status, {
+					"Content-Type": "application/json",
+					"Cache-Control": "no-store",
+					"Referrer-Policy": "no-referrer",
+					...cookie ? { "Set-Cookie": cookie } : {}
+				}).end(JSON.stringify(value));
+			};
+			let phase = "authorization";
+			let unsubmittedReceipt;
+			try {
+				if (request.method === "GET" && pathname === "/api/management/status") {
+					reply(200, {
+						available: !!provider,
+						...management.status(request)
+					});
+					return true;
+				}
+				if (request.method === "POST" && !sameOrigin) {
+					reply(403, { error: "Same-origin management request required" });
+					return true;
+				}
+				if (request.method === "POST" && pathname === "/api/management/unlock") {
+					const value = await body(request);
+					if (Object.keys(value).join(",") !== "code") throw new Error();
+					const result = management.unlock(value.code);
+					reply(200, {
+						authorized: true,
+						csrf: result.csrf,
+						expiresAt: result.expiresAt
+					}, result.cookie);
+					return true;
+				}
+				const authorization = management.authorize(request, request.method !== "GET");
+				const revalidate = () => {
+					phase = "authorization";
+					management.revalidate(request, authorization, request.method !== "GET");
+					phase = "provider";
+				};
+				if (request.method === "POST" && pathname === "/api/management/logout") {
+					reply(200, { authorized: false }, management.logout(request));
+					return true;
+				}
+				phase = "provider";
+				if (!provider) {
+					reply(503, { error: "Managed restart is not configured" });
+					return true;
+				}
+				const targetMatch = /^\/api\/management\/targets\/([a-f0-9]{32})$/.exec(pathname);
+				if (request.method === "GET" && targetMatch) {
+					const selected = await hooks.lookup(targetMatch[1]);
+					if (!selected) {
+						reply(410, { error: "Session changed" });
+						return true;
+					}
+					if (!selected.runtime?.managed) {
+						reply(200, { managed: false });
+						return true;
+					}
+					const target = await provider.target(selected.runId);
+					if (!hooks.granted(selected.runId)) throw new Error();
+					const { run_id: _runId, ...safe } = target;
+					if (target.managed && (target.runtime_id !== selected.runtime.runtimeId || target.session_id !== selected.runtime.sessionId || target.leaf_id !== selected.runtime.leafId)) {
+						reply(409, { error: "Session identity changed; refresh before restarting" });
+						return true;
+					}
+					reply(200, safe);
+					return true;
+				}
+				if (request.method === "POST" && pathname === "/api/management/restarts") {
+					const value = await body(request);
+					revalidate();
+					if (Object.keys(value).sort().join(",") !== "generation,idempotencyKey,leafId,runtimeId,sessionId" || !hex(value.generation) || !hex(value.idempotencyKey) || !text(value.runtimeId) || !text(value.sessionId) || value.leafId !== null && !text(value.leafId)) {
+						reply(400, { error: "Invalid restart request" });
+						return true;
+					}
+					const id = value.idempotencyKey;
+					let receipt;
+					if (existsSync(file(id))) {
+						receipt = read(id);
+						if (receipt.generation !== value.generation || receipt.runtime_id !== value.runtimeId || receipt.session_id !== value.sessionId || receipt.leaf_id !== value.leafId) throw new Error();
+						reply(200, await resolve(id));
+						return true;
+					}
+					const selected = await hooks.lookup(value.generation);
+					revalidate();
+					if (!selected?.runtime?.managed || selected.runtime.runtimeId !== value.runtimeId || selected.runtime.sessionId !== value.sessionId || selected.runtime.leafId !== value.leafId) {
+						reply(409, { error: "Session changed or needs a managed image" });
+						return true;
+					}
+					receipt = {
+						id,
+						generation: value.generation,
+						requestedAt: Date.now(),
+						run_id: selected.runId,
+						runtime_id: value.runtimeId,
+						session_id: value.sessionId,
+						leaf_id: value.leafId,
+						idempotency_key: id
+					};
+					revalidate();
+					save(receipt);
+					unsubmittedReceipt = id;
+					revalidate();
+					hooks.prepareHandoff(selected.runId, {
+						id,
+						generation: value.generation,
+						runtimeId: value.runtimeId,
+						sessionId: value.sessionId,
+						leafId: value.leafId
+					});
+					revalidate();
+					unsubmittedReceipt = void 0;
+					const job = await provider.restart({
+						run_id: receipt.run_id,
+						runtime_id: receipt.runtime_id,
+						session_id: receipt.session_id,
+						leaf_id: receipt.leaf_id,
+						idempotency_key: id
+					});
+					if (job.id !== id || !hooks.granted(receipt.run_id)) throw new Error();
+					reply(202, await resolve(id, job));
+					return true;
+				}
+				const match = /^\/api\/management\/restarts\/([a-f0-9]{32})$/.exec(pathname);
+				if (request.method === "GET" && match) {
+					reply(200, await resolve(match[1]));
+					return true;
+				}
+				reply(404, { error: "Management route not found" });
+			} catch {
+				if (unsubmittedReceipt) {
+					hooks.clearHandoff(unsubmittedReceipt);
+					unlinkSync(file(unsubmittedReceipt));
+				}
+				reply(phase === "authorization" ? 401 : 409, { error: phase === "authorization" ? "Management authorization required" : "Restart unavailable or outcome unknown; refresh status before retrying" });
+			}
+			return true;
+		}
+	};
+}
+//#endregion
 //#region hub/server.ts
+init_config();
 var mac = (token, value) => createHmac("sha256", token).update(value).digest("hex");
 function equal(value, expected) {
 	if (typeof value !== "string") return false;
@@ -342,13 +1086,14 @@ function backendHeaders(request, session) {
 		"host"
 	]);
 	for (const field of (request.headers.connection ?? "").split(",")) hop.add(field.trim().toLowerCase());
-	for (const [key, value] of Object.entries(request.headers)) if (!hop.has(key) && !key.startsWith("x-pi-web-") && !key.startsWith("x-forwarded-") && key !== "forwarded") headers[key] = value;
+	for (const [key, value] of Object.entries(request.headers)) if (!hop.has(key) && !key.startsWith("x-pi-web-") && !key.startsWith("x-pi-hub-") && !key.startsWith("x-forwarded-") && key !== "forwarded") headers[key] = value;
 	headers["x-pi-web-generation"] = session.generation;
 	headers["x-pi-web-proof"] = mac(session.grant.token, session.generation);
 	return headers;
 }
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 async function startHub(config) {
+	if (config.management) managementConfig(config.management, config.port, config.publicUrl);
 	privateDirectory(config.runtimeDir);
 	const lock = path.join(config.runtimeDir, "hub.lock");
 	mkdirSync(lock, { mode: 448 });
@@ -416,7 +1161,16 @@ async function startLockedHub(config) {
 	let stopped = false;
 	let pending = Promise.resolve();
 	let url = "";
+	let managementUrl;
+	const restarting = /* @__PURE__ */ new Map();
+	const activateRestart = (generation) => {
+		const restart = restarting.get(generation);
+		if (!restart) return;
+		restart.deadline ??= Date.now() + 21e4;
+		for (const item of handoffs.values()) if (item.restart === restart) item.expires = restart.deadline;
+	};
 	const retire = (generation) => {
+		activateRestart(generation);
 		sessions.delete(generation);
 		for (const [ws, id] of webSockets) if (id === generation) ws.terminate();
 	};
@@ -435,6 +1189,89 @@ async function startLockedHub(config) {
 		}
 		return session;
 	};
+	const granted = (runId) => {
+		try {
+			return !readGrant(config, runId).revoked;
+		} catch {
+			return false;
+		}
+	};
+	const verified = async (generation) => {
+		const session = current(generation);
+		if (!session || !await proveBackend(session.grant, generation, session.port) || stopped || current(generation) !== session) return void 0;
+		return session;
+	};
+	const restartApi = createRestartApi(config, {
+		clearHandoff: (id) => {
+			for (const [generation, item] of restarting) if (item.id === id) restarting.delete(generation);
+			for (const [token, item] of handoffs) {
+				if (item.restart?.id !== id) continue;
+				const original = current(item.from);
+				if (item.client?.readyState !== WebSocket.OPEN || webSockets.get(item.client) !== item.from || original?.grant.run_id !== item.grant.run_id || original.runtime?.runtimeId !== item.restart.runtimeId) {
+					handoffs.delete(token);
+					continue;
+				}
+				item.originalRuntimeId = item.restart.runtimeId;
+				item.restart = void 0;
+				item.successor = item.from;
+				item.expires = Infinity;
+				item.client.send(JSON.stringify({
+					type: "event",
+					event: "hub_route",
+					payload: {
+						generation: item.from,
+						token
+					}
+				}));
+			}
+		},
+		granted,
+		lookup: async (generation) => {
+			const session = await verified(generation);
+			return session ? {
+				runId: session.grant.run_id,
+				generation,
+				runtime: session.runtime
+			} : void 0;
+		},
+		successor: async (runId, runtimeId, sessionId, leafId, version) => {
+			for (const generation of sessions.keys()) {
+				const session = current(generation);
+				const runtime = session?.runtime;
+				if (session?.grant.run_id !== runId || !runtime?.managed || runtime.runtimeId !== runtimeId || runtime.sessionId !== sessionId || runtime.leafId !== leafId || runtime.version !== version) continue;
+				const proved = await verified(generation);
+				const fresh = proved?.runtime;
+				if (proved?.grant.run_id === runId && fresh?.managed && fresh.runtimeId === runtimeId && fresh.sessionId === sessionId && fresh.leafId === leafId && fresh.version === version) return `/s/${generation}/`;
+			}
+		},
+		prepareHandoff: (runId, receipt) => {
+			const selected = current(receipt.generation);
+			if (!selected || selected.grant.run_id !== runId || selected.runtime?.runtimeId !== receipt.runtimeId || selected.runtime.sessionId !== receipt.sessionId || selected.runtime.leafId !== receipt.leafId) throw new Error("Session changed");
+			const restart = {
+				id: receipt.id,
+				runtimeId: receipt.runtimeId
+			};
+			restarting.set(receipt.generation, restart);
+			for (const [token, item] of handoffs) {
+				if (item.from !== receipt.generation || item.grant.run_id !== runId) continue;
+				item.restart = restart;
+				item.expires = Infinity;
+				if (!item.client) activateRestart(receipt.generation);
+				if (item.client?.readyState === WebSocket.OPEN) item.client.send(JSON.stringify({
+					type: "event",
+					event: "hub_route",
+					payload: {
+						generation: item.from,
+						token,
+						restart: {
+							id: receipt.id,
+							timeoutMs: 12e4
+						}
+					}
+				}));
+			}
+		}
+	});
 	const register = async (value) => {
 		if (stopped || typeof value.run_id !== "string" || typeof value.generation !== "string" || !/^[0-9a-f]{32}$/.test(value.generation)) throw new Error("Registration rejected");
 		const grant = readGrant(config, value.run_id);
@@ -459,6 +1296,7 @@ async function startLockedHub(config) {
 		if (value.action !== "register" || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new Error("Registration rejected");
 		if (value.sessionName !== void 0 && value.sessionName !== null && (typeof value.sessionName !== "string" || value.sessionName.length > 256)) throw new Error("Registration rejected");
 		const sessionName = typeof value.sessionName === "string" ? value.sessionName.replace(/\p{Cc}/gu, " ").trim() || null : null;
+		const runtime = value.runtime === void 0 ? void 0 : readRuntimeMetadata(value.runtime);
 		const port = Number(value.port);
 		if (owner) {
 			if (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port) throw new Error("ended generation");
@@ -478,17 +1316,19 @@ async function startLockedHub(config) {
 		if (session) {
 			session.expires = Date.now() + config.leaseMs;
 			session.sessionName = sessionName;
+			session.runtime = runtime;
 		} else sessions.set(generation, {
 			grant,
 			generation,
 			port,
 			expires: Date.now() + config.leaseMs,
 			since: Date.now(),
-			sessionName
+			sessionName,
+			runtime
 		});
 		pruneHandoffs();
 		if (!session) {
-			for (const item of handoffs.values()) if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor) item.successor = generation;
+			for (const item of handoffs.values()) if (!item.restart && item.grant.run_id === grant.run_id && item.from !== generation && !item.successor) item.successor = generation;
 		}
 		return { url: `${config.publicUrl ?? url}s/${generation}/` };
 	};
@@ -544,21 +1384,49 @@ async function startLockedHub(config) {
 			});
 		});
 	});
-	const allowedBrowser = (request, requireOrigin = false) => {
-		const allowed = new Set([new URL(url).origin, ...config.publicUrl ? [new URL(config.publicUrl).origin] : []]);
+	const allowedBrowser = (request, requireOrigin = false, admin = false) => {
+		const local = admin ? managementUrl : url;
+		const canonical = admin ? config.management?.publicUrl : config.publicUrl;
+		if (!local) return false;
+		const allowed = new Set([new URL(local).origin, ...canonical ? [new URL(canonical).origin] : []]);
 		const hosts = new Set([...allowed].map((origin) => new URL(origin).host));
 		const origin = request.headers.origin;
-		return hosts.has(request.headers.host ?? "") && request.headers["sec-fetch-site"] !== "cross-site" && (origin === void 0 ? !requireOrigin : allowed.has(origin));
+		return hosts.has(request.headers.host ?? "") && request.headers["sec-fetch-site"] !== "cross-site" && (origin === void 0 ? !requireOrigin : allowed.has(origin) && (!admin || new URL(origin).host === request.headers.host));
 	};
 	const matchRoute = (request) => /^\/s\/([a-f0-9]{32})(\/.*)?$/.exec(request.url ?? "");
 	const fail = (response, code) => response.writeHead(code, { "Cache-Control": "no-store" }).end();
-	const server = http.createServer(async (request, response) => {
+	const handle = async (request, response, admin = false) => {
 		try {
-			if (!allowedBrowser(request)) {
+			if (!allowedBrowser(request, false, admin)) {
 				fail(response, 403);
 				return;
 			}
 			const pathname = request.url?.split("?")[0];
+			if (admin) {
+				if (await restartApi.handle(request, response, allowedBrowser(request, true, true))) return;
+				if (![
+					"/",
+					"/sessions/",
+					"/api/sessions",
+					"/hub.js",
+					"/hub-management.js",
+					"/hub.css"
+				].includes(pathname ?? "") || request.headers["service-worker"] !== void 0) {
+					fail(response, 404);
+					return;
+				}
+			} else if (pathname?.startsWith("/api/management/")) {
+				if (request.method === "GET" && pathname === "/api/management/status") response.writeHead(200, {
+					"Content-Type": "application/json",
+					"Cache-Control": "no-store"
+				}).end(JSON.stringify({
+					available: false,
+					authorized: false,
+					...managementUrl ? { managementUrl: config.management?.publicUrl ?? managementUrl } : {}
+				}));
+				else fail(response, 404);
+				return;
+			}
 			if (pathname === "/api/session-handoff") {
 				if (request.method !== "POST") {
 					fail(response, 405);
@@ -581,11 +1449,33 @@ async function startLockedHub(config) {
 					fail(response, 410);
 					return;
 				}
+				if (item.restart) {
+					try {
+						const result = await restartApi.resolve(item.restart.id);
+						if (item.expires <= Date.now() || !granted(item.grant.run_id)) throw new Error();
+						if (result.status === "succeeded" && typeof result.path === "string") response.writeHead(200, {
+							"Content-Type": "application/json",
+							"Cache-Control": "no-store"
+						}).end(JSON.stringify({ path: result.path }));
+						else if ([
+							"pending",
+							"queued",
+							"running"
+						].includes(result.status)) response.writeHead(202, {
+							"Content-Type": "application/json",
+							"Cache-Control": "no-store"
+						}).end(JSON.stringify({ pending: true }));
+						else fail(response, 410);
+					} catch {
+						fail(response, 410);
+					}
+					return;
+				}
 				const targetGeneration = item.successor ?? item.from;
 				const successor = current(targetGeneration);
 				const proved = successor && await proveBackend(grant, successor.generation, successor.port);
 				const latestGrant = readGrant(config, grant.run_id);
-				if (stopped || item.expires <= Date.now() || latestGrant.revoked || !equal(latestGrant.token, grant.token) || latestGrant.backendHost !== grant.backendHost) {
+				if (stopped || handoffs.get(token) !== item || item.expires <= Date.now() || latestGrant.revoked || !equal(latestGrant.token, grant.token) || latestGrant.backendHost !== grant.backendHost) {
 					handoffs.delete(token);
 					fail(response, 410);
 					return;
@@ -597,7 +1487,7 @@ async function startLockedHub(config) {
 					}).end(JSON.stringify({ pending: true }));
 					return;
 				}
-				if (!successor || successor.grant.run_id !== grant.run_id || !proved || stopped || current(targetGeneration) !== successor || item.expires <= Date.now()) {
+				if (!successor || successor.grant.run_id !== grant.run_id || !proved || stopped || current(targetGeneration) !== successor || item.originalRuntimeId !== void 0 && successor.runtime?.runtimeId !== item.originalRuntimeId || item.expires <= Date.now()) {
 					fail(response, 410);
 					return;
 				}
@@ -641,6 +1531,7 @@ async function startLockedHub(config) {
 					const headers = { ...result.headers };
 					delete headers["set-cookie"];
 					delete headers.connection;
+					for (const key of Object.keys(headers)) if (key.startsWith("x-pi-hub-")) delete headers[key];
 					response.writeHead(result.statusCode ?? 502, {
 						...headers,
 						"Cache-Control": "no-store"
@@ -673,8 +1564,12 @@ async function startLockedHub(config) {
 					label: s.grant.label,
 					sessionName: s.sessionName,
 					generation: s.generation,
-					path: `/s/${s.generation}/`,
-					since: s.since
+					path: admin ? `${config.publicUrl ?? url}s/${s.generation}/` : `/s/${s.generation}/`,
+					since: s.since,
+					...s.runtime ? { runtime: {
+						version: s.runtime.version,
+						managed: s.runtime.managed
+					} } : {}
 				}));
 				response.writeHead(200, {
 					"Content-Type": "application/json",
@@ -682,7 +1577,7 @@ async function startLockedHub(config) {
 				}).end(JSON.stringify({ sessions: items }));
 				return;
 			}
-			const asset = pathname === "/sessions/" ? ["text/html", portalHtml] : pathname === "/hub.js" ? ["text/javascript", portalJs] : pathname === "/hub.css" ? ["text/css", portalCss] : void 0;
+			const asset = pathname === "/sessions/" ? ["text/html", renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl)] : pathname === "/hub.js" ? ["text/javascript", portalJs] : admin && pathname === "/hub-management.js" ? ["text/javascript", portalManagementJs] : pathname === "/hub.css" ? ["text/css", portalCss + portalManagementCss] : void 0;
 			if (!asset) {
 				fail(response, pathname?.startsWith("/s/") ? 410 : 404);
 				return;
@@ -698,7 +1593,17 @@ async function startLockedHub(config) {
 			if (!response.headersSent) fail(response, 500);
 			else response.destroy();
 		}
+	};
+	const server = http.createServer((request, response) => void handle(request, response));
+	const managementServer = config.management ? http.createServer((request, response) => void handle(request, response, true)) : void 0;
+	managementServer?.on("connection", (socket) => {
+		connections.add(socket);
+		socket.on("error", () => socket.destroy());
+		socket.once("close", () => connections.delete(socket));
 	});
+	managementServer?.on("clientError", (_error, socket) => socket.destroy());
+	managementServer?.on("upgrade", (_request, socket) => socket.destroy());
+	managementServer?.on("connect", (_request, socket) => socket.destroy());
 	const wss = new WebSocketServer({
 		noServer: true,
 		maxPayload: 16 * 1024 * 1024
@@ -773,21 +1678,31 @@ async function startLockedHub(config) {
 					pruneHandoffs();
 					if (handoffs.size < 512) {
 						const token = randomBytes(24).toString("hex");
+						const restart = restarting.get(session.generation);
+						const activeRestart = restart && (restart.deadline === void 0 || restart.deadline > Date.now()) ? restart : void 0;
 						const item = {
 							grant: session.grant,
 							from: session.generation,
-							expires: Infinity
+							expires: activeRestart?.deadline ?? Infinity,
+							client,
+							restart: activeRestart
 						};
 						handoffs.set(token, item);
 						client.once("close", () => {
-							item.expires = Date.now() + 45e3;
+							item.client = void 0;
+							activateRestart(item.from);
+							item.expires = item.restart?.deadline ?? Date.now() + 45e3;
 						});
 						client.send(JSON.stringify({
 							type: "event",
 							event: "hub_route",
 							payload: {
 								generation: session.generation,
-								token
+								token,
+								...activeRestart ? { restart: {
+									id: activeRestart.id,
+									timeoutMs: 12e4
+								} } : {}
 							}
 						}));
 					}
@@ -813,21 +1728,30 @@ async function startLockedHub(config) {
 		await listen(server, config.port, config.host);
 		const port = server.address().port;
 		url = `http://${config.host === "::1" ? "[::1]" : config.host}:${port}/`;
+		if (managementServer && config.management) {
+			await listen(managementServer, config.management.port, "127.0.0.1");
+			managementUrl = `http://127.0.0.1:${managementServer.address().port}/`;
+			const chatOrigins = [new URL(url).origin, ...config.publicUrl ? [new URL(config.publicUrl).origin] : []];
+			if ([managementUrl, config.management.publicUrl].some((value) => value && chatOrigins.includes(new URL(value).origin))) throw new Error("Management origin must differ from chat origin");
+		}
 	} catch (error) {
 		stopped = true;
 		for (const peer of peers) peer.destroy();
 		registry.close();
 		server.close();
+		managementServer?.close();
 		throw error;
 	}
 	const sweep = setInterval(() => {
 		for (const id of sessions.keys()) current(id);
 		pruneHandoffs();
+		for (const [generation, item] of restarting) if (item.deadline !== void 0 && item.deadline <= Date.now()) restarting.delete(generation);
 	}, Math.min(1e3, config.leaseMs));
 	sweep.unref();
 	let closing;
 	return {
 		url,
+		...managementUrl ? { managementUrl } : {},
 		socketPath: config.socketPath,
 		close() {
 			if (closing) return closing;
@@ -838,10 +1762,12 @@ async function startLockedHub(config) {
 			for (const peer of peers) peer.destroy();
 			for (const connection of connections) connection.destroy();
 			server.closeAllConnections();
+			managementServer?.closeAllConnections();
 			closing = Promise.all([
 				new Promise((resolve) => server.close(() => resolve())),
 				new Promise((resolve) => registry.close(() => resolve())),
 				new Promise((resolve) => wss.close(() => resolve())),
+				...managementServer ? [new Promise((resolve) => managementServer.close(() => resolve()))] : [],
 				pending
 			]).then(() => {});
 			return closing;
@@ -850,12 +1776,16 @@ async function startLockedHub(config) {
 }
 //#endregion
 //#region bin/pi-web-hub.mjs
+init_config();
 var help = `Pi Web Hub — independent multi-session portal
 
   pi-web-hub init [--port 16180] [--public-url https://pi.example.com/]
+    [--management-port 16181] [--management-public-url https://admin.example.com/]
   pi-web-hub serve
   pi-web-hub issue --label "Project A" --output /private/session-a.json [--backend-host 127.0.0.1]
   pi-web-hub revoke --run-id <session-capability-id>
+  pi-web-hub pair                     Generate a single-use management code (10 minutes)
+  pi-web-hub revoke-management        Revoke all browser management sessions
 
 All commands accept --config <file> (default ~/.pi/web-hub/config.json).
 The hub never launches agents or deploys SSH/TLS/login. See docs/hub.md.
@@ -872,7 +1802,9 @@ async function main(args) {
 		["init", [
 			"--config",
 			"--port",
-			"--public-url"
+			"--public-url",
+			"--management-port",
+			"--management-public-url"
 		]],
 		["serve", ["--config"]],
 		["issue", [
@@ -881,7 +1813,9 @@ async function main(args) {
 			"--output",
 			"--backend-host"
 		]],
-		["revoke", ["--config", "--run-id"]]
+		["revoke", ["--config", "--run-id"]],
+		["pair", ["--config"]],
+		["revoke-management", ["--config"]]
 	]).get(command);
 	if (!permitted) throw new Error("Unknown hub command; use --help");
 	const options = /* @__PURE__ */ new Map();
@@ -900,9 +1834,19 @@ async function main(args) {
 			const { validatedPublicUrl } = await Promise.resolve().then(() => (init_connection_config(), connection_config_exports));
 			if (new URL(validatedPublicUrl(publicUrl)).pathname !== "/") throw new Error("Hub public URL must use the domain root");
 		}
+		let management;
+		if (options.has("--management-public-url") && !options.has("--management-port")) throw new Error("Management port required");
+		if (options.has("--management-port")) {
+			const { managementConfig } = await Promise.resolve().then(() => (init_config(), config_exports));
+			management = managementConfig({
+				port: Number(options.get("--management-port")),
+				...options.has("--management-public-url") ? { publicUrl: options.get("--management-public-url") } : {}
+			}, port, publicUrl);
+		}
 		initializeHub(configFile, {
 			port,
-			...publicUrl ? { publicUrl } : {}
+			...publicUrl ? { publicUrl } : {},
+			...management ? { management } : {}
 		});
 		process.stdout.write(`${JSON.stringify({
 			configured: true,
@@ -911,7 +1855,11 @@ async function main(args) {
 		return;
 	}
 	const config = readHubConfig(configFile);
-	if (command === "issue") {
+	if (command === "pair") process.stdout.write(`${JSON.stringify(issueManagementCode(config))}\n`);
+	else if (command === "revoke-management") {
+		revokeManagement(config);
+		process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
+	} else if (command === "issue") {
 		if (!options.has("--output") || !options.has("--label")) throw new Error("issue requires --output and --label");
 		const credentialFile = path.resolve(options.get("--output"));
 		const credential = issueSession(config, credentialFile, {
@@ -932,7 +1880,8 @@ async function main(args) {
 		process.stdout.write(`${JSON.stringify({
 			localUrl: hub.url,
 			portalUrl: `${config.publicUrl ?? hub.url}sessions/`,
-			socketPath: hub.socketPath
+			socketPath: hub.socketPath,
+			...hub.managementUrl ? { managementUrl: hub.managementUrl } : {}
 		})}\n`);
 		let closing = false;
 		const stop = () => {

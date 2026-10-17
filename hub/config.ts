@@ -3,6 +3,7 @@ import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 import { validatedPublicUrl } from "../extensions/connection-config.ts";
+import { type LifecycleConfig, lifecycleConfig } from "./lifecycle.ts";
 
 export type HubConfig = {
   stateDir: string;
@@ -12,6 +13,8 @@ export type HubConfig = {
   port: number;
   leaseMs: number;
   publicUrl?: string;
+  lifecycle?: LifecycleConfig;
+  management?: { port: number; publicUrl?: string };
 };
 export type Grant = { run_id: string; token: string; label: string; backendHost: string; revoked?: boolean };
 
@@ -37,7 +40,10 @@ export function readPrivateJson(file: string) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 
-export function initializeHub(file: string, options: Partial<Pick<HubConfig, "port" | "publicUrl" | "leaseMs">> = {}) {
+export function initializeHub(
+  file: string,
+  options: Partial<Pick<HubConfig, "port" | "publicUrl" | "leaseMs" | "management">> = {},
+) {
   // The config parent may be an existing project; only hub state must be private.
   mkdirSync(path.dirname(path.resolve(file)), { recursive: true, mode: 0o700 });
   writeFileSync(file, `${JSON.stringify({ port: 16180, ...options }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
@@ -78,7 +84,45 @@ export function readHubConfig(file: string): HubConfig {
   // Unix sockets can be shared with ordinary containers. No host PID/Docker API required.
   if (process.platform === "win32")
     throw new Error("Bundled hub currently requires Unix IPC (Linux/macOS); standalone Pi Web still works");
-  return { stateDir, runtimeDir, socketPath: path.join(runtimeDir, "registry.sock"), host, port, leaseMs, publicUrl };
+  const lifecycle = value.lifecycle === undefined ? undefined : lifecycleConfig(value.lifecycle);
+  const management = value.management === undefined ? undefined : managementConfig(value.management, port, publicUrl);
+  return {
+    stateDir,
+    runtimeDir,
+    socketPath: path.join(runtimeDir, "registry.sock"),
+    host,
+    port,
+    leaseMs,
+    publicUrl,
+    ...(lifecycle ? { lifecycle } : {}),
+    ...(management ? { management } : {}),
+  };
+}
+
+export function managementConfig(
+  value: unknown,
+  chatPort: number,
+  chatPublicUrl?: string,
+): NonNullable<HubConfig["management"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid management configuration");
+  const v = value as Record<string, unknown>;
+  if (
+    Object.keys(v).some((key) => !["port", "publicUrl"].includes(key)) ||
+    !Number.isInteger(v.port) ||
+    Number(v.port) < 0 ||
+    Number(v.port) > 65535 ||
+    (v.port !== 0 && v.port === chatPort)
+  )
+    throw new Error("Management requires a distinct port");
+  const publicUrl = v.publicUrl === undefined ? undefined : validatedPublicUrl(v.publicUrl);
+  if (
+    publicUrl &&
+    (!chatPublicUrl ||
+      new URL(publicUrl).pathname !== "/" ||
+      new URL(publicUrl).origin === new URL(chatPublicUrl).origin)
+  )
+    throw new Error("Management requires a distinct canonical public origin");
+  return { port: Number(v.port), ...(publicUrl ? { publicUrl } : {}) };
 }
 
 function validHost(host: string) {

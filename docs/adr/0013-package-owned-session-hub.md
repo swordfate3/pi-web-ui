@@ -58,3 +58,31 @@ waiter; it never repeats `/resume`, `/new` or other lifecycle commands.
 See ADR 0008 for the transport contract. Deployment requires the new Hub server
 and browser assets together; a frontend-only update cannot teach an old Hub this
 endpoint. The existing state, grants and generation ledger must be retained.
+
+## Optional lifecycle delegation (2026-10-17)
+
+An explicitly configured loopback lifecycle provider may receive a narrowly scoped
+request to restart one managed Pi child. The Hub does not acquire Docker or shell
+authority: an independent Gate validates its own lifecycle policy, image digest,
+launcher labels, runtime configuration and immutable target identity, then calls
+one fixed control client. Existing image-deployment auto approval is not authority
+for process restarts. Old clients remain routable but do not advertise management.
+
+Gateway access and registration credentials are not management authorization.
+The trusted CLI issues a short-lived single-use pairing code; an additional
+HttpOnly management session, same-origin writes and CSRF token are required.
+The provider credential and management state remain Hub-private, outside all
+Agent-shared home/runtime volumes. A lifecycle-only Gate token cannot deploy.
+
+Hub persists an idempotency receipt before submitting. The Gate job ID is exactly
+that key, so a lost HTTP reply is recovered by query, not repeat execution.
+An explicitly armed managed handoff does not bind an arbitrary first successor:
+Gate must report the original runtime/session/leaf, a new runtime and expected
+loaded version, and Hub must prove the matching live registration. Only that
+operation receives a bounded120-second browser wait. General handoff behavior
+and permanent generation retirement remain unchanged. No message is replayed.
+
+The container supervisor and trusted launcher are deployment responsibilities,
+not a mandatory daemon hidden in extension import. Their runtime socket is private
+to that container, not the shared Hub registry. No lifecycle provider configured
+means management is unavailable, without changing standalone extension behavior.

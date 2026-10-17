@@ -2,14 +2,18 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import { initializeHub, issueSession, readHubConfig, revokeSession } from "../hub/config.ts";
+import { issueManagementCode, revokeManagement } from "../hub/management.ts";
 import { startHub } from "../hub/server.ts";
 
 const help = `Pi Web Hub — independent multi-session portal
 
   pi-web-hub init [--port 16180] [--public-url https://pi.example.com/]
+    [--management-port 16181] [--management-public-url https://admin.example.com/]
   pi-web-hub serve
   pi-web-hub issue --label "Project A" --output /private/session-a.json [--backend-host 127.0.0.1]
   pi-web-hub revoke --run-id <session-capability-id>
+  pi-web-hub pair                     Generate a single-use management code (10 minutes)
+  pi-web-hub revoke-management        Revoke all browser management sessions
 
 All commands accept --config <file> (default ~/.pi/web-hub/config.json).
 The hub never launches agents or deploys SSH/TLS/login. See docs/hub.md.
@@ -24,10 +28,12 @@ async function main(args) {
     return;
   }
   const commands = new Map([
-    ["init", ["--config", "--port", "--public-url"]],
+    ["init", ["--config", "--port", "--public-url", "--management-port", "--management-public-url"]],
     ["serve", ["--config"]],
     ["issue", ["--config", "--label", "--output", "--backend-host"]],
     ["revoke", ["--config", "--run-id"]],
+    ["pair", ["--config"]],
+    ["revoke-management", ["--config"]],
   ]);
   const permitted = commands.get(command);
   if (!permitted) throw new Error("Unknown hub command; use --help");
@@ -51,12 +57,32 @@ async function main(args) {
       if (new URL(validatedPublicUrl(publicUrl)).pathname !== "/")
         throw new Error("Hub public URL must use the domain root");
     }
-    initializeHub(configFile, { port, ...(publicUrl ? { publicUrl } : {}) });
+    let management;
+    if (options.has("--management-public-url") && !options.has("--management-port"))
+      throw new Error("Management port required");
+    if (options.has("--management-port")) {
+      const { managementConfig } = await import("../hub/config.ts");
+      management = managementConfig(
+        {
+          port: Number(options.get("--management-port")),
+          ...(options.has("--management-public-url") ? { publicUrl: options.get("--management-public-url") } : {}),
+        },
+        port,
+        publicUrl,
+      );
+    }
+    initializeHub(configFile, { port, ...(publicUrl ? { publicUrl } : {}), ...(management ? { management } : {}) });
     process.stdout.write(`${JSON.stringify({ configured: true, configFile })}\n`);
     return;
   }
   const config = readHubConfig(configFile);
-  if (command === "issue") {
+  if (command === "pair") {
+    // Explicit trusted-terminal operation, never called by the HTTP server or model tools.
+    process.stdout.write(`${JSON.stringify(issueManagementCode(config))}\n`);
+  } else if (command === "revoke-management") {
+    revokeManagement(config);
+    process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
+  } else if (command === "issue") {
     if (!options.has("--output") || !options.has("--label")) throw new Error("issue requires --output and --label");
     const credentialFile = path.resolve(options.get("--output"));
     const credential = issueSession(config, credentialFile, {
@@ -74,7 +100,7 @@ async function main(args) {
   } else if (command === "serve") {
     const hub = await startHub(config);
     process.stdout.write(
-      `${JSON.stringify({ localUrl: hub.url, portalUrl: `${config.publicUrl ?? hub.url}sessions/`, socketPath: hub.socketPath })}\n`,
+      `${JSON.stringify({ localUrl: hub.url, portalUrl: `${config.publicUrl ?? hub.url}sessions/`, socketPath: hub.socketPath, ...(hub.managementUrl ? { managementUrl: hub.managementUrl } : {}) })}\n`,
     );
     let closing = false;
     const stop = () => {

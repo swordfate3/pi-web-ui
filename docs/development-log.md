@@ -364,6 +364,14 @@
 - 两阶段单次 preview、session/runtime/leaf、busy 与 lifecycle fences；literal dispatch ACK 不冒充接受／完成，unknown 不自动重发。原生 void API 无 correlation metadata 的限制、恢复方式与第三方 hook／图片规范化边界明确记录。
 - 审查发现并修复永久 leaf 去重、无关事件误解 unknown、导航期 compact 漏锁及反向 async model mutation 窗口；真实 Pi 测出 ready 与 snapshot 间的 stale leaf，改操作前同步已保存页，不放宽提交检查。最终316单测（315通过／1可选skip）、71/71源码Chromium、离线包真实Pi修订2/2、16后端回归、build／manifest／types0通过；独立Browser桌面手机截图直接查看并停止自有服务。队列scope和旧Branch异步草稿窗口也补保护。最终验证与未测范围见[报告](validation/message-revision.md)。本轮本地未提交／push／安装更新或部署。
 
+## 30. Hub 请求门禁重启单个 Pi 进程（源码完成，尚未上线）
+
+- 独立管理来源的一次性配对、生命周期专用凭据和默认禁用的精确镜像策略；普通 Pi/Hub 不获取 Docker 或管理员 socket。保留已有卷、UID1000及权限限制，不重建容器、不运行 npm 更新。
+- Supervisor 只执行一次平滑子进程重启，恢复精确已保存会话及分支；固定预加载输入防护保守拒绝无法证明空闲的进程。不强杀、不重试、不重放提示；外部退出与新进程发布竞争已经补测修正。
+- Gate 执行结果与 Hub 实时身份核对分开；首次成功需要完整证明，历史成功不因后续聊天或路由轮转变成失败，但原链接不可证明时不再给出。修正 Docker Mounts 顺序变化引起的错误漂移，保留真实字段变化拒绝。
+- 最新392默认单测（391通过／1可选skip）、269已同步Gate测试、75已同步Pi测试（72通过／3条件skip）、6真实Pi输入防护、2容器恢复与连续3次真实浏览器全链路通过。类型、错误级Biome、打包及manifest通过；桌面1365／手机390截图直接查看，无溢出，合成历史提示与真实Pi E2E证据分开。组件审查和最终两项修正复审均通过。
+- 27个审查过的宿主源码文件已备份后同步；相对路径补丁随功能分支保留。没有更新生产镜像、重启服务、签发生产凭据、启用策略、改阿里云或推送main。生产需要独立认证管理HTTPS入口、明确镜像上线和选定旧Pi容器的一次性迁移。完整证据与局限见[验证报告](validation/managed-restart-final-validation.md)，操作见[运行说明](managed-pi-restart.md)。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。

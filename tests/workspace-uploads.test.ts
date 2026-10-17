@@ -26,7 +26,11 @@ import {
 function fixture(t: test.TestContext, now?: () => number) {
   const cwd = mkdtempSync(path.join(tmpdir(), "pi-upload-test-"));
   const store = new WorkspaceUploads(now);
+  // Production HTTP/Pi owns a live handle; the standalone test process must
+  // provide one while awaiting intentionally unref'ed TTL/dispatch timers.
+  const keepAlive = setInterval(() => {}, 1000);
   t.after(() => {
+    clearInterval(keepAlive);
     store.clear();
     rmSync(cwd, { recursive: true, force: true });
   });

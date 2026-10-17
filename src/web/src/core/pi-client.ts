@@ -24,6 +24,7 @@ export class PiClient {
   private hubRoute: HubRoute | null = null;
   private hubRoutePath: string | null = null;
   private handoffDeadline = 0;
+  private managedRestart: { id: string; timeoutMs: number; deadline?: number } | null = null;
   private handoffController: AbortController | null = null;
   private requestCounter = 0;
   private readonly pendingRequests = new Map<string, PendingRequest>();
@@ -75,6 +76,17 @@ export class PiClient {
               /^[a-f0-9]{48}$/.test(route.token) &&
               location.pathname === `/s/${route.generation}/`
             ) {
+              const restart = route.restart;
+              if (
+                restart &&
+                typeof restart.id === "string" &&
+                /^[a-f0-9]{32}$/.test(restart.id) &&
+                restart.timeoutMs === 120_000
+              ) {
+                // Repeated control for the same operation must not extend its lease.
+                if (this.managedRestart?.id !== restart.id)
+                  this.managedRestart = { id: restart.id, timeoutMs: 120_000 };
+              } else this.managedRestart = null;
               this.hubRoute = { generation: route.generation, token: route.token };
               this.hubRoutePath = location.pathname;
               this.handoffDeadline = 0;
@@ -96,6 +108,7 @@ export class PiClient {
     ws.onclose = () => {
       if (this.ws !== ws) return;
       this.ws = null;
+      if (this.managedRestart) this.managedRestart.deadline ??= Date.now() + this.managedRestart.timeoutMs;
       for (const id of this.sentRequestIds) {
         const pending = this.pendingRequests.get(id);
         if (pending) {
@@ -168,6 +181,7 @@ export class PiClient {
     this.hubRoute = null;
     this.hubRoutePath = null;
     this.handoffDeadline = 0;
+    this.managedRestart = null;
     if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.ws?.close();
@@ -192,7 +206,7 @@ export class PiClient {
     if (location.pathname !== sourcePath) return;
     const controller = new AbortController();
     this.handoffController = controller;
-    this.handoffDeadline ||= Date.now() + 15_000;
+    this.handoffDeadline ||= this.managedRestart?.deadline ?? Date.now() + 15_000;
     const timeout = window.setTimeout(() => controller.abort(), Math.max(0, this.handoffDeadline - Date.now()));
     this.options.onConnectionChange("connecting");
     try {

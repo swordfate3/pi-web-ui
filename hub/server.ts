@@ -5,8 +5,17 @@ import net from "node:net";
 import path from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
-import { type Grant, type HubConfig, privateDirectory, readGrant, readPrivateJson } from "./config.ts";
-import { portalCss, portalHtml, portalJs } from "./portal.ts";
+import { type RuntimeMetadata, readRuntimeMetadata } from "../extensions/runtime-metadata.ts";
+import {
+  type Grant,
+  type HubConfig,
+  managementConfig,
+  privateDirectory,
+  readGrant,
+  readPrivateJson,
+} from "./config.ts";
+import { portalCss, portalJs, portalManagementCss, portalManagementJs, renderPortalHtml } from "./portal.ts";
+import { createRestartApi } from "./restart-api.ts";
 
 type Session = {
   grant: Grant;
@@ -15,8 +24,17 @@ type Session = {
   expires: number;
   since: number;
   sessionName: string | null;
+  runtime?: RuntimeMetadata;
 };
-type Handoff = { grant: Grant; from: string; successor?: string; expires: number };
+type Handoff = {
+  grant: Grant;
+  from: string;
+  successor?: string;
+  expires: number;
+  restart?: { id: string; runtimeId: string; deadline?: number };
+  originalRuntimeId?: string;
+  client?: WebSocket;
+};
 const mac = (token: string, value: string) => createHmac("sha256", token).update(value).digest("hex");
 function equal(value: unknown, expected: string) {
   if (typeof value !== "string") return false;
@@ -92,7 +110,13 @@ function backendHeaders(request: IncomingMessage, session: Session) {
   ]);
   for (const field of (request.headers.connection ?? "").split(",")) hop.add(field.trim().toLowerCase());
   for (const [key, value] of Object.entries(request.headers)) {
-    if (!hop.has(key) && !key.startsWith("x-pi-web-") && !key.startsWith("x-forwarded-") && key !== "forwarded")
+    if (
+      !hop.has(key) &&
+      !key.startsWith("x-pi-web-") &&
+      !key.startsWith("x-pi-hub-") &&
+      !key.startsWith("x-forwarded-") &&
+      key !== "forwarded"
+    )
       headers[key] = value;
   }
   headers["x-pi-web-generation"] = session.generation;
@@ -102,6 +126,7 @@ function backendHeaders(request: IncomingMessage, session: Session) {
 
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 export async function startHub(config: HubConfig) {
+  if (config.management) managementConfig(config.management, config.port, config.publicUrl);
   privateDirectory(config.runtimeDir);
   // Exclusive acquisition precedes any asynchronous stale-socket recovery.
   // Fail closed after a crash: a trusted operator must confirm the old process
@@ -174,7 +199,16 @@ async function startLockedHub(config: HubConfig) {
   let stopped = false;
   let pending = Promise.resolve();
   let url = "";
+  let managementUrl: string | undefined;
+  const restarting = new Map<string, { id: string; runtimeId: string; deadline?: number }>();
+  const activateRestart = (generation: string) => {
+    const restart = restarting.get(generation);
+    if (!restart) return;
+    restart.deadline ??= Date.now() + 210_000;
+    for (const item of handoffs.values()) if (item.restart === restart) item.expires = restart.deadline;
+  };
   const retire = (generation: string) => {
+    activateRestart(generation);
     sessions.delete(generation);
     for (const [ws, id] of webSockets) if (id === generation) ws.terminate();
   };
@@ -198,6 +232,118 @@ async function startLockedHub(config: HubConfig) {
     }
     return session;
   };
+  const granted = (runId: string) => {
+    try {
+      return !readGrant(config, runId).revoked;
+    } catch {
+      return false;
+    }
+  };
+  const verified = async (generation: string) => {
+    const session = current(generation);
+    if (
+      !session ||
+      !(await proveBackend(session.grant, generation, session.port)) ||
+      stopped ||
+      current(generation) !== session
+    )
+      return undefined;
+    return session;
+  };
+  const restartApi = createRestartApi(config, {
+    clearHandoff: (id) => {
+      for (const [generation, item] of restarting) if (item.id === id) restarting.delete(generation);
+      for (const [token, item] of handoffs) {
+        if (item.restart?.id !== id) continue;
+        const original = current(item.from);
+        if (
+          item.client?.readyState !== WebSocket.OPEN ||
+          webSockets.get(item.client) !== item.from ||
+          original?.grant.run_id !== item.grant.run_id ||
+          original.runtime?.runtimeId !== item.restart.runtimeId
+        ) {
+          handoffs.delete(token);
+          continue;
+        }
+        // The old connection survived. Drop all managed authority but retain
+        // ordinary recovery, pinned to this generation/runtime rather than any
+        // later registration. Its existing close handler starts the normal lease.
+        item.originalRuntimeId = item.restart.runtimeId;
+        item.restart = undefined;
+        item.successor = item.from;
+        item.expires = Infinity;
+        item.client.send(
+          JSON.stringify({
+            type: "event",
+            event: "hub_route",
+            payload: { generation: item.from, token },
+          }),
+        );
+      }
+    },
+    granted,
+    lookup: async (generation) => {
+      const session = await verified(generation);
+      return session ? { runId: session.grant.run_id, generation, runtime: session.runtime } : undefined;
+    },
+    successor: async (runId, runtimeId, sessionId, leafId, version) => {
+      for (const generation of sessions.keys()) {
+        const session = current(generation);
+        const runtime = session?.runtime;
+        if (
+          session?.grant.run_id !== runId ||
+          !runtime?.managed ||
+          runtime.runtimeId !== runtimeId ||
+          runtime.sessionId !== sessionId ||
+          runtime.leafId !== leafId ||
+          runtime.version !== version
+        )
+          continue;
+        const proved = await verified(generation);
+        const fresh = proved?.runtime;
+        if (
+          proved?.grant.run_id === runId &&
+          fresh?.managed &&
+          fresh.runtimeId === runtimeId &&
+          fresh.sessionId === sessionId &&
+          fresh.leafId === leafId &&
+          fresh.version === version
+        )
+          return `/s/${generation}/`;
+      }
+      return undefined;
+    },
+    prepareHandoff: (runId, receipt) => {
+      const selected = current(receipt.generation);
+      if (
+        !selected ||
+        selected.grant.run_id !== runId ||
+        selected.runtime?.runtimeId !== receipt.runtimeId ||
+        selected.runtime.sessionId !== receipt.sessionId ||
+        selected.runtime.leafId !== receipt.leafId
+      )
+        throw new Error("Session changed");
+      const restart: { id: string; runtimeId: string; deadline?: number } = {
+        id: receipt.id,
+        runtimeId: receipt.runtimeId,
+      };
+      restarting.set(receipt.generation, restart);
+      for (const [token, item] of handoffs) {
+        if (item.from !== receipt.generation || item.grant.run_id !== runId) continue;
+        item.restart = restart;
+        item.expires = Infinity;
+        if (!item.client) activateRestart(receipt.generation);
+        if (item.client?.readyState === WebSocket.OPEN)
+          item.client.send(
+            JSON.stringify({
+              type: "event",
+              event: "hub_route",
+              payload: { generation: item.from, token, restart: { id: receipt.id, timeoutMs: 120_000 } },
+            }),
+          );
+      }
+    },
+  });
   const register = async (value: Record<string, unknown>) => {
     if (
       stopped ||
@@ -237,6 +383,7 @@ async function startLockedHub(config: HubConfig) {
       throw new Error("Registration rejected");
     const sessionName =
       typeof value.sessionName === "string" ? value.sessionName.replace(/\p{Cc}/gu, " ").trim() || null : null;
+    const runtime = value.runtime === undefined ? undefined : readRuntimeMetadata(value.runtime);
     const port = Number(value.port);
     if (owner) {
       if (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port)
@@ -254,6 +401,7 @@ async function startLockedHub(config: HubConfig) {
     if (session) {
       session.expires = Date.now() + config.leaseMs;
       session.sessionName = sessionName;
+      session.runtime = runtime;
     } else
       sessions.set(generation, {
         grant,
@@ -262,11 +410,12 @@ async function startLockedHub(config: HubConfig) {
         expires: Date.now() + config.leaseMs,
         since: Date.now(),
         sessionName,
+        runtime,
       });
     pruneHandoffs();
     if (!session) {
       for (const item of handoffs.values()) {
-        if (item.grant.run_id === grant.run_id && item.from !== generation && !item.successor)
+        if (!item.restart && item.grant.run_id === grant.run_id && item.from !== generation && !item.successor)
           item.successor = generation;
       }
     }
@@ -324,26 +473,52 @@ async function startLockedHub(config: HubConfig) {
       });
     });
   });
-  const allowedBrowser = (request: IncomingMessage, requireOrigin = false) => {
-    const allowed = new Set([new URL(url).origin, ...(config.publicUrl ? [new URL(config.publicUrl).origin] : [])]);
+  const allowedBrowser = (request: IncomingMessage, requireOrigin = false, admin = false) => {
+    const local = admin ? managementUrl : url;
+    const canonical = admin ? config.management?.publicUrl : config.publicUrl;
+    if (!local) return false;
+    const allowed = new Set([new URL(local).origin, ...(canonical ? [new URL(canonical).origin] : [])]);
     const hosts = new Set([...allowed].map((origin) => new URL(origin).host));
     const origin = request.headers.origin;
     return (
       hosts.has(request.headers.host ?? "") &&
       request.headers["sec-fetch-site"] !== "cross-site" &&
-      (origin === undefined ? !requireOrigin : allowed.has(origin))
+      (origin === undefined
+        ? !requireOrigin
+        : allowed.has(origin) && (!admin || new URL(origin).host === request.headers.host))
     );
   };
   const matchRoute = (request: IncomingMessage) => /^\/s\/([a-f0-9]{32})(\/.*)?$/.exec(request.url ?? "");
   const fail = (response: ServerResponse, code: number) =>
     response.writeHead(code, { "Cache-Control": "no-store" }).end();
-  const server = http.createServer(async (request, response) => {
+  const handle = async (request: IncomingMessage, response: ServerResponse, admin = false) => {
     try {
-      if (!allowedBrowser(request)) {
+      if (!allowedBrowser(request, false, admin)) {
         fail(response, 403);
         return;
       }
       const pathname = request.url?.split("?")[0];
+      if (admin) {
+        if (await restartApi.handle(request, response, allowedBrowser(request, true, true))) return;
+        if (
+          !["/", "/sessions/", "/api/sessions", "/hub.js", "/hub-management.js", "/hub.css"].includes(pathname ?? "") ||
+          request.headers["service-worker"] !== undefined
+        ) {
+          fail(response, 404);
+          return;
+        }
+      } else if (pathname?.startsWith("/api/management/")) {
+        if (request.method === "GET" && pathname === "/api/management/status") {
+          response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(
+            JSON.stringify({
+              available: false,
+              authorized: false,
+              ...(managementUrl ? { managementUrl: config.management?.publicUrl ?? managementUrl } : {}),
+            }),
+          );
+        } else fail(response, 404);
+        return;
+      }
       if (pathname === "/api/session-handoff") {
         if (request.method !== "POST") {
           fail(response, 405);
@@ -366,6 +541,24 @@ async function startLockedHub(config: HubConfig) {
           fail(response, 410);
           return;
         }
+        if (item.restart) {
+          try {
+            const result = await restartApi.resolve(item.restart.id);
+            if (item.expires <= Date.now() || !granted(item.grant.run_id)) throw new Error();
+            if (result.status === "succeeded" && typeof result.path === "string") {
+              response
+                .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
+                .end(JSON.stringify({ path: result.path }));
+            } else if (["pending", "queued", "running"].includes(result.status as string)) {
+              response
+                .writeHead(202, { "Content-Type": "application/json", "Cache-Control": "no-store" })
+                .end(JSON.stringify({ pending: true }));
+            } else fail(response, 410);
+          } catch {
+            fail(response, 410);
+          }
+          return;
+        }
         const targetGeneration = item.successor ?? item.from;
         const successor = current(targetGeneration);
         const proved = successor && (await proveBackend(grant, successor.generation, successor.port));
@@ -374,6 +567,7 @@ async function startLockedHub(config: HubConfig) {
         const latestGrant = readGrant(config, grant.run_id);
         if (
           stopped ||
+          handoffs.get(token as string) !== item ||
           item.expires <= Date.now() ||
           latestGrant.revoked ||
           !equal(latestGrant.token, grant.token) ||
@@ -401,6 +595,7 @@ async function startLockedHub(config: HubConfig) {
           !proved ||
           stopped ||
           current(targetGeneration) !== successor ||
+          (item.originalRuntimeId !== undefined && successor.runtime?.runtimeId !== item.originalRuntimeId) ||
           item.expires <= Date.now()
         ) {
           fail(response, 410);
@@ -444,6 +639,7 @@ async function startLockedHub(config: HubConfig) {
             const headers = { ...result.headers };
             delete headers["set-cookie"];
             delete headers.connection;
+            for (const key of Object.keys(headers)) if (key.startsWith("x-pi-hub-")) delete headers[key];
             response.writeHead(result.statusCode ?? 502, { ...headers, "Cache-Control": "no-store" });
             result.on("error", () => response.destroy());
             result.pipe(response);
@@ -474,8 +670,9 @@ async function startLockedHub(config: HubConfig) {
             label: s.grant.label,
             sessionName: s.sessionName,
             generation: s.generation,
-            path: `/s/${s.generation}/`,
+            path: admin ? `${config.publicUrl ?? url}s/${s.generation}/` : `/s/${s.generation}/`,
             since: s.since,
+            ...(s.runtime ? { runtime: { version: s.runtime.version, managed: s.runtime.managed } } : {}),
           }));
         response
           .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
@@ -484,12 +681,17 @@ async function startLockedHub(config: HubConfig) {
       }
       const asset =
         pathname === "/sessions/"
-          ? ["text/html", portalHtml]
+          ? [
+              "text/html",
+              renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl),
+            ]
           : pathname === "/hub.js"
             ? ["text/javascript", portalJs]
-            : pathname === "/hub.css"
-              ? ["text/css", portalCss]
-              : undefined;
+            : admin && pathname === "/hub-management.js"
+              ? ["text/javascript", portalManagementJs]
+              : pathname === "/hub.css"
+                ? ["text/css", portalCss + portalManagementCss]
+                : undefined;
       if (!asset) {
         fail(response, pathname?.startsWith("/s/") ? 410 : 404);
         return;
@@ -507,7 +709,19 @@ async function startLockedHub(config: HubConfig) {
       if (!response.headersSent) fail(response, 500);
       else response.destroy();
     }
+  };
+  const server = http.createServer((request, response) => void handle(request, response));
+  const managementServer = config.management
+    ? http.createServer((request, response) => void handle(request, response, true))
+    : undefined;
+  managementServer?.on("connection", (socket) => {
+    connections.add(socket);
+    socket.on("error", () => socket.destroy());
+    socket.once("close", () => connections.delete(socket));
   });
+  managementServer?.on("clientError", (_error, socket) => socket.destroy());
+  managementServer?.on("upgrade", (_request, socket) => socket.destroy());
+  managementServer?.on("connect", (_request, socket) => socket.destroy());
   const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
   server.on("connection", (socket) => {
     connections.add(socket);
@@ -592,16 +806,31 @@ async function startLockedHub(config: HubConfig) {
           pruneHandoffs();
           if (handoffs.size < 512) {
             const token = randomBytes(24).toString("hex");
-            const item: Handoff = { grant: session.grant, from: session.generation, expires: Infinity };
+            const restart = restarting.get(session.generation);
+            const activeRestart =
+              restart && (restart.deadline === undefined || restart.deadline > Date.now()) ? restart : undefined;
+            const item: Handoff = {
+              grant: session.grant,
+              from: session.generation,
+              expires: activeRestart?.deadline ?? Infinity,
+              client,
+              restart: activeRestart,
+            };
             handoffs.set(token, item);
             client.once("close", () => {
-              item.expires = Date.now() + 45_000;
+              item.client = undefined;
+              activateRestart(item.from);
+              item.expires = item.restart?.deadline ?? Date.now() + 45_000;
             });
             client.send(
               JSON.stringify({
                 type: "event",
                 event: "hub_route",
-                payload: { generation: session.generation, token },
+                payload: {
+                  generation: session.generation,
+                  token,
+                  ...(activeRestart ? { restart: { id: activeRestart.id, timeoutMs: 120_000 } } : {}),
+                },
               }),
             );
           }
@@ -628,17 +857,31 @@ async function startLockedHub(config: HubConfig) {
     await listen(server, config.port, config.host);
     const port = (server.address() as net.AddressInfo).port;
     url = `http://${config.host === "::1" ? "[::1]" : config.host}:${port}/`;
+    if (managementServer && config.management) {
+      await listen(managementServer, config.management.port, "127.0.0.1");
+      managementUrl = `http://127.0.0.1:${(managementServer.address() as net.AddressInfo).port}/`;
+      const chatOrigins = [new URL(url).origin, ...(config.publicUrl ? [new URL(config.publicUrl).origin] : [])];
+      if (
+        [managementUrl, config.management.publicUrl].some(
+          (value) => value && chatOrigins.includes(new URL(value).origin),
+        )
+      )
+        throw new Error("Management origin must differ from chat origin");
+    }
   } catch (error) {
     stopped = true;
     for (const peer of peers) peer.destroy();
     registry.close();
     server.close();
+    managementServer?.close();
     throw error;
   }
   const sweep = setInterval(
     () => {
       for (const id of sessions.keys()) current(id);
       pruneHandoffs();
+      for (const [generation, item] of restarting)
+        if (item.deadline !== undefined && item.deadline <= Date.now()) restarting.delete(generation);
     },
     Math.min(1000, config.leaseMs),
   );
@@ -646,6 +889,7 @@ async function startLockedHub(config: HubConfig) {
   let closing: Promise<void> | undefined;
   return {
     url,
+    ...(managementUrl ? { managementUrl } : {}),
     socketPath: config.socketPath,
     close() {
       if (closing) return closing;
@@ -656,10 +900,12 @@ async function startLockedHub(config: HubConfig) {
       for (const peer of peers) peer.destroy();
       for (const connection of connections) connection.destroy();
       server.closeAllConnections();
+      managementServer?.closeAllConnections();
       closing = Promise.all([
         new Promise<void>((resolve) => server.close(() => resolve())),
         new Promise<void>((resolve) => registry.close(() => resolve())),
         new Promise<void>((resolve) => wss.close(() => resolve())),
+        ...(managementServer ? [new Promise<void>((resolve) => managementServer.close(() => resolve()))] : []),
         pending,
       ]).then(() => {});
       return closing;

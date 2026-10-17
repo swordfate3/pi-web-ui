@@ -225,6 +225,9 @@ try {
     "bin/pi-web-hub.mjs",
     "vite.hub.config.ts",
     "extensions/workspace-uploads.ts",
+    "extensions/runtime-control.ts",
+    "extensions/runtime-metadata.ts",
+    "extensions/runtime-stdin-guard.mjs",
     "src/web/src/core/incremental-sha256.ts",
   ];
   for (const [index, input] of staleInputs.entries()) {
@@ -273,6 +276,9 @@ try {
     "hub/server.ts",
     "extensions/connection-config.ts",
     "extensions/connection-listener.ts",
+    "extensions/runtime-control.ts",
+    "extensions/runtime-metadata.ts",
+    "extensions/runtime-stdin-guard.mjs",
     "extensions/workspace-uploads.ts",
     "extensions/session-registration.ts",
     "extensions/remote-access/plan.ts",

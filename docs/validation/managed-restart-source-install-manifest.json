@@ -1,0 +1,171 @@
+{
+  "date": "2026-10-17",
+  "status": "installed_source_only",
+  "backup": "pi-docker/backup/managed-pi-restart-source-20261017-final",
+  "verification": "27 exact staged-to-installed matches; original modes preserved, new modes verified; no production rollout",
+  "scope": "reviewed source only; no image build, live restart, credentials or policy activation",
+  "files": [
+    {
+      "path": "pi-docker/Dockerfile",
+      "host_before": "555d667dfca314bc945e136eff326940fff152a83952855ddb984fb1a7a2d8ac",
+      "source_sha256": "7c3abb9221e8fb52c0e49ed4982a117a9980a71a2c682fe6769228d428d469e9",
+      "mode": "644"
+    },
+    {
+      "path": "pi-docker/tests/test_stdin_guard.mjs",
+      "host_before": "MISSING",
+      "source_sha256": "8c4119eb0e29b0ae91421fb4e1ed7124d652838d73b5631fe718246db5643ca3",
+      "mode": "664"
+    },
+    {
+      "path": "pi-docker/tests/test_guard_overheads.py",
+      "host_before": "MISSING",
+      "source_sha256": "757733803c38df93bff23466af0cb0ece96f7b78ffcc9ce408b05c8ca0002d98",
+      "mode": "664"
+    },
+    {
+      "path": "pi-docker/tests/test_shutdown_races.py",
+      "host_before": "MISSING",
+      "source_sha256": "fcd63f97642972a852eb67e3b3d7d2a5e9aa1cf8da80bb4055389f1b1b034ba6",
+      "mode": "664"
+    },
+    {
+      "path": "pi-docker/tests/test_pi_supervisor.py",
+      "host_before": "MISSING",
+      "source_sha256": "fb64d171de8cb87263ebc76dec86f536316214a36f53022f97ae315d1fd45031",
+      "mode": "664"
+    },
+    {
+      "path": "pi-docker/tests/test_entrypoint_models.py",
+      "host_before": "e9d55913518bebb651a49ffff22c96cd610997c2139f21d38ea24fd03f4405ef",
+      "source_sha256": "3f3a107a2bbb1828e41b7bf1016d2e995867e1cc97c18376557eeae482f51b5d",
+      "mode": "644"
+    },
+    {
+      "path": "pi-docker/tests/test_pirun_runtime.py",
+      "host_before": "a01becf341c19734125b2419152c9949e909f88a177c97c32b4b0fddb0efc6f1",
+      "source_sha256": "ecf4a4b98b3a1e0c65a9982992d75d5205366a93cb0e007bcee39cd529857d71",
+      "mode": "644"
+    },
+    {
+      "path": "pi-docker/pi-entrypoint",
+      "host_before": "9aa0b064ee0697fe72af8c1ec8f476f2eec853a17b74761d723352a65287f701",
+      "source_sha256": "24079c83731ca6afc99ec36f007558c079150d1b0b718d70c7b538c20168afa6",
+      "mode": "755"
+    },
+    {
+      "path": "pi-docker/scripts/pi-pirun",
+      "host_before": "2f3b1810297ad7f20cad976039b4f2248e78b05c648ff0c690be62eeae4a2a38",
+      "source_sha256": "48659b0f31ec626887edbe98b0b2c58228194498bd45473dc54a2da1c5beced2",
+      "mode": "755"
+    },
+    {
+      "path": "pi-docker/runtime/pi_supervisor.py",
+      "host_before": "MISSING",
+      "source_sha256": "d3c259e1dc0462699d77724173d1940111405842669addca6f1f14bdecb11ce0",
+      "mode": "664"
+    },
+    {
+      "path": "pi-docker/runtime/pi-session-control",
+      "host_before": "MISSING",
+      "source_sha256": "87d83da37bdcccd72024b94266c3d68f8ce6c0380108d532459fec430655c34c",
+      "mode": "664"
+    },
+    {
+      "path": "pi-docker/runtime/pi_stdin_guard.mjs",
+      "host_before": "MISSING",
+      "source_sha256": "f966e83a5f0e7c9e446488e7ede6d0bd0ec2477878bdfaa14a00667eaa92c223",
+      "mode": "664"
+    },
+    {
+      "path": "pi-docker/runtime/pi_model_sync.py",
+      "host_before": "MISSING",
+      "source_sha256": "89f6cbc54e838e6b521bb5beabeae73d1719a846d3b01fd76e44ef823d1ef045",
+      "mode": "664"
+    },
+    {
+      "path": "pi-docker/runtime/pi_launch_policy.py",
+      "host_before": "MISSING",
+      "source_sha256": "2aad1a4dd2bf7d94cc6c67922cc87491f0b594e456bb7a2f15d99c7d98b2be98",
+      "mode": "664"
+    },
+    {
+      "path": "gate/tests/test_clients.py",
+      "host_before": "a70fdd9225176f82a04ea32706540dde327147a6a85937dbfd8cafa3a66d4278",
+      "source_sha256": "045733fff3999c2bb1d6b9de31c69cbc19934e4258d2e721185dd93fbf8c4d50",
+      "mode": "644"
+    },
+    {
+      "path": "gate/tests/test_lifecycle.py",
+      "host_before": "MISSING",
+      "source_sha256": "b8edc2bb3268b7a5e4d1912ae5dc6de9bde5e41d65e35e619aa426ac7fac4c1a",
+      "mode": "664"
+    },
+    {
+      "path": "gate/tests/test_lifecycle_round1.py",
+      "host_before": "MISSING",
+      "source_sha256": "f0c92ab7727d7f08624f9e32e0669c873d22c1abd0ed9cdf520561c856e36e3a",
+      "mode": "664"
+    },
+    {
+      "path": "gate/tests/test_lifecycle_round2.py",
+      "host_before": "MISSING",
+      "source_sha256": "c81bdbbc24a7958ebe37f6e28ae51fd950da0ab97c27b959a50a85ee88b47965",
+      "mode": "664"
+    },
+    {
+      "path": "gate/tests/test_lifecycle_round3.py",
+      "host_before": "MISSING",
+      "source_sha256": "e7e1a0c72eceee6d6dff8eb0e6cb90398b1f061df65745a08d6c173c3ccbe25a",
+      "mode": "664"
+    },
+    {
+      "path": "gate/gatectl",
+      "host_before": "50fad3e80fecbfc9ebe86007478a763531c0d93eb2046731097895b568aedf6d",
+      "source_sha256": "52081a766a3e8287e18db7dc929de018833416923840dff6c708044d4c977581",
+      "mode": "755"
+    },
+    {
+      "path": "gate/README.md",
+      "host_before": "5473273d344c949082477f94d8c21a0cc2d88fcd731e837338689b9759e80892",
+      "source_sha256": "401fabc8a462e657e0d16a688932f96b5ae58c6cd52bb807e815f79525f2842d",
+      "mode": "644"
+    },
+    {
+      "path": "gate/gate/service.py",
+      "host_before": "821765a5afde42c472f9cb5a7ea40f52121959b1506532450d28ed21f000ba51",
+      "source_sha256": "840ef9a9292bb90a4f752741ae950cb89434967fe2c4d1883d19f9689430db7d",
+      "mode": "664"
+    },
+    {
+      "path": "gate/gate/store.py",
+      "host_before": "70b3d29089f36bcaa1f13828c4e249c4ca2a690050fa1b18e2eb94a263eafc06",
+      "source_sha256": "1cf1deb448c0a3bc3d928cdd8ef76e636730ddc4bd6fbfaaf0fd34b8aa248c3e",
+      "mode": "664"
+    },
+    {
+      "path": "gate/gate/lifecycle.py",
+      "host_before": "MISSING",
+      "source_sha256": "75f732a6cd1adabdee9e8e5c384876c33d5c09aa4f6568f44d09fa8ffbb3a5a9",
+      "mode": "664"
+    },
+    {
+      "path": "gate/gate/engine.py",
+      "host_before": "3cb170930af34627d6d52416525ba92ebeb162aa8a38bd79bb915fe9b4c26b06",
+      "source_sha256": "4726e8f41af4cdd8527ada839c8dd52fbc70f14eaa47dbd8e151980498d69bb3",
+      "mode": "664"
+    },
+    {
+      "path": "gate/gate/admin.py",
+      "host_before": "96711b97ba7c07d0294a713bcb4d4305aae9eac10dd7ffab0f9e300f69f63dc4",
+      "source_sha256": "7e0f4daea47cae845c816156d9bb124346d019b962551363c4641dcfc4426919",
+      "mode": "664"
+    },
+    {
+      "path": "gate/gate/lifecycle_contract.py",
+      "host_before": "MISSING",
+      "source_sha256": "0ac659b5dc80e1da7abd923e8823ea61cfb726854c806e2ea8b64ea3aa4f9ab3",
+      "mode": "664"
+    }
+  ]
+}

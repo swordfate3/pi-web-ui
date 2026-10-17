@@ -69,6 +69,36 @@ test("register and unregister speak the existing capability protocol with the ac
   assert.equal(fixture.requests[1].generation, fixture.requests[0].generation);
 });
 
+test("managed runtime identity renews from a fresh getter without exposing saved paths", async (t) => {
+  const fixture = await registry(t, (_request, socket) => socket.end('{"ok":true,"result":{}}\n'));
+  const lifecycle = createSessionRegistration(fixture);
+  let sessionId = "saved-a";
+  await lifecycle.start(
+    43210,
+    () => {},
+    () => null,
+    () => ({
+      runtimeId: "runtime-a",
+      sessionId,
+      leafId: null,
+      version: "1.1.0",
+      managed: true,
+    }),
+  );
+  assert.deepEqual((fixture.requests[0] as any).runtime, {
+    runtimeId: "runtime-a",
+    sessionId: "saved-a",
+    leafId: null,
+    version: "1.1.0",
+    managed: true,
+  });
+  sessionId = "saved-b";
+  await lifecycle.refresh();
+  assert.equal((fixture.requests[1] as any).runtime.sessionId, "saved-b");
+  assert.ok(!JSON.stringify(fixture.requests).includes("session_file"));
+  await lifecycle.stop();
+});
+
 test("registration renewals read the current display name, sanitize and bound it without rotating the route", async (t) => {
   const fixture = await registry(t, (_request, socket) =>
     socket.end('{"ok":true,"result":{"url":"https://gateway.example/"}}\n'),

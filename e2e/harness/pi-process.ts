@@ -9,6 +9,7 @@ export type PiWebUiHarness = {
   port: number;
   workspaceDir: string;
   sessionDir: string;
+  rpc: (command: Record<string, unknown>) => Promise<unknown>;
   stop: () => Promise<void>;
 };
 
@@ -105,14 +106,70 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   );
 
   captureProcessOutput(piProcess, processOutput);
-  await waitForWebUi(`http://127.0.0.1:${port}`, piProcess, processOutput);
+  let rpcSequence = 0;
+  let rpcBuffer = "";
+  const pending = new Map<string, { resolve: (data: unknown) => void; reject: (error: Error) => void }>();
+  piProcess.stdout.on("data", (chunk: Buffer) => {
+    rpcBuffer += chunk.toString("utf8");
+    while (rpcBuffer.includes("\n")) {
+      const end = rpcBuffer.indexOf("\n");
+      const line = rpcBuffer.slice(0, end);
+      rpcBuffer = rpcBuffer.slice(end + 1);
+      let record: { type?: string; id?: string; success?: boolean; data?: unknown; error?: string };
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (record.type !== "response" || !record.id) continue;
+      const request = pending.get(record.id);
+      if (record.success) request?.resolve(record.data);
+      else request?.reject(new Error(record.error ?? "RPC failed"));
+    }
+  });
+  const rejectPending = () => {
+    for (const request of pending.values()) request.reject(new Error("Pi process stopped"));
+  };
+  piProcess.once("exit", rejectPending);
+  try {
+    await waitForWebUi(`http://127.0.0.1:${port}`, piProcess, processOutput);
+  } catch (error) {
+    await stopProcess(piProcess);
+    rmSync(tempRoot, { recursive: true, force: true });
+    throw error;
+  }
 
   return {
+    rpc(command) {
+      const id = `harness-${++rpcSequence}`;
+      return new Promise((resolve, reject) => {
+        const finish = () => {
+          clearTimeout(timer);
+          pending.delete(id);
+        };
+        const timer = setTimeout(() => {
+          finish();
+          reject(new Error("RPC response timeout"));
+        }, 10_000);
+        pending.set(id, {
+          resolve(data) {
+            finish();
+            resolve(data);
+          },
+          reject(error) {
+            finish();
+            reject(error);
+          },
+        });
+        piProcess.stdin.write(`${JSON.stringify({ ...command, id })}\n`);
+      });
+    },
     pageUrl: `http://127.0.0.1:${port}`,
     port,
     workspaceDir,
     sessionDir,
     async stop() {
+      rejectPending();
       await stopProcess(piProcess);
       if (existsSync(tempRoot)) rmSync(tempRoot, { recursive: true, force: true });
     },

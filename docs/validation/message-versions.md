@@ -3,7 +3,7 @@
 ## 实现范围
 
 - 在存在同位置用户分支的问题和已保存 AI 消息下方显示 `‹ 2 / 2 ›`。编辑问题、重新生成和旧 Branch 形成的 user siblings 共用版本组；一次工具轮中的多条 assistant 不计为多个版本。
-- 依据完整原始 `parentId` 关系和保存顺序分组，不按正文、时间接近程度或有界 Tree 的可见父节点猜测。问题和对应回答一起切换，后续对话也随当前分支切换，不将其他分支文字拼入当前上下文。
+- 依据完整原始 `parentId` ancestry 中的稳定上下文位置和保存顺序分组：仅版本位置 key 忽略连续 `type:message`、`role:system` patch，不改写 parent 或导航路径。不跨 metadata/custom/user/assistant/toolResult 等其他边界，不承诺通用任意分支等价；坏链 fail closed。不按正文、时间接近程度或有界 Tree 的可见父节点猜测。问题和对应回答一起切换，后续对话也随当前分支切换，不将其他分支文字拼入当前上下文。
 - 后端只返回 ID／索引元数据，最多请求 100 个显示消息，响应最多 256 个版本引用。超预算省略整组并提示，保留组内真实总数。部分显示消息超出请求范围时不显示其 pager。
 - 非当前候选有更深分叉时，选择最近保存的真实叶路径；当前候选优先保留当前路径。没有已回答且能安全导航的目标时禁用按钮。需要选择更细路径时继续使用 Tree。
 - `switch_message_version` 强制 session/runtime/source leaf，重新解析目标关系，复用 advanced、idle/pending、浏览器异步 mutation、revision unknown 和生命周期保护。固定 `summarize:false`，不发送问题、不要求当前模型配置，不恢复工作区文件。第三方导航 hook 仍可能取消或有其自身副作用。

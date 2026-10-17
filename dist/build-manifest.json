@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 153,
-    "sha256": "5ebb8b8a9d6f04c5b9b4e3e7ae3289c835105d25dd1a7a2bef6d9e62398237e4",
+    "sha256": "d10167847e7b93ad674d4e59067331c981b330b4aa2dc5d164be008cfc4e02e3",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -26,15 +26,15 @@
       },
       {
         "path": "extensions/message-revision.ts",
-        "sha256": "68df899124722dae4bca0c4d08dee05b994ea2027f0f08986c722969acebd622"
+        "sha256": "c200f0bbd8ecca6846615bdf499944045b1ef8b264d3a125cd745316ef4ecabd"
       },
       {
         "path": "extensions/message-versions.ts",
-        "sha256": "bcd496f73f2cb3d0a8648dc71053204ad412671c0891ba409fb5921c096abd47"
+        "sha256": "8871f25c36331a4982c1854aa391ead78e2c88a6a468d5284e578cc978f59073"
       },
       {
         "path": "extensions/mirror-server.ts",
-        "sha256": "fbcad9d9dae5fb0a59ee6b448beedf000522b9360a2e3051948d6ddcb74eb6da"
+        "sha256": "13b3bbd7ec70bf5d15e0cd22f6b579b7fdf52e6a0849fa21c006f2abc1de3550"
       },
       {
         "path": "extensions/remote-access/gateway.py",

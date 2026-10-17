@@ -132,6 +132,155 @@ test("whole-group reference budget, per-user deduplication and 100-group cap", (
   );
 });
 
+test("system patches on both versions share only a stable context position, not rewritten ancestry", () => {
+  for (const base of [null, "context-answer"] as const) {
+    const raw = [
+      ...(base ? [msg("context", null), msg(base, "context", "assistant")] : []),
+      msg("initial-system", base, "system"),
+      msg("original", "initial-system"),
+      msg("answer", "original", "assistant"),
+      msg("later-user", "answer"),
+      msg("later-answer", "later-user", "assistant"),
+      msg("patch-one", "initial-system", "system"),
+      msg("patch-two", "patch-one", "system"),
+      msg("revision", "patch-two"),
+      msg("revised-answer", "revision", "assistant"),
+      // A separate patch chain at the same real context is also a version.
+      msg("separate-system", base, "system"),
+      msg("third", "separate-system"),
+      msg("third-answer", "third", "assistant"),
+    ];
+    for (const entry of raw) {
+      Object.defineProperty(entry, "timestamp", { get: () => assert.fail("must not inspect timestamps") });
+      Object.defineProperty(required(entry.message), "content", { get: () => assert.fail("must not inspect body") });
+      Object.freeze(entry.message);
+      Object.freeze(entry);
+    }
+    Object.freeze(raw);
+    const result = resolveMessageVersions(raw, ["revision", "revised-answer"], "revised-answer");
+    assert.deepEqual(result, {
+      limited: false,
+      groups: [
+        {
+          entryIds: ["revision", "revised-answer"],
+          userEntryId: "revision",
+          index: 2,
+          total: 3,
+          versions: [
+            { userEntryId: "original", targetEntryId: "later-answer" },
+            { userEntryId: "revision", targetEntryId: "revised-answer" },
+            { userEntryId: "third", targetEntryId: "third-answer" },
+          ],
+        },
+      ],
+    });
+    assert.equal(resolveMessageVersions(raw, ["answer"], "answer").groups[0].versions[0].targetEntryId, "answer");
+    assert.equal(raw.find((e) => e.id === "revision")?.parentId, "patch-two");
+    // Index follows append order, even if ancestors appear later in the input.
+    const reversed = resolveMessageVersions([...raw].reverse(), ["original"], null).groups[0];
+    assert.deepEqual(
+      reversed.versions.map((v) => v.userEntryId),
+      ["third", "revision", "original"],
+    );
+    assert.equal(reversed.index, 3);
+  }
+});
+
+test("system transparency stops at every non-system entry, including metadata and unrelated context", () => {
+  const raw = [msg("system", null, "system"), msg("original", "system"), msg("answer", "original", "assistant")];
+  const boundaries: VersionEntry[] = [
+    ...["custom", "custom_message", "compaction", "branch_summary", "model_change", "label"].map((type) => ({
+      id: type,
+      type,
+      parentId: "system",
+      message: { role: "system" },
+    })),
+    ...["user", "assistant", "toolResult", "custom", "unknown"].map((role) => msg(`role-${role}`, "system", role)),
+    { id: "no-role", type: "message", parentId: "system" },
+  ];
+  for (const boundary of boundaries)
+    raw.push(
+      boundary,
+      msg(`patch-${boundary.id}`, boundary.id, "system"),
+      msg(`u-${boundary.id}`, `patch-${boundary.id}`),
+    );
+  for (const boundary of boundaries)
+    assert.deepEqual(resolveMessageVersions(raw, [`u-${boundary.id}`], null), { groups: [], limited: false });
+  raw.push(msg("unrelated", "answer", "system"), msg("other-user", "unrelated"));
+  assert.deepEqual(resolveMessageVersions(raw, ["other-user"], null), { groups: [], limited: false });
+});
+
+test("missing, cyclic and malformed system ancestry cannot become root versions or targets", () => {
+  const raw = [msg("root", null), msg("root-answer", "root", "assistant"), msg("peer", null)];
+  const badParents: unknown[] = [undefined, 0, false, {}, [], "", "missing"];
+  for (const [i, parent] of badParents.entries()) {
+    raw.push(msg(`bad-${i}`, parent as string, "system"), msg(`bad-user-${i}`, `bad-${i}`));
+  }
+  raw.push(msg("cycle-a", "cycle-b", "system"), msg("cycle-b", "cycle-a", "system"), msg("cycle-user", "cycle-a"));
+  for (const id of [...badParents.map((_, i) => `bad-user-${i}`), "cycle-user"])
+    assert.throws(() => resolveMessageVersions(raw, [id], null), /parent chain/);
+  assert.equal(resolveMessageVersions(raw, ["root"], "cycle-a").groups[0].total, 2);
+  // Even a runtime non-string ID matching the illegal parent must not validate it.
+  assert.throws(
+    () =>
+      resolveMessageVersions(
+        [...raw, { id: 0, parentId: null, type: "custom" } as unknown as VersionEntry],
+        ["root"],
+        null,
+      ),
+    /graph/,
+  );
+});
+
+test("system-normalized groups retain request and whole-group reference budgets", () => {
+  const raw: VersionEntry[] = [];
+  for (let i = 0; i < 257; i++) raw.push(msg(`s${i}`, null, "system"), msg(`u${i}`, `s${i}`));
+  assert.deepEqual(resolveMessageVersions(raw, ["u0"], null), { groups: [], limited: true });
+  assert.throws(
+    () =>
+      resolveMessageVersions(
+        raw,
+        Array.from({ length: 101 }, (_, i) => `u${i}`),
+        null,
+      ),
+    /at most 100/,
+  );
+  assert.throws(() => resolveMessageVersions(raw, ["u0", "u0"], null), /unique/);
+});
+
+test("long shared system chains are memoized without a depth cutoff or false root grouping", () => {
+  const raw = [msg("unrelated-root", null), msg("context", "unrelated-root", "assistant")];
+  let parent = "context";
+  const length = 12_000;
+  for (let i = 0; i < length; i++) {
+    const id = `s${i}`;
+    raw.push(msg(id, parent, "system"), msg(`u${i}`, id));
+    parent = id;
+  }
+  raw.push(msg("context-peer", "context"), msg("context-answer", "context-peer", "assistant"));
+  let reads = 0;
+  for (const entry of raw) {
+    const parentId = entry.parentId;
+    Object.defineProperty(entry, "parentId", {
+      get() {
+        reads++;
+        return parentId;
+      },
+    });
+  }
+  // Oversized group is omitted whole; it must not be truncated or become root siblings.
+  assert.deepEqual(resolveMessageVersions(raw, ["u11999", "unrelated-root"], null), { groups: [], limited: true });
+  assert.ok(reads < raw.length * 20, `parent reads must stay linear, got ${reads}`);
+  // A single long chain still yields the correct non-root group, not a cutoff key.
+  const chain = raw.filter((e) => !e.id.startsWith("u") || e.id === "u11999");
+  chain.unshift(msg("unrelated-root", null));
+  const group = resolveMessageVersions(chain, ["u11999"], null).groups[0];
+  assert.deepEqual(group.versions, [
+    { userEntryId: "u11999", targetEntryId: null },
+    { userEntryId: "context-peer", targetEntryId: "context-answer" },
+  ]);
+});
+
 test("mock WS message version scope, navigation and mutation fences", async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), "pi-versions-"));
   const probe = createServer();

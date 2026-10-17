@@ -31,6 +31,7 @@
     "src/web/src/core/queued-prompt.ts",
     "e2e/steps/message-revision.steps.ts",
     "e2e/fixtures/responses/message-revision.ts",
+    "e2e/message-revision.integration.ts",
     "tests/live-transport.test.ts",
     "tests/git-preview-budget.test.ts",
     "tests/history-store.test.ts",

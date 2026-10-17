@@ -354,6 +354,10 @@ export default function (pi: ExtensionAPI) {
     }
   >();
   let revisionDispatch: {
+    treeVersion: number;
+    epoch: number;
+    sessionId: string;
+    runtimeId: string;
     parentId: string | null;
     content: ReturnType<typeof revisionContent>;
   } | null = null;
@@ -1367,11 +1371,19 @@ export default function (pi: ExtensionAPI) {
     latestCtx = ctx;
     if (event.message.role !== "user") return;
     // Pi 1.1 has no dispatch ID on message_start (input.source is not propagated).
-    // Persistence occurs at message_end, so the current leaf is this user's parent.
-    // Never infer completion from tree/agent/turn events or a transformed message.
+    // Persistence occurs at message_end. SDK system patches may already have
+    // advanced the leaf; only that bounded parent chain can confirm this start.
+    // A navigation away and back still invalidates confirmation.
     if (
       revisionDispatch &&
-      matchesRevisionDispatch(revisionDispatch, ctx.sessionManager.getLeafId(), event.message.content)
+      runtimeActive &&
+      revisionDispatch.epoch === lifecycleEpoch &&
+      revisionDispatch.sessionId === latestCtx.sessionManager.getSessionId() &&
+      revisionDispatch.runtimeId === runtimeId &&
+      revisionDispatch.treeVersion === revisionTreeVersion &&
+      matchesRevisionDispatch(revisionDispatch, latestCtx.sessionManager.getLeafId(), event.message.content, (id) =>
+        latestCtx?.sessionManager.getEntry(id),
+      )
     ) {
       revisionDispatch = null;
       revisionDispatchUnknown = false;
@@ -1619,7 +1631,14 @@ export default function (pi: ExtensionAPI) {
         throw new Error("Navigation did not reach the original question's parent");
       if (!latestCtx.isIdle() || latestCtx.hasPendingMessages()) throw new Error("Pi became busy during navigation");
       // Set before the void API call, including synchronous throw/unknown delivery outcomes.
-      revisionDispatch = { parentId: original.parentId, content };
+      revisionDispatch = {
+        parentId: original.parentId,
+        content,
+        treeVersion: revisionTreeVersion,
+        epoch,
+        sessionId: latestCtx.sessionManager.getSessionId(),
+        runtimeId,
+      };
       revisionDispatchUnknown = true;
       // Hold the shared mutation lock through asynchronous void dispatch. Timeout is
       // unknown, not cancellation/acceptance. Only an exact correlated user start

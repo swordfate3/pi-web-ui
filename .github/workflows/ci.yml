@@ -59,7 +59,7 @@ jobs:
           echo "PI_E2E_BIN=$GITHUB_WORKSPACE/node_modules/.bin/pi" >> "$GITHUB_ENV"
 
       - name: Real Pi connection backend integration against the installed runtime
-        run: node --import ./tests/register-ts.mjs --test --test-timeout=70000 e2e/portable-connection.integration.ts e2e/session-hub.integration.ts e2e/date-history.integration.ts e2e/file-download.integration.ts e2e/file-upload.integration.ts e2e/whale-usage.integration.ts
+        run: node --import ./tests/register-ts.mjs --test --test-timeout=70000 e2e/portable-connection.integration.ts e2e/session-hub.integration.ts e2e/date-history.integration.ts e2e/file-download.integration.ts e2e/file-upload.integration.ts e2e/whale-usage.integration.ts e2e/message-revision.integration.ts
 
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium

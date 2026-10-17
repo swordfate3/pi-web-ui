@@ -1,4 +1,4 @@
-import { registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import chatLifecycleResponses from "./responses/chat-lifecycle.ts";
 import collapseRegressionResponses from "./responses/collapse-regression.ts";
@@ -53,7 +53,47 @@ export default function (pi: ExtensionAPI) {
   const fixtureName = process.env.PI_WEB_UI_E2E_FIXTURE || "chat-lifecycle";
   const responses = responsesByName[fixtureName as keyof typeof responsesByName] || chatLifecycleResponses;
 
-  faux.setResponses(responses);
+  const revisionMode =
+    fixtureName === "revision-dispatch-edit"
+      ? "edit"
+      : fixtureName === "revision-dispatch-regenerate"
+        ? "regenerate"
+        : null;
+  if (revisionMode) {
+    // Dedicated backend fixture: force a real SDK system delta on revision.
+    let turns = 0;
+    pi.on("before_agent_start", (event) => {
+      if (++turns >= 3) event.systemPromptOptions.sections.revision_dispatch_fixture = "SYNTHETIC_SYSTEM_PATCH";
+    });
+    const followup = (number: "ONE" | "TWO") => (context: TranscriptContext) => {
+      const texts = context.messages.map((message) =>
+        typeof message.content === "string"
+          ? message.content
+          : message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n"),
+      );
+      const expected =
+        revisionMode === "edit"
+          ? ["  QUESTION_ALPHA_EDITED  ", "ANSWER_ALPHA_EDITED"]
+          : ["QUESTION_ALPHA", "ANSWER_ALPHA_ORIGINAL", "QUESTION_BETA", "ANSWER_BETA_REGENERATED"];
+      const forbidden =
+        revisionMode === "edit"
+          ? /^(QUESTION_ALPHA|ANSWER_ALPHA_ORIGINAL|QUESTION_BETA|ANSWER_BETA_ORIGINAL|ANSWER_BETA_REGENERATED)$/
+          : /ANSWER_BETA_ORIGINAL|QUESTION_ALPHA_EDITED|ANSWER_ALPHA_EDITED/;
+      const intact =
+        expected.every((value) => texts.some((text) => text.startsWith(value))) &&
+        !texts.some((text) => forbidden.test(text)) &&
+        texts.at(-1) === `FOLLOWUP_${number}` &&
+        (number === "ONE" || texts.includes("FOLLOWUP_ONE_OK"));
+      return fauxAssistantMessage(intact ? `FOLLOWUP_${number}_OK` : "CONTEXT_LEAK: pager followup context");
+    };
+    faux.setResponses([
+      messageRevisionResponses[0],
+      messageRevisionResponses[1],
+      messageRevisionResponses[revisionMode === "edit" ? 2 : 3],
+      followup("ONE"),
+      followup("TWO"),
+    ]);
+  } else faux.setResponses(responses);
   pi.registerProvider("faux", {
     name: "Faux E2E",
     baseUrl: model.baseUrl,

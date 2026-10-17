@@ -4,6 +4,22 @@
 
 The `message-revision` feature runs desktop and mobile examples with a real Pi process and a faux provider that inspects the actual transcript. Edited early ALPHA must not contain the original ALPHA answer or later BETA context; regenerated BETA must retain prior ALPHA but exclude its old BETA answer and the edited sibling. Exact edited whitespace is checked. The browser exercises explicit confirmation/cancellation, unsent draft protection, busy controls, Tree version switches and reload persistence. JSONL inspection is limited to this synthetic harness's temporary session, never real user conversations. Saved action buttons, not streamed answer text alone, signal that entries are actionable.
 
+The browser-free companion `e2e/message-revision.integration.ts` uses the same
+isolated harness, RPC `/webui`, actual WebSocket requests and dedicated
+`revision-dispatch-edit` / `revision-dispatch-regenerate` faux fixtures. A structured
+prompt-section change forces SDK system-message persistence before revision user
+start. It checks unchanged originals, exact revised text, context isolation and
+a shared user/answer 2/2 version group, real saved leaf targets (original ALPHA
+continues through BETA), and old/new restoration via `switch_message_version`
+without new generation or appended entries. Two subsequent persisted chat turns
+beyond the dispatch deadline inspect the actual model transcript for branch
+isolation after restoration. SDK 1.1.0 and 1.3.0 have both passed these checks.
+It is backend
+integration coverage, not browser E2E or visual validation. Run with
+`node --import ./tests/register-ts.mjs --test e2e/message-revision.integration.ts`;
+`PI_E2E_BIN` selects an already available SDK binary. CI includes this alongside
+the existing real-Pi backend integration tests. No real provider is used.
+
 ## Status
 
 Accepted

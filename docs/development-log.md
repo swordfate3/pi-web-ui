@@ -378,6 +378,14 @@
 - strict ACK、session/runtime/source leaf、busy/异步 mutation、草稿/附件/队列及导航 token 保护；独立审查发现并修复旧分支 cursor 复用于新分支导致空页，保留日期但读新分支最新一页，旧 page generation 失效。
 - 原 `39176c9` 基线验证为337单测（336通过／1可选skip）、71/71完整源码Chromium、离线抽取包真实Pi2/2；仅代表旧树。合并到远端 `0e69509`（包含 Hub restart 改动）后，415单测（414通过／1可选skip）、233文件静态检查0 error、build／dist hash／connection types及真实 Pi Git install/update/tarball/Hub lifecycle fixture通过；因缺少匹配 Chromium 未运行完整 Playwright E2E。合成 faux Pi 的桌面／手机 Browser 交互与视觉检查通过。独立只读复核检查最终 cursor 恢复逻辑未发现确认问题。提交 `5dee430ee7eb03c920ac34c837de9164ed748464` 已推送 `publish/main`，Pi 管理的本机 Git 安装包已更新并复核 `prepare`；未重载当前 Pi、未部署或重启 Hub。见[验证报告](validation/message-versions.md)。
 
+## 修订派发确认：SDK system patch 最小修复（本地验证，未发布）
+
+- `matchesRevisionDispatch` 保留正文／图片严格比较，仅允许当前 leaf 经最多 64 个合法 `message/system` 节点到达原 parent；缺失、循环、节点身份错误、其他角色／metadata 与超预算均拒绝。派发保存既有树版本以及 lifecycle/session/runtime 身份，之后导航即使回到同 parent 也不确认；读取使用 `latestCtx`。八秒后真正 unknown 仍不解锁，不处理任意 input transform/handled 的伪成功。
+- `e2e/message-revision.integration.ts` 新增无浏览器真实 RPC+WS 回归，专用 faux fixture 强制 structured system patch。编辑／重答均检查 system-before-user、原 entries 不变、精确文本与上下文隔离，并在超过原八秒截止后继续两轮聊天。加入现有 CI 后端 integration 命令；仅新建临时合成会话。
+- 实际验证：`npm run test:unit` 共 419 项（418 通过，1 个可选 1 GiB 流测试 skip）；`node_modules/.bin/tsc --noEmit`、`node_modules/.bin/tsc --noEmit -p tsconfig.connection.json`、改动 TS 文件的 Biome check 与 `git diff --check` 通过；全仓 `npm run check` 检查 234 文件，无 error，报告 30 warnings／1 info（未扩大本轮修改范围）。`PI_E2E_BIN=<已存在的 CLI> node --import ./tests/register-ts.mjs --test e2e/message-revision.integration.ts` 在 1.1.0 和 1.3.0 各 2/2 通过，日志 `.tmp/revision-integration-{1.1.0,1.3.0}.log`。把 b715cff 的两个修订模块放入隔离 baseline 后，同一回归 0/2，在首个后续 prompt 明确报 pending/unknown，见 `.tmp/revision-integration-baseline.log`。
+- pager 仅调查：`message-versions.ts` 直接按 user.parentId 分组，system patch 会让旧／新 user 的直接 parent 不同；六节点合成图调用 `resolveMessageVersions` 得到空 groups。此轮不改变分组或会话结构，后续需单独确定版本身份规则，不能认为派发修复同时修好 pager。
+- 未运行浏览器 E2E／视觉检查（本轮无 Browser 工具且不重建 dist），未验证真实 provider、Hub 部署及完整远端 CI。按任务要求未重建 dist、安装、提交、推送、发布、修改安装包或 reload 真实 Pi；最终构建与产物核验交主线程。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。
@@ -385,3 +393,17 @@
 - 明确 HTTP/WS 认证、Origin 和反向代理部署边界；现有 `/webui` 不能代替认证。
 - 持续补充 provider、clipboard、多浏览器、跨会话竞争、深色主题及第三方组件文案边界。
 - 本地 release 快照位于 `$HOME/.pi/agent/local/pi-web-ui/releases/`，不是工作区引用。应用新代码仍由用户执行 `/reload` → `/webui` 后刷新网页。
+
+### System patch 前后的 pager 稳定上下文位置修复（本地未发布）
+
+- 承接上一节 pager 调查：`extensions/message-versions.ts` 在已有有效 ancestry 的迭代回溯中缓存稳定上下文 anchor，仅版本位置 key 透明跳过连续 `type:message` / `role:system`。原版和 revision 各自追加 prompt/tool patch 仍共享版本组；原 parent、真实 leaf 导航、source preference、safeTarget 与请求/响应预算不变。其他 metadata/custom/user/assistant/toolResult 节点不透明，不推断任意分支版本身份。
+- 非法 ID/parent 类型、missing 和 cycle fail closed；无深度截断，不把长 system 链误当 root。新增单测覆盖 root/nonroot、多层独立 patch、非 system 边界与无关上下文、正文/时间 getter 禁读、反序输入与保存顺序、坏链、预算及 12,000 层共享 system 链的线性 parent 读取次数。
+- 扩展已有真实 RPC+WS `e2e/message-revision.integration.ts`：edit/regenerate 后问题与回答共用 2/2，旧 ALPHA target 指向含 BETA 的真实 leaf，切旧 1/2 再新 2/2，context 精确恢复、无生成事件/新增 entries；恢复后超过原八秒派发截止继续两轮 prompt，faux provider 检查真实模型 transcript 无跨分支泄漏。
+- 实际验证：`npm run test:unit` 424 项（423 通过，1 个可选大流测试 skip），`node_modules/.bin/tsc --noEmit`、`node_modules/.bin/tsc --noEmit -p tsconfig.connection.json` 通过；`npm run check` 检查 234 文件、无 error，保留 30 warnings / 1 info。`git diff --check` 通过。已有 SDK 1.1.0 默认 CLI 与 `PI_E2E_BIN=/home/node/.local/bin/pi`（1.3.0）各运行 `node --import ./tests/register-ts.mjs --test e2e/message-revision.integration.ts`，各 2/2 通过。日志 `.tmp/pager-{all-unit,check,integration-1.1.0,integration-1.3.0}.log`。
+- 保留已有 revision-dispatch 与其他修改。上述为实现阶段的后端与真实 SDK 验证，不替代产品验收。
+
+### 合并修复的最终发布前核验
+
+- 主线程重建 dist 并验证 manifest；重新执行 424 单测（423 pass / 1 skip）、两套类型检查、Biome 0 error（30 warnings / 1 info）、当前 SDK 修订及翻页 integration 2/2、portable integration 8/8、Python gateway 15 pass / 1 skip、真实 Git install/update/tarball/Hub lifecycle fixture 及 11 类 stale-input 拒绝，均通过。
+- 使用最终构建和隔离真实 Pi 1.3.0 的 faux provider，在 Browser 1440×900 / 390×844 检查 system patch 后 2/2、切旧 1/2 再切新、继续两轮聊天；截图直接查看。原生 CDP click 未生效，使用 DOM button.click，无 React/store 注入；不称完整自动化浏览器 E2E。临时服务和专用标签已停止，不影响用户会话。
+- 用户授权推进 Git 推送与本机包更新；不含当前真实 Pi reload、新 Hub Gate 部署或容器重启。新扩展需目标 Pi 空闲后由用户 reload 生效，不声称已解除真实旧锁。完整结果和限制见[修订 system patch 验证](validation/revision-system-patch.md)。

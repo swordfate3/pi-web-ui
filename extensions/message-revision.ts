@@ -112,14 +112,32 @@ export function revisionContent(
  * sendUserMessage joins text blocks with newlines and places images after text.
  * No input.source/request metadata survives onto message_start in Pi 1.1.
  * Compare all original image bytes too: transforms/resizing fail closed, not proof
- * of completion. The caller owns lifecycle reset and the expected parent fence.
+ * of completion. Only SDK system-message entries may advance the parent before
+ * user start. The caller owns lifecycle/identity and tree-navigation fencing.
  */
 export function matchesRevisionDispatch(
   expected: { parentId: string | null; content: string | RevisionBlock[] },
   parentId: string | null,
   content: unknown,
+  getEntry?: (id: string) => RevisionEntry | undefined,
 ): boolean {
-  if (parentId !== expected.parentId) return false;
+  // _prepareRun can persist prompt/tool patches before starting the user message.
+  // Do not skip arbitrary metadata or conversation entries, or search other branches.
+  const visited = new Set<string>();
+  while (parentId !== expected.parentId) {
+    if (typeof parentId !== "string" || !parentId || visited.has(parentId) || visited.size >= 64) return false;
+    visited.add(parentId);
+    const entry = getEntry?.(parentId);
+    if (
+      !entry ||
+      entry.id !== parentId ||
+      entry.type !== "message" ||
+      entry.message?.role !== "system" ||
+      (entry.parentId !== null && (typeof entry.parentId !== "string" || !entry.parentId))
+    )
+      return false;
+    parentId = entry.parentId;
+  }
   const text =
     typeof expected.content === "string"
       ? expected.content

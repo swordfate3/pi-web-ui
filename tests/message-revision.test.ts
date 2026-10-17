@@ -21,8 +21,8 @@ function required<T>(value: T | null | undefined): T {
   return value;
 }
 
-const image1 = { type: "image", data: "AAAB/w==", mimeType: "image/png" };
-const image2 = { type: "image", data: "AP8BBA==", mimeType: "image/webp" };
+const image1 = { type: "image" as const, data: "AAAB/w==", mimeType: "image/png" };
+const image2 = { type: "image" as const, data: "AP8BBA==", mimeType: "image/webp" };
 const fullText = `  original\n${"long complete question ".repeat(4000)}\nend  `;
 function entries(): RevisionEntry[] {
   return [
@@ -108,6 +108,57 @@ test("dispatch matching follows Pi text/image layout but rejects transforms and 
   assert.equal(
     matchesRevisionDispatch(expected, "a0", [content[0], { ...image1, mimeType: "image/jpeg" }, image2]),
     false,
+  );
+});
+
+test("dispatch accepts only a bounded, valid system-only chain to the exact parent", () => {
+  const expected = { parentId: "a0", content: [image1, { type: "text" as const, text: "exact" }] };
+  const content = [{ type: "text", text: "exact" }, image1];
+  const system = (id: string, parentId: string | null): RevisionEntry => ({
+    id,
+    parentId,
+    type: "message",
+    message: { role: "system", content: "" },
+  });
+  const raw = [system("s1", "a0"), system("s2", "s1")];
+  const lookup = (id: string) => raw.find((entry) => entry.id === id);
+  for (const leaf of ["a0", "s1", "s2"]) {
+    assert.equal(matchesRevisionDispatch(expected, leaf, content, lookup), true);
+    assert.equal(matchesRevisionDispatch(expected, leaf, "different", lookup), false);
+    assert.equal(matchesRevisionDispatch(expected, leaf, [content[0], { ...image1, data: "changed" }], lookup), false);
+    assert.equal(
+      matchesRevisionDispatch(expected, leaf, [content[0], { ...image1, mimeType: "image/jpeg" }], lookup),
+      false,
+    );
+  }
+  for (const entry of [
+    system("s1", "other"),
+    system("s1", "missing"),
+    system("s1", "s2"),
+    system("s1", "s1"),
+    system("wrong-id", "a0"),
+    system("s1", ""),
+    system("s1", undefined as never),
+    ...["user", "assistant", "toolResult", "custom", "unknown"].map((role) => ({
+      ...system("s1", "a0"),
+      message: { role },
+    })),
+    ...["custom", "model_change", "session_info", "unknown"].map((type) => ({ ...system("s1", "a0"), type })),
+  ]) {
+    raw[0] = entry;
+    assert.equal(matchesRevisionDispatch(expected, "s2", content, lookup), false, JSON.stringify(entry));
+  }
+  assert.equal(
+    matchesRevisionDispatch(expected, "s1", content, () => system("wrong-id", "a0")),
+    false,
+  );
+  const chain = Array.from({ length: 65 }, (_, i) => system(`p${i}`, i ? `p${i - 1}` : "a0"));
+  const get = (id: string) => chain.find((entry) => entry.id === id);
+  assert.equal(matchesRevisionDispatch(expected, "p63", content, get), true);
+  assert.equal(matchesRevisionDispatch(expected, "p64", content, get), false);
+  assert.equal(
+    matchesRevisionDispatch({ parentId: null, content: "root" }, "s", "root", () => system("s", null)),
+    true,
   );
 });
 
@@ -581,8 +632,58 @@ test("mock mirror revision WS contract and lifecycle/dispatch fences", async (t)
     await assertUnknown();
     release();
     await delayedStart;
+    await assertUnknown(); // Returning to the same parent cannot erase intervening navigation.
+  });
+  await t.test("late exact start after timeout confirms through system patches without navigation", async () => {
+    await reset();
+    assert.equal((await submit()).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 8_050));
+    raw.push({ id: "patch", parentId: "a0", type: "message", message: { role: "system" } });
+    leaf = "patch";
+    ctxGeneration++;
+    await emit("message_start", { message: { role: "user", content: startedContent() } });
     assert.equal((await request("prompt", { message: "explicit prompt after confirmation" })).ok, true);
     assert.equal(sends.length, 2);
+  });
+  await t.test("fresh system-patch context confirms; wrong chains and changed session do not unlock", async () => {
+    for (const role of [
+      "system",
+      "user",
+      "assistant",
+      "toolResult",
+      "unknown",
+      "metadata",
+      "wrong-branch",
+      "wrong-session",
+    ]) {
+      await reset();
+      assert.equal((await submit()).ok, true);
+      raw.push({
+        id: "patch",
+        parentId: role === "wrong-branch" ? "other" : "a0",
+        type: role === "metadata" ? "custom" : "message",
+        message: { role: role.startsWith("wrong-") ? "system" : role },
+      });
+      leaf = "patch";
+      if (role === "wrong-session") sessionId = "foreign";
+      ctxGeneration++;
+      await emit("message_start", { message: { role: "user", content: startedContent() } });
+      assert.equal((await request("prompt", { message: "next" })).ok, role === "system", role);
+      sessionId = "revision-session";
+    }
+  });
+  await t.test("old lifecycle acceptance cannot clear a new revision's unknown fence", async () => {
+    await reset();
+    assert.equal((await submit()).ok, true);
+    // Session replacement clears the old dispatch, not a newer dispatch's identity/content fence.
+    ctxGeneration++;
+    await reset();
+    const text = "new lifecycle revision";
+    assert.equal((await submit({ ...params(), entryId: "u1", mode: "edit", text })).ok, true);
+    await emit("message_start", { message: { role: "user", content: startedContent() } });
+    assert.equal((await request("prompt", { message: "too early" })).ok, false);
+    await emit("message_start", { message: { role: "user", content: [{ type: "text", text }, image1, image2] } });
+    assert.equal((await request("prompt", { message: "confirmed current dispatch" })).ok, true);
   });
   await t.test("current user leaf is rejected before Pi's no-op navigation", async () => {
     await reset();

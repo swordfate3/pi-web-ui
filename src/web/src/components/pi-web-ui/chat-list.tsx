@@ -12,6 +12,8 @@ type ChatListProps = {
   items: ChatItem[];
   highlightedEntryId: string | null;
   onBranch?: (entryId: string) => Promise<void> | void;
+  onEdit?: (entryId: string) => void;
+  onRegenerate?: (entryId: string) => void;
   onCopy: (text: string) => Promise<void> | void;
   onToggleTool: (id: string, open: boolean) => void;
   registerItemElement: (item: ChatItem, node: HTMLElement | null) => void;
@@ -29,6 +31,8 @@ const ChatRow = memo(function ChatRow({
   item,
   highlighted,
   onBranch,
+  onEdit,
+  onRegenerate,
   onCopy,
   onToggleTool,
   registerItemElement,
@@ -53,10 +57,17 @@ const ChatRow = memo(function ChatRow({
           actionsVisible={highlighted}
           item={item as ChatItem & { kind: "message"; role: "user" }}
           onBranch={item.entryId ? onBranch : undefined}
+          onEdit={item.entryId ? onEdit : undefined}
           onCopy={onCopy}
         />
       ) : (
-        <ChatItemView item={item} onCopy={onCopy} onToggleTool={onToggleTool} showThinking={showThinking} />
+        <ChatItemView
+          item={item}
+          onCopy={onCopy}
+          onRegenerate={item.entryId ? onRegenerate : undefined}
+          onToggleTool={onToggleTool}
+          showThinking={showThinking}
+        />
       )}
     </div>
   );

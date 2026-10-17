@@ -1,5 +1,43 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "Restore this queued message to the composer; it will not be sent automatically.":
+    "将这条排队消息恢复到输入框？不会自动发送。",
+  "This queued message came from another session. Copy it into this draft?":
+    "这条排队消息来自另一个会话，是否复制到当前草稿？",
+  "Replace the current draft with this queued message?": "用这条排队消息替换当前草稿？",
+  "Selected attachments will stay in the composer. Continue?": "当前已选附件会保留在输入框中，是否继续？",
+  "Check the conversation before restoring; this prompt may already have been accepted.":
+    "这条消息可能已被接受，请先核对对话。确认恢复到输入框？",
+  "Queued messages from another session are paused. They will not be rebound or sent automatically.":
+    "其他会话的排队消息已暂停，不会自动改绑或发送。",
+  "Restore to composer": "恢复到输入框",
+  "Use the branch-end arrow to switch versions. Files stay unchanged.": "点击分支末尾箭头切换版本，文件保持不变。",
+  "Switch to this branch / version": "切换到此分支／版本",
+  "Edit and resend": "编辑并重新发送",
+  "Regenerate answer": "重新生成回答",
+  Regenerate: "重新生成",
+  "Edit question": "编辑问题",
+  "Edit the full question to resend": "编辑完整问题后重新发送",
+  "Original question": "原始问题",
+  "Original images will be preserved": "将保留原问题中的图片。",
+  "Loading message…": "正在读取原始问题…",
+  "Submitting…": "正在提交…",
+  "Original branch preserved. Files are not rolled back. Regeneration may run tools again and use tokens.":
+    "原分支会保留，不回滚代码文件。重新回答可能再次执行工具并消耗 Token。",
+  "Wait for Pi to be ready and run /webui to enable message revisions.":
+    "请等待 Pi 空闲，并执行 /webui 启用消息编辑与重答。",
+  "The active branch changed. Reopen the message action.": "当前分支已变化，请重新打开消息操作。",
+  "The active branch changed. Check the current session.": "当前分支已变化，请检查当前会话。",
+  "Question cannot be empty.": "问题不能为空。",
+  "Message revision was not confirmed. Check the active branch before trying again.":
+    "消息编辑或重答尚未确认，请先检查当前分支，不要直接重复提交。",
+  "Revision cancelled. Close this dialog before starting again.": "操作已取消。如需重试，请关闭此窗口后重新打开。",
+  "Could not load the original question.": "无法读取原始问题。",
+  "Send or clear your draft, queued messages and attachments before revising a message.":
+    "请先发送或清空草稿、排队消息和已选附件，再编辑或重答消息。",
+  "Switch branches and keep the current draft? Files are not rolled back.":
+    "切换分支并保留当前草稿？代码文件不会回滚。",
+
   "Back to Hub": "返回 Hub",
   "Return to Hub? Unsent text, queued messages and selected attachments will not be kept on this page.":
     "返回 Hub？当前页未发送的文字、排队消息和已选附件将不会保留。",

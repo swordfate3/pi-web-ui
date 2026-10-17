@@ -19,6 +19,7 @@ import {
 } from "./components/pi-web-ui";
 import { ChatList } from "./components/pi-web-ui/chat-list";
 import { HistoryControls } from "./components/pi-web-ui/history-controls";
+import { MessageRevisionDialog } from "./components/pi-web-ui/message-revision-dialog";
 import { RemoteAccessPanel } from "./components/pi-web-ui/remote-access-panel";
 import { ResumeSessionPicker } from "./components/pi-web-ui/resume-session-picker";
 import { SessionDetails, sessionStatsSummary } from "./components/pi-web-ui/session-details";
@@ -30,6 +31,13 @@ import { copyText, isEditableTarget } from "./core/format";
 import { recentHistoryRange } from "./core/history-dates";
 import { t, useLanguage, workspaceUploadText } from "./core/i18n";
 import { PiClient } from "./core/pi-client";
+import {
+  canDispatchQueuedPrompt,
+  createQueuedPrompt,
+  navigationResultIsCurrent,
+  type QueuedPrompt,
+  queuedPromptMatchesScope,
+} from "./core/queued-prompt";
 import { cancelSavedSessionPicker } from "./core/saved-session-picker";
 import { createScopedSubmitLock } from "./core/scoped-submit";
 import { readPreference, writePreference } from "./core/storage";
@@ -39,6 +47,8 @@ import type {
   ChatItem,
   ExportHtmlResult,
   HistoryRange,
+  MessageRevisionMode,
+  MessageRevisionPreview,
   PromptCommand,
   SavedSession,
   SavedSessionsResult,
@@ -159,8 +169,24 @@ export function App() {
     return Math.min(maxWidth, Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.round(requestedWidth)));
   });
   const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
-  const [draftText, setDraftText] = useState("");
+  const [draftText, setDraftTextState] = useState("");
+  const draftTextRef = useRef(draftText);
+  const draftVersionRef = useRef(0);
+  const updateDraftText = useCallback((text: string) => {
+    draftVersionRef.current++;
+    draftTextRef.current = text;
+    setDraftTextState(text);
+  }, []);
   const [hasSelectedFiles, setHasSelectedFiles] = useState(false);
+  const [messageRevision, setMessageRevision] = useState<{
+    mode: MessageRevisionMode;
+    text: string;
+    preview: MessageRevisionPreview | null;
+    loading: boolean;
+    submitting: boolean;
+    error: string | null;
+  } | null>(null);
+  const revisionRequestRef = useRef(0);
   const [uploadProgress, setUploadProgress] = useState<WorkspaceUploadProgress[]>([]);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [attachmentHandoff, setAttachmentHandoff] = useState(false);
@@ -169,7 +195,18 @@ export function App() {
   const [routePath, setRoutePath] = useState(() => window.location.pathname);
   const uploadScopeKey = `${sessionId ?? ""}\0${runtimeId ?? ""}\0${routePath}`;
 
-  const [queuedMessages, setQueuedMessages] = useState<PromptCommand[]>([]);
+  const [queuedMessages, setQueuedMessages] = useState<QueuedPrompt[]>([]);
+  const [pausedQueuedPromptIds, setPausedQueuedPromptIds] = useState<string[]>([]);
+  const queueDispatchingRef = useRef<string | null>(null);
+  const treeNavigationRef = useRef<{
+    token: symbol;
+    entryId: string;
+    sessionId: string | null;
+    runtimeId: string | null;
+    draftText: string;
+    draftVersion: number;
+  } | null>(null);
+  const treeNavigationScopeRef = useRef(`${sessionId ?? ""}\0${runtimeId ?? ""}`);
 
   const [modelOpen, setModelOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
@@ -218,12 +255,21 @@ export function App() {
     });
   }, []);
   const forkPickerSessionIdRef = useRef<string | null>(null);
-  const draftTextRef = useRef(draftText);
-  draftTextRef.current = draftText;
   useEffect(() => {
     if (forkPickerSessionIdRef.current !== sessionId) setForkPickerMessages(null);
     setSessionDetails(null);
   }, [sessionId]);
+
+  useLayoutEffect(() => {
+    const scope = `${sessionId ?? ""}\0${runtimeId ?? ""}`;
+    if (treeNavigationScopeRef.current === scope) return;
+    treeNavigationScopeRef.current = scope;
+    const operation = treeNavigationRef.current;
+    if (operation && (operation.sessionId !== sessionId || operation.runtimeId !== runtimeId)) {
+      treeNavigationRef.current = null;
+      if (usePiWebUiStore.getState().loadingTreeEntryId === operation.entryId) setLoadingTreeEntryId(null);
+    }
+  }, [sessionId, runtimeId, setLoadingTreeEntryId]);
 
   useEffect(() => {
     const updatePath = () => setRoutePath(window.location.pathname);
@@ -405,31 +451,63 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    setPausedQueuedPromptIds((current) => {
+      const staleIds = queuedMessages
+        .filter((queued) => !queuedPromptMatchesScope(queued, { sessionId, runtimeId }))
+        .map((queued) => queued.id);
+      const pausedIds = sessionActionError ? queuedMessages.map((queued) => queued.id) : [];
+      if ([...staleIds, ...pausedIds].every((id) => current.includes(id))) return current;
+      return [...new Set([...current, ...staleIds, ...pausedIds])];
+    });
     if (
+      connection !== "connected" ||
       chatStatus !== "ready" ||
       sessionActionPending ||
       sessionActionError ||
+      loadingTreeEntryId ||
       resumeLoading ||
       resumeListing ||
       forkPickerMessages ||
+      messageRevision ||
       queuedMessages.length === 0
     )
       return;
-    if (usePiWebUiStore.getState().sessionActionPending) return;
-    const [next, ...rest] = queuedMessages;
-    setQueuedMessages(rest);
-    void sendPrompt(next).catch(() => {
-      // sendPrompt has already exposed same-session failures through store state.
-    });
+    const current = usePiWebUiStore.getState();
+    const next = queuedMessages.find(
+      (queued) => !pausedQueuedPromptIds.includes(queued.id) && canDispatchQueuedPrompt(queued, current),
+    );
+    if (!next) return;
+    if (queueDispatchingRef.current === next.id || !canDispatchQueuedPrompt(next, usePiWebUiStore.getState())) return;
+    queueDispatchingRef.current = next.id;
+    setQueuedMessages((currentQueue) => currentQueue.filter((queued) => queued.id !== next.id));
+    void sendPrompt(next)
+      .catch(() => {
+        // The ACK may be unknown; keep a paused copy for manual restore, never replay it automatically.
+        setQueuedMessages((currentQueue) =>
+          currentQueue.some((queued) => queued.id === next.id) ? currentQueue : [next, ...currentQueue],
+        );
+        setPausedQueuedPromptIds((currentIds) =>
+          currentIds.includes(next.id) ? currentIds : [...currentIds, next.id],
+        );
+      })
+      .finally(() => {
+        if (queueDispatchingRef.current === next.id) queueDispatchingRef.current = null;
+      });
   }, [
     chatStatus,
+    connection,
     queuedMessages,
     sendPrompt,
+    sessionId,
+    runtimeId,
     sessionActionPending,
     sessionActionError,
+    loadingTreeEntryId,
     resumeLoading,
     resumeListing,
     forkPickerMessages,
+    messageRevision,
+    pausedQueuedPromptIds,
   ]);
 
   const submitLockRef = useRef<ReturnType<typeof createScopedSubmitLock> | null>(null);
@@ -497,11 +575,12 @@ export function App() {
         try {
           const handled = await runWebUiSlashCommandRef.current(trimmed);
           if (handled) {
-            if (handled !== "preserve") setDraftText("");
+            if (handled !== "preserve") updateDraftText("");
             return;
           }
           await compactSend("prompt", { message: trimmed });
-          setDraftText("");
+          usePiWebUiStore.setState({ sessionActionError: null });
+          updateDraftText("");
         } catch (submitError) {
           setError(errorUiText(submitError, uiText("Command failed")));
           throw submitError;
@@ -509,8 +588,17 @@ export function App() {
         return;
       }
       if (attachments.length === 0 && (chatStatus === "streaming" || chatStatus === "submitted")) {
-        setQueuedMessages((current) => [...current, { id: nextPromptId(), message: trimmed }]);
-        setDraftText("");
+        const queued = createQueuedPrompt(
+          { id: nextPromptId(), message: trimmed },
+          { sessionId: scopeSessionId, runtimeId: scopeRuntimeId },
+          store.connection === "connected",
+        );
+        if (!queued) {
+          setError(t("Session changed. Reopen the session picker."));
+          throw new Error("Cannot queue a prompt without a connected session and runtime");
+        }
+        setQueuedMessages((current) => [...current, queued]);
+        updateDraftText("");
         return;
       }
 
@@ -604,9 +692,10 @@ export function App() {
         if (uploadIds.length) setAttachmentHandoff(true);
         await sendPrompt(command);
         if (!isScopeCurrent()) return;
+        usePiWebUiStore.setState({ sessionActionError: null, error: null });
         uploadReceiptsRef.current.clear();
         setUploadProgress([]);
-        setDraftText("");
+        updateDraftText("");
       } catch (submitError) {
         if (isScopeCurrent()) {
           setError(errorUiText(submitError, workspaceUploadText("promptFailedRetry")));
@@ -617,7 +706,7 @@ export function App() {
         submitLockRef.current?.release(attempt);
       }
     },
-    [chatStatus, compactSend, nextPromptId, sendPrompt, setError],
+    [chatStatus, compactSend, nextPromptId, sendPrompt, setError, updateDraftText],
   );
 
   const openModelPicker = useCallback(async () => {
@@ -700,7 +789,7 @@ export function App() {
       setLoadingTreeEntryId(targetId);
       try {
         await forkSession(action, targetId);
-        setDraftText(text);
+        updateDraftText(text);
         setQueuedMessages([]);
       } catch (err) {
         setError(errorUiText(err, uiText(action === "clone" ? "clone failed" : "fork failed")));
@@ -708,7 +797,16 @@ export function App() {
         setLoadingTreeEntryId(null);
       }
     },
-    [chatStatus, forkSession, leafId, queuedMessages.length, sessionActionPending, setError, setLoadingTreeEntryId],
+    [
+      chatStatus,
+      forkSession,
+      leafId,
+      queuedMessages.length,
+      sessionActionPending,
+      setError,
+      setLoadingTreeEntryId,
+      updateDraftText,
+    ],
   );
 
   const openForkPicker = useCallback(async () => {
@@ -807,13 +905,13 @@ export function App() {
         const completion = resumeSession(selection.id, selection.sessionId);
         closeResumePicker();
         await completion;
-        setDraftText("");
+        updateDraftText("");
         setQueuedMessages([]);
       } catch (err) {
         setError(errorUiText(err, uiText("Resume failed")));
       }
     },
-    [queuedMessages.length, resumeListing, resumeSession, setError, closeResumePicker],
+    [queuedMessages.length, resumeListing, resumeSession, setError, closeResumePicker, updateDraftText],
   );
 
   const reloadCurrentRuntime = useCallback(async () => {
@@ -828,12 +926,12 @@ export function App() {
       return;
     try {
       await reloadRuntime();
-      setDraftText("");
+      updateDraftText("");
       setQueuedMessages([]);
     } catch (err) {
       setError(errorUiText(err, uiText("Reload failed")));
     }
-  }, [queuedMessages.length, reloadRuntime, setError]);
+  }, [queuedMessages.length, reloadRuntime, setError, updateDraftText]);
 
   const runWebUiSlashCommand = useCallback(
     async (text: string) => {
@@ -1057,8 +1155,183 @@ export function App() {
     [focusEntry, setSelectedTreeEntryId],
   );
 
+  const closeMessageRevision = useCallback(() => {
+    if (usePiWebUiStore.getState().sessionActionPending) return;
+    revisionRequestRef.current++;
+    setMessageRevision(null);
+  }, []);
+
+  useEffect(() => {
+    revisionRequestRef.current++;
+    setMessageRevision((current) =>
+      current?.preview?.sessionId === sessionId && current.preview.runtimeId === runtimeId ? current : null,
+    );
+  }, [sessionId, runtimeId]);
+
+  const openMessageRevision = useCallback(
+    async (entryId: string, mode: MessageRevisionMode) => {
+      if (
+        draftTextRef.current.trim() ||
+        queuedMessages.length ||
+        hasSelectedFiles ||
+        uploadingAttachments ||
+        attachmentHandoff
+      ) {
+        window.alert(t("Send or clear your draft, queued messages and attachments before revising a message."));
+        return;
+      }
+      const request = ++revisionRequestRef.current;
+      setMessageRevision({ mode, text: "", preview: null, loading: true, submitting: false, error: null });
+      try {
+        const preview = await usePiWebUiStore.getState().getMessageRevision(entryId, mode);
+        if (request !== revisionRequestRef.current) return;
+        setMessageRevision({ mode, text: preview.text, preview, loading: false, submitting: false, error: null });
+      } catch (error) {
+        if (request !== revisionRequestRef.current) return;
+        setMessageRevision({
+          mode,
+          text: "",
+          preview: null,
+          loading: false,
+          submitting: false,
+          error: renderUiText(errorUiText(error, uiText("Could not load the original question."))),
+        });
+      }
+    },
+    [queuedMessages.length, hasSelectedFiles, uploadingAttachments, attachmentHandoff],
+  );
+  const editMessage = useCallback(
+    (entryId: string) => {
+      void openMessageRevision(entryId, "edit");
+    },
+    [openMessageRevision],
+  );
+  const regenerateMessage = useCallback(
+    (entryId: string) => {
+      void openMessageRevision(entryId, "regenerate");
+    },
+    [openMessageRevision],
+  );
+
+  const submitMessageRevision = useCallback(async () => {
+    const revision = messageRevision;
+    if (!revision?.preview || revision.loading || revision.submitting) return;
+    const request = revisionRequestRef.current;
+    setMessageRevision({ ...revision, submitting: true });
+    try {
+      const dispatched = await usePiWebUiStore.getState().submitMessageRevision(revision.preview, revision.text);
+      if (request !== revisionRequestRef.current) return;
+      if (dispatched) {
+        revisionRequestRef.current++;
+        setMessageRevision(null);
+      } else
+        setMessageRevision({
+          ...revision,
+          preview: null,
+          submitting: false,
+          error: t("Revision cancelled. Close this dialog before starting again."),
+        });
+    } catch (error) {
+      if (request !== revisionRequestRef.current) return;
+      // A lost ACK is not permission to send again. Keep edited text copyable,
+      // but require a fresh inspection of the actual branch before another action.
+      setMessageRevision({
+        ...revision,
+        preview: null,
+        submitting: false,
+        error: renderUiText(
+          errorUiText(
+            error,
+            uiText("Message revision was not confirmed. Check the active branch before trying again."),
+          ),
+        ),
+      });
+    }
+  }, [messageRevision]);
+
+  const acquireTreeNavigation = useCallback(
+    (entryId: string) => {
+      const current = usePiWebUiStore.getState();
+      if (
+        treeNavigationRef.current ||
+        current.loadingTreeEntryId ||
+        current.sessionActionPending ||
+        current.connection !== "connected" ||
+        !current.sessionId ||
+        !current.runtimeId
+      )
+        return null;
+      const operation = {
+        token: Symbol(entryId),
+        entryId,
+        sessionId: current.sessionId,
+        runtimeId: current.runtimeId,
+        draftText: draftTextRef.current,
+        draftVersion: draftVersionRef.current,
+      };
+      treeNavigationRef.current = operation;
+      setSelectedTreeEntryId(entryId);
+      setLoadingTreeEntryId(entryId);
+      setError(null);
+      return operation;
+    },
+    [setError, setLoadingTreeEntryId, setSelectedTreeEntryId],
+  );
+  const navigationIsCurrent = useCallback((operation: NonNullable<typeof treeNavigationRef.current>) => {
+    const current = usePiWebUiStore.getState();
+    return (
+      treeNavigationRef.current?.token === operation.token &&
+      current.connection === "connected" &&
+      !current.sessionActionPending &&
+      navigationResultIsCurrent(
+        operation,
+        current,
+        { text: operation.draftText, version: operation.draftVersion },
+        { text: draftTextRef.current, version: draftVersionRef.current },
+      )
+    );
+  }, []);
+
+  const restoreQueuedPrompt = useCallback(
+    (queued: QueuedPrompt) => {
+      const sameScope = queuedPromptMatchesScope(queued, usePiWebUiStore.getState());
+      if (!window.confirm(t("Restore this queued message to the composer; it will not be sent automatically."))) return;
+      if (!sameScope && !window.confirm(t("This queued message came from another session. Copy it into this draft?")))
+        return;
+      if (draftTextRef.current && !window.confirm(t("Replace the current draft with this queued message?"))) return;
+      if (hasSelectedFiles && !window.confirm(t("Selected attachments will stay in the composer. Continue?"))) return;
+      if (
+        pausedQueuedPromptIds.includes(queued.id) &&
+        sameScope &&
+        !window.confirm(t("Check the conversation before restoring; this prompt may already have been accepted."))
+      )
+        return;
+      updateDraftText(queued.message);
+      setQueuedMessages((current) => current.filter((candidate) => candidate.id !== queued.id));
+      setPausedQueuedPromptIds((current) => current.filter((id) => id !== queued.id));
+    },
+    [hasSelectedFiles, pausedQueuedPromptIds, updateDraftText],
+  );
+
+  const messageActionsEnabled =
+    advancedFeatures &&
+    connection === "connected" &&
+    chatStatus === "ready" &&
+    !sessionActionPending &&
+    !loadingTreeEntryId &&
+    !messageRevision &&
+    !uploadingAttachments &&
+    !attachmentHandoff &&
+    queuedMessages.length === 0;
+
   const branchFromMessage = useCallback(
     async (entryId: string) => {
+      const current = usePiWebUiStore.getState();
+      if (treeNavigationRef.current || current.loadingTreeEntryId || current.sessionActionPending) return;
+      if (hasSelectedFiles || queuedMessages.length || uploadingAttachments || attachmentHandoff) {
+        window.alert(t("Send or clear your draft, queued messages and attachments before revising a message."));
+        return;
+      }
       if (draftTextRef.current.trim() && !window.confirm(t("Replace the current draft with this message?"))) return;
       let timestamp = "";
       let fallbackText = "";
@@ -1074,10 +1347,9 @@ export function App() {
         stack.push(...node.children);
       }
 
+      const operation = acquireTreeNavigation(entryId);
+      if (!operation) return;
       pendingFocusEntryIdRef.current = entryId;
-      setSelectedTreeEntryId(entryId);
-      setLoadingTreeEntryId(entryId);
-      setError(null);
       try {
         const result = (await compactSend("navigate_tree", { entryId })) as
           | { editorText?: string; cancelled?: boolean }
@@ -1086,8 +1358,10 @@ export function App() {
           pendingFocusEntryIdRef.current = null;
           return;
         }
+        if (!navigationIsCurrent(operation)) return;
         await requestConversationSync();
-        setDraftText(result?.editorText ?? fallbackText);
+        if (!navigationIsCurrent(operation)) return;
+        updateDraftText(result?.editorText ?? fallbackText);
         addSystemMessage(
           uiText("Branching from {time}. Previous branch is preserved in this session.", {
             time: uiRelativeTime(timestamp, uiText("selected message")),
@@ -1099,10 +1373,16 @@ export function App() {
           input?.setSelectionRange(input.value.length, input.value.length);
         });
       } catch (err) {
-        pendingFocusEntryIdRef.current = null;
-        setError(errorUiText(err, uiText("Branch failed")));
+        if (navigationIsCurrent(operation)) {
+          pendingFocusEntryIdRef.current = null;
+          setError(errorUiText(err, uiText("Branch failed")));
+        }
       } finally {
-        setLoadingTreeEntryId(null);
+        const activeOperation = treeNavigationRef.current as typeof operation | null;
+        if (activeOperation?.token === operation.token) {
+          treeNavigationRef.current = null;
+          if (usePiWebUiStore.getState().loadingTreeEntryId === entryId) setLoadingTreeEntryId(null);
+        }
       }
     },
     [
@@ -1111,32 +1391,64 @@ export function App() {
       requestConversationSync,
       setError,
       setLoadingTreeEntryId,
-      setSelectedTreeEntryId,
       tree,
+      hasSelectedFiles,
+      queuedMessages.length,
+      uploadingAttachments,
+      attachmentHandoff,
+      acquireTreeNavigation,
+      navigationIsCurrent,
+      updateDraftText,
     ],
   );
 
   const continueBranch = useCallback(
     async (entryId: string) => {
-      setSelectedTreeEntryId(entryId);
-      setLoadingTreeEntryId(entryId);
-      setError(null);
+      const current = usePiWebUiStore.getState();
+      if (treeNavigationRef.current || current.loadingTreeEntryId || current.sessionActionPending) return;
+      if (hasSelectedFiles || queuedMessages.length || uploadingAttachments || attachmentHandoff) {
+        window.alert(t("Send or clear your draft, queued messages and attachments before revising a message."));
+        return;
+      }
+      if (
+        draftTextRef.current.trim() &&
+        !window.confirm(t("Switch branches and keep the current draft? Files are not rolled back."))
+      )
+        return;
+      const operation = acquireTreeNavigation(entryId);
+      if (!operation) return;
       try {
         const result = (await compactSend("navigate_tree", { entryId })) as { cancelled?: boolean } | undefined;
-        if (result?.cancelled) return;
+        if (result?.cancelled || !navigationIsCurrent(operation)) return;
         await requestConversationSync();
+        if (!navigationIsCurrent(operation)) return;
         requestAnimationFrame(() => {
           const input = document.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
           input?.focus();
           input?.setSelectionRange(input.value.length, input.value.length);
         });
       } catch (err) {
-        setError(errorUiText(err, uiText("Continue branch failed")));
+        if (navigationIsCurrent(operation)) setError(errorUiText(err, uiText("Continue branch failed")));
       } finally {
-        setLoadingTreeEntryId(null);
+        const activeOperation = treeNavigationRef.current as typeof operation | null;
+        if (activeOperation?.token === operation.token) {
+          treeNavigationRef.current = null;
+          if (usePiWebUiStore.getState().loadingTreeEntryId === entryId) setLoadingTreeEntryId(null);
+        }
       }
     },
-    [compactSend, requestConversationSync, setError, setLoadingTreeEntryId, setSelectedTreeEntryId],
+    [
+      compactSend,
+      requestConversationSync,
+      setError,
+      setLoadingTreeEntryId,
+      hasSelectedFiles,
+      queuedMessages.length,
+      uploadingAttachments,
+      attachmentHandoff,
+      acquireTreeNavigation,
+      navigationIsCurrent,
+    ],
   );
 
   useEffect(() => {
@@ -1149,6 +1461,7 @@ export function App() {
         event.preventDefault();
         document.querySelector<HTMLTextAreaElement>('textarea[name="message"]')?.focus();
       } else if (event.key === "Escape") {
+        if (messageRevision) return;
         if (statusOverlay) setStatusOverlay(null);
         else if (sidebarMobileOpen) setSidebarMobileOpen(false);
         else if (commandOpen) setCommandOpen(false);
@@ -1170,6 +1483,7 @@ export function App() {
     modelOpen,
     settingsOpen,
     resumeListing,
+    messageRevision,
     forkPickerMessages,
     sessionDetails,
     statusOverlay,
@@ -1229,7 +1543,7 @@ export function App() {
     >
       <ConversationSidebar
         key={sessionId ?? "pending-session"}
-        branchEnabled={advancedFeatures && !sessionActionPending}
+        branchEnabled={messageActionsEnabled}
         connection={connection}
         leafId={leafId}
         loadingEntryId={loadingTreeEntryId}
@@ -1317,7 +1631,9 @@ export function App() {
                   <ChatList
                     items={items}
                     highlightedEntryId={highlightedEntryId}
-                    onBranch={advancedFeatures && !sessionActionPending ? branchFromMessage : undefined}
+                    onBranch={messageActionsEnabled ? branchFromMessage : undefined}
+                    onEdit={messageActionsEnabled ? editMessage : undefined}
+                    onRegenerate={messageActionsEnabled ? regenerateMessage : undefined}
                     onCopy={copyText}
                     onToggleTool={toggleTool}
                     registerItemElement={registerItemElement}
@@ -1349,6 +1665,13 @@ export function App() {
 
             {queuedMessages.length > 0 && (
               <div className="mx-auto w-full max-w-3xl px-4 pt-2">
+                {queuedMessages.some((queued) => !queuedPromptMatchesScope(queued, { sessionId, runtimeId })) && (
+                  <p className="mb-1 text-xs text-muted-foreground">
+                    {t(
+                      "Queued messages from another session are paused. They will not be rebound or sent automatically.",
+                    )}
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-2">
                   {queuedMessages.map((queued) => (
                     <div
@@ -1358,11 +1681,20 @@ export function App() {
                       <span className="text-muted-foreground">{t("Queued")}</span>
                       <span className="max-w-72 truncate">{queued.message}</span>
                       <button
+                        type="button"
+                        className="rounded px-1 underline"
+                        disabled={sessionActionPending || resumeLoading || Boolean(loadingTreeEntryId)}
+                        onClick={() => restoreQueuedPrompt(queued)}
+                      >
+                        {t("Restore to composer")}
+                      </button>
+                      <button
                         aria-label={t("Remove queued message")}
-                        disabled={sessionActionPending}
-                        onClick={() =>
-                          setQueuedMessages((current) => current.filter((candidate) => candidate.id !== queued.id))
-                        }
+                        disabled={sessionActionPending || resumeLoading || Boolean(loadingTreeEntryId)}
+                        onClick={() => {
+                          setQueuedMessages((current) => current.filter((candidate) => candidate.id !== queued.id));
+                          setPausedQueuedPromptIds((current) => current.filter((id) => id !== queued.id));
+                        }}
                         type="button"
                       >
                         <XIcon className="size-3" />
@@ -1402,14 +1734,22 @@ export function App() {
               archModeEnabled={archModeEnabled}
               chatStatus={chatStatus}
               connection={connection}
-              disabled={sessionActionPending || resumeLoading || attachmentHandoff}
-              attachmentsDisabled={uploadingAttachments || attachmentHandoff}
+              disabled={
+                sessionActionPending ||
+                resumeLoading ||
+                attachmentHandoff ||
+                Boolean(loadingTreeEntryId) ||
+                Boolean(messageRevision)
+              }
+              attachmentsDisabled={
+                uploadingAttachments || attachmentHandoff || Boolean(loadingTreeEntryId) || Boolean(messageRevision)
+              }
               uploadProgress={uploadProgress}
               onCancelUpload={uploadingAttachments ? () => uploadControllerRef.current?.abort() : undefined}
               onAbort={abort}
               onSubmit={submitMessage}
               onToggleArchMode={toggleArchMode}
-              onValueChange={setDraftText}
+              onValueChange={updateDraftText}
               onFilesChange={setHasSelectedFiles}
               value={draftText}
               viewingHistory={false}
@@ -1436,7 +1776,8 @@ export function App() {
           images={whaleAssets.images}
           positionResetKey={whalePositionResetKey}
           suspended={Boolean(
-            modelOpen ||
+            messageRevision ||
+              modelOpen ||
               settingsOpen ||
               remoteAccess ||
               commandOpen ||
@@ -1449,6 +1790,21 @@ export function App() {
               rightPanelVisible,
           )}
         />
+        {messageRevision && (
+          <MessageRevisionDialog
+            mode={messageRevision.mode}
+            text={messageRevision.text}
+            hasImages={messageRevision.preview?.hasImages ?? false}
+            loading={messageRevision.loading}
+            submitting={messageRevision.submitting}
+            error={messageRevision.error}
+            onClose={closeMessageRevision}
+            onSubmit={() => {
+              void submitMessageRevision();
+            }}
+            onTextChange={(text) => setMessageRevision((current) => current && { ...current, text })}
+          />
+        )}
         {modelOpen && (
           <ModelPicker
             currentModel={currentModel}

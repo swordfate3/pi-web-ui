@@ -1,1 +1,0 @@
-import{Nn as e}from"./index-CwbaBW7j.js";var t=class{constructor(e){this.init=e,this.records=this.init()}static{e(this,`ImperativeState`)}reset(){this.records=this.init()}};export{t};

@@ -1,4 +1,4 @@
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, RotateCcwIcon } from "lucide-react";
 import { useState } from "react";
 import { Message, MessageAction, MessageActions, MessageContent } from "@/components/ai-elements/message";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
@@ -13,11 +13,13 @@ import { FileMessageResponse } from "./file-message-response";
 export function ChatItemView({
   item,
   onCopy,
+  onRegenerate,
   onToggleTool,
   showThinking,
 }: {
   item: ChatItem;
   onCopy: (text: string) => Promise<void> | void;
+  onRegenerate?: (entryId: string) => void;
   onToggleTool: (id: string, open: boolean) => void;
   showThinking: boolean;
 }) {
@@ -76,6 +78,9 @@ export function ChatItemView({
   // item.kind === "message" and role is "assistant" (user messages handled by UserMessageView)
   const canCopy = item.text.trim().length > 0 && item.copyable !== false && !item.streaming;
   const isActivity = item.presentation === "activity";
+  const canRegenerate = Boolean(
+    item.role === "assistant" && item.text.trim() && item.entryId && !item.streaming && !isActivity,
+  );
 
   const copyMessage = async () => {
     if (!canCopy) return;
@@ -105,11 +110,35 @@ export function ChatItemView({
           {item.text}
         </FileMessageResponse>
       </MessageContent>
-      {canCopy && (
-        <MessageActions className="self-start opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
-          <MessageAction label={t("Copy message")} onClick={copyMessage} tooltip={t("Copy")}>
-            {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
-          </MessageAction>
+      {(canCopy || canRegenerate) && (
+        <MessageActions className="self-start flex-wrap opacity-100 transition-opacity">
+          {canCopy && (
+            <MessageAction label={t("Copy message")} onClick={copyMessage} tooltip={t("Copy")}>
+              {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
+            </MessageAction>
+          )}
+          {canRegenerate && (
+            <MessageAction
+              aria-label={t("Regenerate answer")}
+              disabled={!onRegenerate}
+              label={t("Regenerate answer")}
+              onClick={() => item.entryId && onRegenerate?.(item.entryId)}
+              size="sm"
+              title={
+                onRegenerate
+                  ? t("Regenerate answer")
+                  : t("Wait for Pi to be ready and run /webui to enable message revisions.")
+              }
+              tooltip={
+                onRegenerate
+                  ? t("Regenerate answer")
+                  : t("Wait for Pi to be ready and run /webui to enable message revisions.")
+              }
+            >
+              <RotateCcwIcon className="size-4" />
+              <span>{t("Regenerate answer")}</span>
+            </MessageAction>
+          )}
         </MessageActions>
       )}
     </Message>

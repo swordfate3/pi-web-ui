@@ -21,6 +21,7 @@ const SOURCE_FILES = [
   "extensions/session-registration.ts",
   "extensions/session-history.ts",
   "extensions/live-transport.ts",
+  "extensions/message-revision.ts",
   "extensions/session-usage.ts",
   "extensions/file-downloads.ts",
   "extensions/workspace-uploads.ts",

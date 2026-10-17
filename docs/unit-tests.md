@@ -125,6 +125,20 @@ downloads. It captures rendered screenshots. Optional
 otherwise Playwright uses its default browser installation. All temporary Pi
 processes, proxy servers and test workspaces are cleaned up by the harness.
 
+## Per-message editing and regeneration
+
+`tests/message-revision.test.ts` checks the raw parent-chain resolver, complete text budget, exact original image content, unsupported attachments and a mock mirror WS server with session/runtime/leaf, lifecycle, cancellation, one-use per-socket preview, shared mutation lock and unknown-dispatch fences. It includes a delayed (>8 second) dispatch and unrelated events, plus plain queued-prompt identity. These are adapter tests, not proof of a real Pi input-hook cancellation.
+
+`tests/queued-prompt.test.ts` checks exact session/runtime binding and rejects stale/offline queue dispatch; navigation-draft ownership checks protect delayed branch results. Browser mutations carrying identity are validated on the backend as well.
+
+`tests/message-revision-client.test.ts` verifies full-text reads, preview schema, persisted-leaf sync before a revision, strict submit ACK, no optimistic chat, double-click lock and runtime-replacement ownership. `e2e/features/message-revision.feature` uses real Pi + a context-inspecting faux provider on desktop/mobile: editing an early question without later context, whitespace preservation, busy/draft/cancel guards, Tree switches and refresh persistence. It never replaces WS or constructs fake UI messages.
+
+```sh
+node --import ./tests/register-ts.mjs --test tests/message-revision.test.ts tests/message-revision-client.test.ts
+npm run e2e:gen
+node_modules/.bin/playwright test -c e2e/playwright.config.ts message-revision
+```
+
 ## Hub navigation and immediate metadata refresh
 
 `tests/session-registration.test.ts` uses real Unix IPC to cover bounded/coalesced rename refresh, epoch fencing and both mirror rename entries. `tests/session-hub.test.ts` executes portal JS with a minimal DOM for stable cards and merged history-return refresh, and real HTTP/IPC for proof/retirement gaps, first-successor binding and deadlines. The PiClient test verifies the route notification; React scope timing is additionally checked by real Hub handoff E2E, not certified by the stub alone. `tests/connection-path.test.ts` restricts the return-home link to exact Hub entries. The Hub browser flow tests immediate rename/return, cancellation with unsent text and attachments, native back and one initial Git request. See [Hub navigation validation](validation/hub-navigation.md).

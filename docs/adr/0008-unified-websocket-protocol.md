@@ -217,6 +217,8 @@ All current commands become methods under the unified `req`/`res` pattern:
 | New | `get_web_connection` | — (read-only actual listener / advertised entry / registry configuration) |
 | `set_auth` | `set_auth` | `{ enabled }` |
 | `navigate_tree` | `navigate_tree` | `{ entryId }` |
+| New | `get_message_revision` | `{ entryId, mode: "edit" \| "regenerate", sessionId, runtimeId }` → `{ previewId, entryId, userEntryId, text, hasImages, sourceLeafId, sessionId, runtimeId }` |
+| New | `submit_message_revision` | `{ previewId, entryId, mode, sessionId, runtimeId, sourceLeafId, text? }`; text only for edit; dispatched ACK is not acceptance |
 | `extension_ui_response` | `extension_ui_response` | `{ id, ...response }` |
 | `GET /api/health` | `health` | — |
 | `GET /api/files` | `get_files` | `{ path? }` |
@@ -262,6 +264,12 @@ successor registers while backend proof is in flight, route resolution returns
 `202` for another lookup. Failed replacement handshakes retain the previous
 capability until a fresh Hub control frame arrives; these attempts share one
 15-second recovery deadline instead of renewing it indefinitely.
+
+### Message revision intent
+
+`get_message_revision` is read-only: it resolves the original question from Pi's saved parent chain, not the bounded browser snapshot, and stores one connection-bound, single-use preview. Original image bytes stay on the backend. Full text has a JSON-escaped 2 MiB budget, with explicit rejection rather than truncation. Submit revalidates identity, source leaf, idle/pending state and preview, consumes the preview, navigates before the original question without a branch summary, then sends literal user content (`expandPromptTemplates:false`). Navigation cancellation returns `{cancelled:true}`. A successful reply `{dispatched:true,sessionId,runtimeId,userEntryId}` says only that the void Pi dispatch API was called, not that a turn was accepted or completed. No optimistic history is written.
+
+Navigation and pending/unknown dispatch fence browser mutations. An active-mutation counter spans browser request awaits, so revision cannot start while an earlier asynchronous model/session mutation is still completing. The shared busy wait is bounded; its timeout does not prove cancellation or release the independent unknown fence. A matching saved-user event may confirm dispatch; unrelated tree/user events cannot authorize a resend. Pi 1.1.0 exposes no dispatch correlation metadata. Confirmation compares the expected parent and all original text/image content (allowing Pi's fixed text-newline merge and image-after-text shape). Input transformations, handling, exceptions or image normalization can prevent matching; unknown then persists despite unrelated messages or tree navigation. Read-only inspection and abort remain available. Inspect Pi in the terminal; when needed, explicitly replace the session/reload there, rather than blindly retrying. Another identical message at the same parent cannot be distinguished through this public API; this is a residual correlation limitation, not proof of exact acceptance. Frontend ACK deadline is 15 seconds and never replays a mutation. See [message branching PRD](../prd/branch-message.md).
 
 ### Frontend request lifecycle
 

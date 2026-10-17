@@ -53,6 +53,19 @@ export type PromptCommand = {
   scope?: { sessionId: string; runtimeId: string };
 };
 
+export type MessageRevisionMode = "edit" | "regenerate";
+export type MessageRevisionPreview = {
+  previewId: string;
+  mode: MessageRevisionMode;
+  entryId: string;
+  userEntryId: string;
+  text: string;
+  hasImages: boolean;
+  sourceLeafId: string | null;
+  sessionId: string;
+  runtimeId: string;
+};
+
 export type ChatItem =
   | {
       kind: "message";

@@ -358,6 +358,12 @@
 - 回归暴露并修复handoff proof窗口过早410、routePath轮询导致立即文本提交被旧上传scope拒绝。改显式本地route事件＋layout清理，scope checks保留；successor只首次绑定，撤销／期限proof后复查。
 - 最终286单测（285通过／1可选skip）、69/69源码Chromium、离线runtime Hub5/5、8类stale-input、types0／build／manifest通过；独立Browser桌面／手机直接查看，临时服务停止。首次3/5失败与中断尝试保留，限定静态审查不替代动态结果。详见[验证报告](validation/hub-navigation.md)。本轮未提交／push／更新或申请生产部署。
 
+## 29. 每轮编辑问题与重新生成
+
+- 用户消息下增加可见「编辑并重新发送」，已保存 AI 回答下增加「重新生成回答」；确认框读取 Pi 完整原问题、保留原图，超过预算或不支持附件明确失败。以同会话分支保留旧问题／旧回答，Tree 末尾箭头切换，不回滚文件或改写历史正文。
+- 两阶段单次 preview、session/runtime/leaf、busy 与 lifecycle fences；literal dispatch ACK 不冒充接受／完成，unknown 不自动重发。原生 void API 无 correlation metadata 的限制、恢复方式与第三方 hook／图片规范化边界明确记录。
+- 审查发现并修复永久 leaf 去重、无关事件误解 unknown、导航期 compact 漏锁及反向 async model mutation 窗口；真实 Pi 测出 ready 与 snapshot 间的 stale leaf，改操作前同步已保存页，不放宽提交检查。最终316单测（315通过／1可选skip）、71/71源码Chromium、离线包真实Pi修订2/2、16后端回归、build／manifest／types0通过；独立Browser桌面手机截图直接查看并停止自有服务。队列scope和旧Branch异步草稿窗口也补保护。最终验证与未测范围见[报告](validation/message-revision.md)。本轮本地未提交／push／安装更新或部署。
+
 ## 后续工作与已知限制
 
 - 上述 10 个未映射内置命令按需接入，认证/分享/信任/退出不能当普通聊天指令透传。

@@ -9,6 +9,7 @@ import fileDownloadResponses from "./responses/file-download.ts";
 import fileUploadResponses from "./responses/file-upload.ts";
 import languageMarkdownResponses from "./responses/language-markdown.ts";
 import largeToolOutputResponses from "./responses/large-tool-output.ts";
+import messageRevisionResponses from "./responses/message-revision.ts";
 import toolFailureResponses from "./responses/tool-failure.ts";
 import transportLargeResponses from "./responses/transport-large.ts";
 import workspaceArtifactResponses from "./responses/workspace-artifact.ts";
@@ -19,6 +20,7 @@ const responsesByName = {
   "collapse-regression": collapseRegressionResponses,
   "daily-commands": dailyCommandsResponses,
   "language-markdown": languageMarkdownResponses,
+  "message-revision": messageRevisionResponses,
   "large-tool-output": largeToolOutputResponses,
   "transport-large": transportLargeResponses,
   "slash-commands": chatLifecycleResponses,

@@ -43,6 +43,10 @@ Pi 将 session 控制方法限定在 `ExtensionCommandContext`。早期版本的
 |------|------|------|
 | `advancedFeaturesEnabled` | `boolean` | 用户是否执行过 `/webui`。仅用于向浏览器发送 `webui_state` 事件控制 UI |
 
+### Per-message revisions
+
+Web edit/regenerate uses the captured command context only to invoke `navigateTree(userEntryId, {summarize:false})`. After awaiting it, the adapter reads only fresh `latestCtx`, verifies the lifecycle, exactly one tree event and the original user's parent leaf, then calls literal `sendUserMessage` through the current extension API. It does not reuse a stale command/event context, write session entries itself, or restore workspace files. Pi's target-equals-leaf no-op is rejected before navigation. Old and new versions remain sibling paths in the same session.
+
 ## Consequences
 
 ### 正向

@@ -221,6 +221,9 @@ export function ConversationSidebarTree({
         </SidebarGroupContent>
       ) : (
         <>
+          <p className="px-3 pb-2 text-muted-foreground text-[11px]">
+            {t("Use the branch-end arrow to switch versions. Files stay unchanged.")}
+          </p>
           <div className="relative px-2 pb-2">
             <SearchIcon className="absolute left-4 top-2 size-3.5 text-muted-foreground" />
             <SidebarInput
@@ -350,7 +353,9 @@ function ConversationTreeRow({
   const active = item.isLeaf || selected;
   const loading = loadingEntryId === item.id;
   const branchTitle = branchEnabled ? t("Branch from here") : t("Run /webui in terminal to enable branching");
-  const continueTitle = branchEnabled ? t("Continue from branch end") : t("Run /webui in terminal to enable branching");
+  const continueTitle = branchEnabled
+    ? t("Switch to this branch / version")
+    : t("Run /webui in terminal to enable branching");
   const title = item.detail ? `${item.text} - ${item.detail}` : item.text;
 
   const selectFromKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {

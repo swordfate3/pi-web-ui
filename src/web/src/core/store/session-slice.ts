@@ -8,10 +8,11 @@ import {
 } from "../chat-conversion";
 import { recentHistoryRange } from "../history-dates";
 import { workspaceUploadText } from "../i18n";
+import { parseMessageRevision, revisionDeadline } from "../message-revision";
 import { decodeSessionTreeOrKeep } from "../session-tree-wire";
 import { isToolExpandable } from "../tool-summary";
 import type { ChatItem } from "../types";
-import { errorUiText, uiText } from "../ui-text";
+import { errorUiText, UiError, uiText } from "../ui-text";
 import { parseUsageStats } from "../usage-stats";
 import { artifactsFromEntries } from "../workspace-artifacts";
 import { runSessionAction } from "./session-action";
@@ -32,6 +33,8 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
   let conversationSyncInFlight = false;
   let conversationSyncPending = false;
   let conversationSyncTimer: number | null = null;
+  let revisionOperation = 0;
+  let revisionInFlight = false;
   const identity = () => ({ sessionId: get().sessionId, runtimeId: get().runtimeId });
   const sameIdentity = (source: ReturnType<typeof identity>) =>
     source.sessionId === get().sessionId && source.runtimeId === get().runtimeId;
@@ -158,6 +161,11 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
         sync.sessionId && sync.runtimeId && get().runtimeId && sync.runtimeId !== get().runtimeId,
       );
       if (sessionChanged || runtimeChanged) {
+        if (revisionInFlight) {
+          revisionOperation++;
+          revisionInFlight = false;
+          set({ sessionActionPending: false });
+        }
         historyGeneration++;
         streamingId = null;
         streamingHasToolCall = false;
@@ -320,6 +328,121 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
     setLoadingTreeEntryId: (loadingTreeEntryId) => set({ loadingTreeEntryId }),
     setLastUsage: (lastUsage) => set({ lastUsage }),
     setContextWindowSize: (contextWindowSize) => set({ contextWindowSize }),
+
+    getMessageRevision: async (entryId, mode) => {
+      const source = get();
+      const { sessionId, runtimeId } = source;
+      if (
+        !sessionId ||
+        !runtimeId ||
+        source.connection !== "connected" ||
+        !source.advancedFeatures ||
+        source.chatStatus !== "ready" ||
+        source.sessionActionPending
+      )
+        throw new UiError(uiText("Wait for Pi to be ready and run /webui to enable message revisions."));
+      // agent_end can make controls ready before its debounced snapshot arrives.
+      // Settle the persisted leaf first; never weaken submit's exact-leaf fence.
+      const range = source.historyRange;
+      const before = source.historyBefore;
+      const sync = (await revisionDeadline(
+        source.send("sync_request", {
+          ...range,
+          ...(before ? { before } : {}),
+          sessionId,
+          runtimeId,
+        }),
+      )) as Parameters<SessionSlice["applyStateSync"]>[0];
+      if (
+        get().sessionId !== sessionId ||
+        get().runtimeId !== runtimeId ||
+        get().connection !== "connected" ||
+        get().sessionActionPending ||
+        !get().advancedFeatures ||
+        get().historyRange !== range ||
+        get().historyBefore !== before ||
+        sync?.sessionId !== sessionId ||
+        sync.runtimeId !== runtimeId
+      )
+        throw new UiError(uiText("The active branch changed. Reopen the message action."));
+      get().applyStateSync(sync, { requested: true });
+      const leafId = get().leafId;
+      const result = await revisionDeadline(
+        source.send("get_message_revision", { entryId, mode, sessionId, runtimeId }),
+      );
+      const current = get();
+      if (
+        current.sessionId !== sessionId ||
+        current.runtimeId !== runtimeId ||
+        current.leafId !== leafId ||
+        current.connection !== "connected" ||
+        current.chatStatus !== "ready" ||
+        current.sessionActionPending
+      )
+        throw new UiError(uiText("The active branch changed. Reopen the message action."));
+      const preview = parseMessageRevision(result, entryId, mode, sessionId, runtimeId);
+      if (preview.sourceLeafId !== leafId)
+        throw new UiError(uiText("The active branch changed. Reopen the message action."));
+      return preview;
+    },
+
+    submitMessageRevision: async (preview, text) => {
+      const source = get();
+      const matches = () => get().sessionId === preview.sessionId && get().runtimeId === preview.runtimeId;
+      if (
+        !matches() ||
+        source.leafId !== preview.sourceLeafId ||
+        source.connection !== "connected" ||
+        !source.advancedFeatures ||
+        source.chatStatus !== "ready" ||
+        source.sessionActionPending
+      )
+        throw new UiError(uiText("The active branch changed. Reopen the message action."));
+      if (preview.mode === "edit" && !text.trim()) throw new UiError(uiText("Question cannot be empty."));
+      const operation = ++revisionOperation;
+      revisionInFlight = true;
+      set({ sessionActionPending: true, error: null });
+      try {
+        const result = (await revisionDeadline(
+          source.send("submit_message_revision", {
+            previewId: preview.previewId,
+            entryId: preview.entryId,
+            mode: preview.mode,
+            sessionId: preview.sessionId,
+            runtimeId: preview.runtimeId,
+            sourceLeafId: preview.sourceLeafId,
+            ...(preview.mode === "edit" ? { text } : {}),
+          }),
+        )) as
+          | { dispatched?: boolean; cancelled?: boolean; sessionId?: string; runtimeId?: string; userEntryId?: string }
+          | undefined;
+        if (!matches()) throw new UiError(uiText("The active branch changed. Check the current session."));
+        if (result?.cancelled) return false;
+        if (
+          !result?.dispatched ||
+          result.sessionId !== preview.sessionId ||
+          result.runtimeId !== preview.runtimeId ||
+          result.userEntryId !== preview.userEntryId
+        )
+          throw new UiError(uiText("Message revision was not confirmed. Check the active branch before trying again."));
+        return true;
+      } catch (error) {
+        if (matches())
+          set({
+            error: errorUiText(
+              error,
+              uiText("Message revision was not confirmed. Check the active branch before trying again."),
+            ),
+          });
+        throw error;
+      } finally {
+        // Never clear a newer runtime's session-action lock.
+        if (matches() && operation === revisionOperation) {
+          revisionInFlight = false;
+          set({ sessionActionPending: false });
+        }
+      }
+    },
 
     sendPrompt: async (command) => {
       const source = identity();

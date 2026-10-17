@@ -1,5 +1,9 @@
 # ADR 0010: Real Pi Agent Web UI E2E Tests
 
+## Per-message revision coverage
+
+The `message-revision` feature runs desktop and mobile examples with a real Pi process and a faux provider that inspects the actual transcript. Edited early ALPHA must not contain the original ALPHA answer or later BETA context; regenerated BETA must retain prior ALPHA but exclude its old BETA answer and the edited sibling. Exact edited whitespace is checked. The browser exercises explicit confirmation/cancellation, unsent draft protection, busy controls, Tree version switches and reload persistence. JSONL inspection is limited to this synthetic harness's temporary session, never real user conversations. Saved action buttons, not streamed answer text alone, signal that entries are actionable.
+
 ## Status
 
 Accepted

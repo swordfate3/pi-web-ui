@@ -12,6 +12,8 @@ import type {
   GitStatusResult,
   HistoryMetadata,
   HistoryRange,
+  MessageRevisionMode,
+  MessageRevisionPreview,
   ModelInfo,
   PromptCommand,
   RightPanelTab,
@@ -43,6 +45,8 @@ export type ConnectionSlice = {
 
 export type SessionSlice = {
   getUsageStats: () => Promise<UsageStatsResult>;
+  getMessageRevision: (entryId: string, mode: MessageRevisionMode) => Promise<MessageRevisionPreview>;
+  submitMessageRevision: (preview: MessageRevisionPreview, text: string) => Promise<boolean>;
   historyRange: HistoryRange;
   history: HistoryMetadata | null;
   historyBefore: string | null;

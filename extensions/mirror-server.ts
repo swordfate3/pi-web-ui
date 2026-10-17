@@ -27,6 +27,7 @@ import { type ConnectionSettings, localWebUrl, resolveConnectionConfig } from ".
 import { listenWithFallback } from "./connection-listener.ts";
 import { attachmentDisposition, WorkspaceDownloads } from "./file-downloads.ts";
 import { projectLiveEvent } from "./live-transport.ts";
+import { matchesRevisionDispatch, resolveMessageRevision, revisionContent } from "./message-revision.ts";
 import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
@@ -336,6 +337,27 @@ export default function (pi: ExtensionAPI) {
   let latestExecuteCtx: ExtensionCommandContext | null = null;
   const liveArtifactPaths = new Set<string>();
   let sessionReplacementPending = false;
+  let revisionAttempt: { cancelled: boolean } | null = null;
+  let revisionTreeVersion = 0;
+  // One one-shot preview per live socket; no permanent branch fence or receipt history.
+  let revisionPreviews = new WeakMap<
+    WritableSocket,
+    {
+      previewId: string;
+      epoch: number;
+      entryId: unknown;
+      mode: unknown;
+      sourceLeafId: string | null;
+    }
+  >();
+  let revisionDispatch: {
+    parentId: string | null;
+    content: ReturnType<typeof revisionContent>;
+  } | null = null;
+  let revisionDispatchTimer: NodeJS.Timeout | null = null;
+  let revisionDispatchUnknown = false;
+  // Keep pre-existing async browser mutations ineligible to race revision navigation.
+  let activeBrowserMutations = 0;
   // Protocol: replacement acknowledgements mean accepted, never completed.
   // Resume completes on state_sync.sessionId === targetSessionId; reload keeps
   // that ID and completes only on a different state_sync.runtimeId. Both clear
@@ -370,6 +392,8 @@ export default function (pi: ExtensionAPI) {
   let activeExport: { controller: AbortController; done: Promise<unknown> } | null = null;
 
   function clearSessionAction() {
+    if (revisionDispatchTimer) clearTimeout(revisionDispatchTimer);
+    revisionDispatchTimer = null;
     if (dispatchTimer) clearTimeout(dispatchTimer);
     dispatchTimer = null;
     sessionReplacementPending = false;
@@ -1211,6 +1235,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_tree", async (event: unknown, ctx: ExtensionContext) => {
     latestCtx = ctx;
+    revisionTreeVersion++;
     const payload = typeof event === "object" && event !== null ? (event as Record<string, unknown>) : {};
     broadcast({ type: "event", event: "session_tree", payload });
   });
@@ -1240,6 +1265,10 @@ export default function (pi: ExtensionAPI) {
     latestCtx = ctx;
     runtimeActive = true;
     lifecycleEpoch++;
+    revisionAttempt = null;
+    revisionPreviews = new WeakMap();
+    revisionDispatch = null;
+    revisionDispatchUnknown = false;
     savedSelections.clear();
     fileDownloads.clear();
     workspaceUploads.clear();
@@ -1263,6 +1292,19 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_start", (event, ctx) => {
     latestCtx = ctx;
     if (event.message.role !== "user") return;
+    // Pi 1.1 has no dispatch ID on message_start (input.source is not propagated).
+    // Persistence occurs at message_end, so the current leaf is this user's parent.
+    // Never infer completion from tree/agent/turn events or a transformed message.
+    if (
+      revisionDispatch &&
+      matchesRevisionDispatch(revisionDispatch, ctx.sessionManager.getLeafId(), event.message.content)
+    ) {
+      revisionDispatch = null;
+      revisionDispatchUnknown = false;
+      if (revisionDispatchTimer) clearTimeout(revisionDispatchTimer);
+      revisionDispatchTimer = null;
+      if (!revisionAttempt) sessionReplacementPending = false;
+    }
     const content = event.message.content;
     const text =
       typeof content === "string"
@@ -1415,6 +1457,137 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  function requireRevisionIdentity(params: Record<string, unknown>) {
+    if (!runtimeActive || !latestCtx) throw new Error("No context available");
+    if (params.sessionId !== latestCtx.sessionManager.getSessionId() || params.runtimeId !== runtimeId)
+      throw new Error("Session or Pi runtime changed. Reopen the message revision.");
+  }
+
+  function getMessageRevision(ws: WritableSocket, params: Record<string, unknown>) {
+    requireRevisionIdentity(params);
+    requireSessionAction("message revision");
+    if (!latestCtx) throw new Error("No context available");
+    const original = resolveMessageRevision(
+      (id) => latestCtx?.sessionManager.getEntry(id),
+      params.entryId,
+      params.mode,
+    );
+    const preview = {
+      previewId: randomUUID(),
+      epoch: lifecycleEpoch,
+      entryId: params.entryId,
+      mode: params.mode,
+      sourceLeafId: latestCtx.sessionManager.getLeafId(),
+    };
+    revisionPreviews.set(ws, preview);
+    return {
+      previewId: preview.previewId,
+      entryId: original.entryId,
+      userEntryId: original.userEntryId,
+      text: original.text,
+      hasImages: original.hasImages,
+      sourceLeafId: latestCtx.sessionManager.getLeafId(),
+      sessionId: params.sessionId,
+      runtimeId,
+    };
+  }
+
+  async function submitMessageRevision(ws: WritableSocket, params: Record<string, unknown>) {
+    const preview = revisionPreviews.get(ws);
+    if (!preview || typeof params.previewId !== "string" || preview.previewId !== params.previewId)
+      throw new Error("Message revision preview expired or was consumed. Reopen the message revision.");
+    // Consume before validation/navigation: a failed or uncertain operation is never replayable.
+    revisionPreviews.delete(ws);
+    if (
+      preview.epoch !== lifecycleEpoch ||
+      preview.entryId !== params.entryId ||
+      preview.mode !== params.mode ||
+      preview.sourceLeafId !== params.sourceLeafId
+    )
+      throw new Error("Message revision preview changed. Reopen the message revision.");
+    requireRevisionIdentity(params);
+    requireSessionAction("message revision");
+    if (activeBrowserMutations > 1)
+      throw new Error("Another browser mutation is still in progress. Reopen the message revision.");
+    if (!latestCtx || !latestExecuteCtx) throw new Error("No command context available");
+    const sourceLeafId = latestCtx.sessionManager.getLeafId();
+    if (params.sourceLeafId !== sourceLeafId)
+      throw new Error("Session leaf changed. Reopen the message revision; nothing was sent.");
+    const original = resolveMessageRevision(
+      (id) => latestCtx?.sessionManager.getEntry(id),
+      params.entryId,
+      params.mode,
+    );
+    const content = revisionContent(original, params.mode, params.text);
+    if (sourceLeafId === original.userEntryId)
+      throw new Error(
+        "Pi cannot revise a user message at the current leaf. Wait for a saved response or choose another branch.",
+      );
+    const epoch = lifecycleEpoch;
+    const treeVersion = revisionTreeVersion;
+    const attempt = { cancelled: false };
+    revisionAttempt = attempt;
+    sessionReplacementPending = true;
+    let navigated = false;
+    let navigationReturned = false;
+    try {
+      // Capture only plain source data. Never reuse command/event ctx after this await.
+      const result = await latestExecuteCtx.navigateTree(original.userEntryId, { summarize: false });
+      navigationReturned = true;
+      if (result.cancelled) return { cancelled: true };
+      navigated = revisionTreeVersion !== treeVersion;
+      requireRevisionIdentity(params);
+      if (epoch !== lifecycleEpoch || revisionAttempt !== attempt || !latestCtx)
+        throw new Error("Session lifecycle changed");
+      if (attempt.cancelled) throw new Error("Revision cancelled");
+      // A fresh session_tree context is mandatory. This also catches Pi's target==leaf no-op.
+      if (revisionTreeVersion !== treeVersion + 1 || latestCtx.sessionManager.getLeafId() !== original.parentId)
+        throw new Error("Navigation did not reach the original question's parent");
+      if (!latestCtx.isIdle() || latestCtx.hasPendingMessages()) throw new Error("Pi became busy during navigation");
+      // Set before the void API call, including synchronous throw/unknown delivery outcomes.
+      revisionDispatch = { parentId: original.parentId, content };
+      revisionDispatchUnknown = true;
+      // Hold the shared mutation lock through asynchronous void dispatch. Timeout is
+      // unknown, not cancellation/acceptance. Only an exact correlated user start
+      // or session lifecycle reset can release unknown, even after this timeout.
+      // Transforms/image normalization may prevent confirmation: inspect Pi and
+      // replace/reload the session from the terminal; tree navigation is not recovery.
+      revisionDispatchTimer = setTimeout(() => {
+        revisionDispatchTimer = null;
+        if (epoch === lifecycleEpoch && !revisionAttempt) sessionReplacementPending = false;
+      }, 8_000);
+      revisionDispatchTimer.unref();
+      pi.sendUserMessage(content, { expandPromptTemplates: false });
+      return { dispatched: true, sessionId: params.sessionId, runtimeId, userEntryId: original.userEntryId };
+    } catch {
+      if (revisionDispatchTimer && epoch === lifecycleEpoch) {
+        clearTimeout(revisionDispatchTimer);
+        revisionDispatchTimer = null;
+      }
+      if (navigated || revisionTreeVersion !== treeVersion)
+        throw new Error(
+          "The branch has switched, but message dispatch failed or is unknown. Check the session; do not automatically retry.",
+        );
+      if (!navigationReturned)
+        throw new Error(
+          "Message revision navigation failed or its outcome is unknown. Check the session; do not automatically retry.",
+        );
+      throw new Error("Message revision was not dispatched. Check the session; do not automatically retry.");
+    } finally {
+      // An old completion must never unlock a newer session action.
+      if (epoch === lifecycleEpoch && revisionAttempt === attempt) {
+        revisionAttempt = null;
+        sessionReplacementPending = revisionDispatchTimer !== null;
+        // A successful switch remains visible even when sending fails. No optimistic message.
+        try {
+          if (runtimeActive && latestCtx) broadcast(buildStateSnapshot(latestCtx));
+        } catch {
+          // session_tree already forwarded; the browser can explicitly resync.
+        }
+      }
+    }
+  }
+
   // ═══════════════════════════════════════
   // Handle commands from browser clients
   // ═══════════════════════════════════════
@@ -1435,9 +1608,34 @@ export default function (pi: ExtensionAPI) {
       error: message,
     });
 
+    let ownsMutation = false;
+    const mutates =
+      !request.method.startsWith("get_") &&
+      !["abort", "health", "sync_request", "extension_ui_response"].includes(request.method);
     try {
+      if (
+        (revisionAttempt || revisionDispatchUnknown) &&
+        !request.method.startsWith("get_") &&
+        !["abort", "health", "sync_request", "extension_ui_response"].includes(request.method)
+      ) {
+        throw new Error(
+          revisionAttempt
+            ? "A message revision is already in progress"
+            : "Message revision dispatch is pending or unknown. Check Pi in the terminal; do not automatically retry.",
+        );
+      }
+      if (mutates) {
+        activeBrowserMutations++;
+        ownsMutation = true;
+      }
       switch (request.method) {
         case "prompt": {
+          // Plain queued prompts may also carry a source identity. Enforce it
+          // server-side as well as in the browser before any dispatch/command.
+          if (params.sessionId !== undefined || params.runtimeId !== undefined) {
+            checkHistoryIdentity(params, true);
+            if (params.runtimeId !== runtimeId) throw new Error("Session or Pi runtime changed. Nothing was sent.");
+          }
           if (sessionReplacementPending) {
             sendTo(ws, error("A session action is already in progress"));
             break;
@@ -1671,7 +1869,8 @@ export default function (pi: ExtensionAPI) {
         }
 
         case "abort": {
-          ctx?.abort();
+          if (revisionAttempt) revisionAttempt.cancelled = true;
+          latestCtx?.abort();
           sendTo(ws, success());
           break;
         }
@@ -2132,6 +2331,16 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
+        case "get_message_revision": {
+          sendTo(ws, success(getMessageRevision(ws, params)));
+          break;
+        }
+
+        case "submit_message_revision": {
+          sendTo(ws, success(await submitMessageRevision(ws, params)));
+          break;
+        }
+
         case "navigate_tree": {
           if (!advancedFeaturesEnabled || !latestExecuteCtx) {
             sendTo(ws, error("Run /webui first to enable editing"));
@@ -2175,6 +2384,8 @@ export default function (pi: ExtensionAPI) {
       }
     } catch (e: unknown) {
       sendTo(ws, error(e instanceof Error ? e.message : String(e)));
+    } finally {
+      if (ownsMutation) activeBrowserMutations--;
     }
   }
 
@@ -2905,6 +3116,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     runtimeActive = false;
     lifecycleEpoch++;
+    revisionAttempt = null;
+    revisionPreviews = new WeakMap();
+    revisionDispatch = null;
+    revisionDispatchUnknown = false;
     savedSelections.clear();
     clearSessionAction();
     advancedFeaturesEnabled = false;

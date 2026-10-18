@@ -92,7 +92,7 @@ means management is unavailable, without changing standalone extension behavior.
 An independent `runtimeUpdates` provider configuration delegates exact stable Pi
 version requests to Gate's fixed loopback `/v1/runtime-updates` API. It uses the
 ordinary request credential, not the lifecycle or administrator credential.
-Pairing, separate management origin, CSRF and revocation checks also protect
+Management authentication, separate management origin, CSRF and revocation checks also protect
 these routes. The browser never receives a Gate credential or approval ability.
 Omitting this provider preserves existing chat and restart behavior.
 
@@ -109,3 +109,30 @@ including after Hub restart and re-pairing; the browser never automatically
 repeats POST. Gate owns the durable task record. No installation or refresh is
 performed in the Hub or hidden inside extension import. See the optional global
 update section in the [operating guide](../hub.md).
+
+## Optional trusted gateway management login (2026-10-18)
+
+Default deployments keep one-time management pairing. A separately configured
+`management.gateway.credentialFile` permits an authenticated HTTPS gateway to
+replace manual pairing: every management HTTP request must carry both a private
+server-to-server proof and a valid authenticated user identifier. The gateway
+must overwrite these headers after login, not forward client assertions.
+The proof is independent of Gate request/lifecycle/admin credentials and never
+enters the browser, chat backend, shared Agent home, URL or public response.
+
+Only the separate management listener exposes the empty-body, same-origin
+session-bootstrap route. It issues the existing short-lived HttpOnly/Secure
+management cookie and CSRF token; subsequent writes retain Origin and CSRF checks.
+Sessions are bound to the gateway user and current proof fingerprint. Missing,
+unreadable or rotated proof fails closed even with a previously valid cookie.
+An administrator can still revoke browser sessions without modifying login passwords.
+
+The browser automatically bootstraps only on initial entry. After logout or an
+expired/unknown request it requires explicit re-entry and never automatically
+replays an update. Re-entry and logout use the existing serialized authorization
+transition to avoid stale-response and late Set-Cookie races. Pairing is disabled
+only for this explicit mode. All valid gateway users may request administration;
+this is a single-owner trust decision, not per-user RBAC. Gate manual approval,
+version/image allowlists, idle checks and recovery controls remain independent.
+Distinct HTTPS origin, DNS and a private reverse forward remain deployment
+prerequisites; sharing the chat origin is not a supported shortcut.

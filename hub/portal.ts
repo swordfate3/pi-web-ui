@@ -6,7 +6,7 @@ export const portalHtml = `<!doctype html>
 <body><main><header><a class="brand" href="/sessions/" aria-label="Pi 会话首页"><span class="logo">π</span> Pi Web <span class="tag">HUB</span></a><span id="health" role="status">正在连接</span></header>
 <section class="intro"><span class="eyebrow">你的工作，随时接续</span><h1>所有会话，一个入口。</h1><p>选择正在运行的 Pi，在手机与电脑之间继续工作。</p></section>
 <section class="version-overview" aria-labelledby="versions-title"><div class="version-heading"><div><span class="eyebrow">SOFTWARE STATUS</span><h2 id="versions-title">版本与更新</h2></div><span id="version-summary" role="status">正在检查发布版本</span></div><div id="version-details" class="version-details"></div><p class="version-help">仅检查 Pi 与本 Web 扩展的公开发布版本，不自动安装或重启。会话版本为进程上报值，不等于磁盘已安装版本。构建不同不一定代表落后；其他扩展不在本次检查范围。</p></section>
-<details class="management"><summary>运行管理 <span id="management-status" role="status">正在检查能力</span></summary><p>管理授权与网页登录分开。重启只刷新选中的空闲 Pi；全局运行时更新由 Gate 安装精确的已审计版本，两项操作彼此独立。</p><p id="management-help">管理员在 Hub 的可信终端运行 <code>pi-web-hub pair --config 配置文件</code>，生成一次性管理码（10 分钟有效）。</p><form id="management-unlock"><label for="management-code">一次性管理码</label><div class="controls"><input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="输入 32 位管理码" required><button type="submit">解锁管理</button></div></form><button id="management-logout" type="button" hidden>锁定管理</button><p id="management-notice" role="status" aria-live="polite"></p><section class="runtime-updates" aria-labelledby="runtime-update-title"><div class="runtime-update-heading"><h3 id="runtime-update-title">全局 Pi 运行时更新</h3><span id="runtime-update-status" role="status">正在检查能力</span></div><p>向 Gate 提交精确稳定版本；不会重建 Docker 镜像，也不会在网页批准更新。更新影响所有共享运行时使用者，忙碌目标会等待空闲，旧镜像需要迁移后才能受管。</p><p id="runtime-update-policy"></p><form id="runtime-update-form"><label for="runtime-update-version">精确稳定版本</label><div class="controls"><input id="runtime-update-version" type="text" inputmode="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="例如 1.3.0" required><button id="runtime-update-submit" type="submit" disabled>提交给 Gate</button></div></form><button id="runtime-update-query" type="button" hidden>按原任务编号查询</button><div id="runtime-update-results" aria-live="polite"></div></section><section class="restart-results" aria-label="进程重启结果"><div id="management-results" aria-live="polite"></div></section></details>
+<details class="management"><summary>运行管理 <span id="management-status" role="status">正在检查能力</span></summary><p>管理操作需要身份验证。重启只刷新选中的空闲 Pi；全局运行时更新由 Gate 安装精确的已审计版本，两项操作彼此独立。</p><p id="management-help">正在检查管理登录方式…</p><form id="management-unlock" hidden><label for="management-code">一次性管理码</label><div class="controls"><input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="输入 32 位管理码" required><button type="submit">解锁管理</button></div></form><button id="management-gateway" type="button" hidden>使用网页登录解锁</button><button id="management-logout" type="button" hidden>锁定管理</button><p id="management-notice" role="status" aria-live="polite"></p><section class="runtime-updates" aria-labelledby="runtime-update-title"><div class="runtime-update-heading"><h3 id="runtime-update-title">全局 Pi 运行时更新</h3><span id="runtime-update-status" role="status">正在检查能力</span></div><p>向 Gate 提交精确稳定版本；不会重建 Docker 镜像，也不会在网页批准更新。更新影响所有共享运行时使用者，忙碌目标会等待空闲，旧镜像需要迁移后才能受管。</p><p id="runtime-update-policy"></p><form id="runtime-update-form"><label for="runtime-update-version">精确稳定版本</label><div class="controls"><input id="runtime-update-version" type="text" inputmode="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="例如 1.3.0" required><button id="runtime-update-submit" type="submit" disabled>提交给 Gate</button></div></form><button id="runtime-update-query" type="button" hidden>按原任务编号查询</button><div id="runtime-update-results" aria-live="polite"></div></section><section class="restart-results" aria-label="进程重启结果"><div id="management-results" aria-live="polite"></div></section></details>
 <section class="toolbar" aria-label="会话操作"><div><h2>在线会话 <span id="count">0</span></h2><p id="updated">等待登记</p></div><div class="controls"><label><span class="sr-only">搜索会话</span><input id="search" type="search" placeholder="搜索项目或会话…"></label><button id="refresh" type="button">刷新</button></div></section>
 <div id="notice" role="status"></div><section id="sessions" class="grid" aria-label="在线 Pi 会话"></section>
 <section id="empty" class="empty" hidden><span class="empty-icon">π</span><h3>还没有在线会话</h3><p>为 Pi 配置本总管的登记 socket 和独立凭据。<br>已启动的会话会自动出现在这里。</p></section>
@@ -194,11 +194,14 @@ ${runtimePortalJs}
   const restartAvailable = () => auth.restartAvailable ?? auth.available;
   function updateAuth() {
     get('management-status').textContent = authTransition ? '正在处理管理登录或锁定…' : !auth.available ? '未配置' : auth.authorized ? '已解锁 · 30 分钟有效' : '已锁定';
-    get('management-unlock').hidden = !auth.available || auth.authorized || authTransition;
+    const gateway = auth.authMode === 'gateway';
+    get('management-unlock').hidden = gateway || !auth.available || auth.authorized || authTransition;
+    get('management-gateway').hidden = !gateway || !auth.available || auth.authorized || authTransition;
+    get('management-gateway').disabled = authTransition;
     get('management-code').disabled = authTransition;
     get('management-logout').hidden = !auth.authorized;
     get('management-logout').disabled = authTransition;
-    get('management-help').textContent = !auth.available ? '本 Hub 尚未接入 Gate 管理能力。旧容器需使用新镜像重新启动一次，不能通过 /reload 获得受管能力。' : '管理员在 Hub 的可信终端运行 pi-web-hub pair --config 配置文件，生成一次性管理码。管理授权与网页登录分开，过期后需重新解锁。';
+    get('management-help').textContent = !auth.available ? '本 Hub 尚未接入 Gate 管理能力。旧容器需使用新镜像重新启动一次，不能通过 /reload 获得受管能力。' : gateway ? '使用已验证的网页登录身份，无需管理码。管理会话 30 分钟有效；过期或锁定后可点击使用网页登录解锁。申请更新仍遵循 Gate 审批策略。' : '管理员在 Hub 的可信终端运行 pi-web-hub pair --config 配置文件，生成一次性管理码。管理授权与网页登录分开，过期后需重新解锁。';
     renderResults(); runtimeUpdates.updateAuth();
     changed();
   }
@@ -264,9 +267,17 @@ ${runtimePortalJs}
     });
     card.append(button);
   } };
+  async function loginWithGateway() {
+    if (authTransition || auth.authMode !== 'gateway' || !auth.available || auth.authorized) return;
+    authTransition = true; updateAuth();
+    try { const result = await api('gateway', {}); authGeneration++; auth = { ...auth, ...result }; runtimeUpdates.clearProtected(); updateAuth(); notice('已使用网页登录身份解锁管理，无需管理码。'); void poll(); void runtimeUpdates.poll(); }
+    catch (error) { if (!error.stale) notice('无法验证网页登录身份，请重新登录管理入口后重试；不会自动提交更新。'); }
+    finally { authTransition = false; updateAuth(); }
+  }
+  get('management-gateway').addEventListener('click', loginWithGateway);
   get('management-unlock').addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (authTransition) return;
+    if (authTransition || auth.authMode === 'gateway') return;
     const input = get('management-code'); const code = input.value.trim(); input.value = '';
     authTransition = true; updateAuth();
     try { const result = await api('unlock', { code }); authGeneration++; auth = { ...auth, ...result }; runtimeUpdates.clearProtected(); updateAuth(); notice('管理已解锁。可独立选择进程重启或全局运行时更新。'); void poll(); void runtimeUpdates.poll(); }
@@ -284,7 +295,7 @@ ${runtimePortalJs}
     const saved = JSON.parse(sessionStorage.getItem('pi-hub-restarts') || '[]');
     if (Array.isArray(saved)) for (const o of saved.slice(0, 64)) if (/^[a-f0-9]{32}$/.test(o.id) && /^[a-f0-9]{32}$/.test(o.generation) && typeof o.label === 'string' && o.label.length <= 256) operations.set(o.id, { id: o.id, generation: o.generation, label: o.label, done: false, status: 'unknown' });
   } catch {}
-  void (async () => { try { auth = await api('status'); updateAuth(); await poll(); await runtimeUpdates.poll(); } catch { notice('无法查询运行管理能力。'); } })();
+  void (async () => { try { auth = await api('status'); updateAuth(); if (auth.authMode === 'gateway') await loginWithGateway(); await poll(); await runtimeUpdates.poll(); } catch { notice('无法查询运行管理能力。'); } })();
   setInterval(async () => { await poll(); await runtimeUpdates.poll(); }, 2000);
 })();`;
 

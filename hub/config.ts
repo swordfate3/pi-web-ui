@@ -15,7 +15,7 @@ export type HubConfig = {
   publicUrl?: string;
   lifecycle?: LifecycleConfig;
   runtimeUpdates?: LifecycleConfig;
-  management?: { port: number; publicUrl?: string };
+  management?: { port: number; publicUrl?: string; gateway?: { credentialFile: string } };
 };
 export type Grant = { run_id: string; token: string; label: string; backendHost: string; revoked?: boolean };
 
@@ -110,7 +110,7 @@ export function managementConfig(
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid management configuration");
   const v = value as Record<string, unknown>;
   if (
-    Object.keys(v).some((key) => !["port", "publicUrl"].includes(key)) ||
+    Object.keys(v).some((key) => !["port", "publicUrl", "gateway"].includes(key)) ||
     !Number.isInteger(v.port) ||
     Number(v.port) < 0 ||
     Number(v.port) > 65535 ||
@@ -125,7 +125,23 @@ export function managementConfig(
       new URL(publicUrl).origin === new URL(chatPublicUrl).origin)
   )
     throw new Error("Management requires a distinct canonical public origin");
-  return { port: Number(v.port), ...(publicUrl ? { publicUrl } : {}) };
+  let gateway: { credentialFile: string } | undefined;
+  if (v.gateway !== undefined) {
+    const g = v.gateway as Record<string, unknown>;
+    if (
+      !g ||
+      typeof g !== "object" ||
+      Array.isArray(g) ||
+      Object.keys(g).join(",") !== "credentialFile" ||
+      typeof g.credentialFile !== "string" ||
+      !path.isAbsolute(g.credentialFile) ||
+      g.credentialFile.includes("\0") ||
+      (publicUrl && !publicUrl.startsWith("https:"))
+    )
+      throw new Error("Invalid management gateway configuration");
+    gateway = { credentialFile: g.credentialFile };
+  }
+  return { port: Number(v.port), ...(publicUrl ? { publicUrl } : {}), ...(gateway ? { gateway } : {}) };
 }
 
 function validHost(host: string) {

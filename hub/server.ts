@@ -15,6 +15,7 @@ import {
   readGrant,
   readPrivateJson,
 } from "./config.ts";
+import { gatewayIdentity } from "./gateway-auth.ts";
 import { portalCss, portalJs, portalManagementCss, portalManagementJs, renderPortalHtml } from "./portal.ts";
 import { createRestartApi } from "./restart-api.ts";
 import { createVersionStatus, type VersionStatusOptions } from "./version-status.ts";
@@ -506,6 +507,10 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
       }
       const pathname = request.url?.split("?")[0];
       if (admin) {
+        if (config.management?.gateway && !gatewayIdentity(config, request)) {
+          fail(response, 401);
+          return;
+        }
         if (await restartApi.handle(request, response, allowedBrowser(request, true, true))) return;
         if (
           !["/", "/sessions/", "/api/sessions", "/hub.js", "/hub-management.js", "/hub.css"].includes(pathname ?? "") ||

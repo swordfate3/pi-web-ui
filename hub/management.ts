@@ -3,6 +3,7 @@ import { closeSync, constants, existsSync, openSync, renameSync, unlinkSync, wri
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
 import { type HubConfig, privateDirectory, readPrivateJson } from "./config.ts";
+import { gatewayIdentity } from "./gateway-auth.ts";
 
 type ManagementState = { epoch: string; pairHash: string | null; expires: number; failures: number };
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -49,6 +50,7 @@ function saveState(config: HubConfig, value: ManagementState) {
 
 /** Trusted CLI only: return a short-lived code to its administrator's terminal. */
 export function issueManagementCode(config: HubConfig, now = Date.now()) {
+  if (config.management?.gateway) throw new Error("Management uses the configured gateway login, not pairing codes");
   const code = randomBytes(16).toString("hex");
   const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
   const expires = now + 600_000;
@@ -62,7 +64,7 @@ export function revokeManagement(config: HubConfig) {
 
 /** Additional management privilege, deliberately separate from gateway/list access. */
 export class HubManagement {
-  private readonly sessions = new Map<string, { epoch: string; expires: number; csrf: string }>();
+  private readonly sessions = new Map<string, { epoch: string; expires: number; csrf: string; gateway?: string }>();
   private readonly config: HubConfig;
   private readonly now: () => number;
   private readonly secure: boolean;
@@ -91,7 +93,13 @@ export class HubManagement {
     } catch {
       return undefined;
     }
-    if (!session || session.expires <= this.now() || !state || session.epoch !== state.epoch) {
+    if (
+      !session ||
+      session.expires <= this.now() ||
+      !state ||
+      session.epoch !== state.epoch ||
+      (this.config.management?.gateway && session.gateway !== gatewayIdentity(this.config, request))
+    ) {
       this.sessions.delete(key);
       return undefined;
     }
@@ -123,6 +131,7 @@ export class HubManagement {
   }
 
   unlock(code: unknown) {
+    if (this.config.management?.gateway) throw new Error("Gateway login required");
     const state = readState(this.config);
     if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10)
       throw new Error("Management unlock rejected");
@@ -131,12 +140,27 @@ export class HubManagement {
       throw new Error("Management unlock rejected");
     }
     saveState(this.config, { ...state, pairHash: null, expires: 0 });
+    return this.createSession(state);
+  }
+
+  unlockGateway(request: IncomingMessage) {
+    const identity = gatewayIdentity(this.config, request);
+    if (!identity) throw new Error("Verified gateway login required");
+    let state = readState(this.config);
+    if (!state) {
+      state = { epoch: randomBytes(32).toString("hex"), pairHash: null, expires: 0, failures: 0 };
+      saveState(this.config, state);
+    }
+    return this.createSession(state, identity);
+  }
+
+  private createSession(state: ManagementState, gateway?: string) {
     for (const [key, value] of this.sessions) if (value.expires <= this.now()) this.sessions.delete(key);
     if (this.sessions.size >= 64) throw new Error("Management unlock rejected");
     const token = randomBytes(32).toString("hex");
     const csrf = randomBytes(32).toString("hex");
     const expires = this.now() + 1_800_000;
-    this.sessions.set(digest(token), { epoch: state.epoch, expires, csrf });
+    this.sessions.set(digest(token), { epoch: state.epoch, expires, csrf, ...(gateway ? { gateway } : {}) });
     return { csrf, expiresAt: expires, cookie: this.cookie(token, 1800) };
   }
 

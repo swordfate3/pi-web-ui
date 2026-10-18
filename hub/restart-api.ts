@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import type { RuntimeMetadata } from "../extensions/runtime-metadata.ts";
 import { type HubConfig, privateDirectory, readPrivateJson } from "./config.ts";
+import { gatewayIdentity } from "./gateway-auth.ts";
 import { GateLifecycle, type LifecycleJob, type RestartRequest } from "./lifecycle.ts";
 import { HubManagement } from "./management.ts";
 import { GateRuntimeUpdates, RuntimeUpdateError, runtimeVersion } from "./runtime-updates.ts";
@@ -221,9 +222,14 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
       let phase = "authorization";
       let unsubmittedReceipt: string | undefined;
       try {
+        if (config.management?.gateway && !gatewayIdentity(config, request)) {
+          reply(401, { error: "Verified gateway login required" });
+          return true;
+        }
         if (request.method === "GET" && pathname === "/api/management/status") {
           reply(200, {
             available: !!provider || !!runtimeProvider,
+            ...(config.management?.gateway ? { authMode: "gateway" } : {}),
             ...(runtimeProvider ? { runtimeUpdatesAvailable: true, restartAvailable: !!provider } : {}),
             ...management.status(request),
           });
@@ -234,9 +240,28 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
           return true;
         }
         if (request.method === "POST" && pathname === "/api/management/unlock") {
+          if (config.management?.gateway) {
+            reply(404, { error: "Pairing is not enabled" });
+            return true;
+          }
           const value = await body(request);
           if (Object.keys(value).join(",") !== "code") throw new Error();
           const result = management.unlock(value.code);
+          reply(200, { authorized: true, csrf: result.csrf, expiresAt: result.expiresAt }, result.cookie);
+          return true;
+        }
+        if (request.method === "POST" && pathname === "/api/management/gateway") {
+          if (!config.management?.gateway) {
+            reply(404, { error: "Gateway login is not configured" });
+            return true;
+          }
+          try {
+            if (Object.keys(await body(request)).length !== 0) throw new Error();
+          } catch {
+            reply(400, { error: "Empty gateway session request required" });
+            return true;
+          }
+          const result = management.unlockGateway(request);
           reply(200, { authorized: true, csrf: result.csrf, expiresAt: result.expiresAt }, result.cookie);
           return true;
         }

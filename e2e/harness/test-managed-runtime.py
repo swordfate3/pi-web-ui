@@ -42,6 +42,9 @@ def wait_for(function, timeout=30):
 
 class RealTui:
     def __init__(self, directory, hub, capability, branch, docker_image=None):
+        self.expected_version = os.environ.get("PI_RUNTIME_TEST_VERSION") if docker_image else None
+        if docker_image and not self.expected_version:
+            raise AssertionError("Docker runtime acceptance requires PI_RUNTIME_TEST_VERSION")
         if (SOURCE / "runtime/pi_stdin_guard.mjs").read_bytes() != (ROOT / "extensions/runtime-stdin-guard.mjs").read_bytes():
             raise AssertionError("Image guard must match the reviewed package guard before integration")
         self.directory = directory
@@ -162,6 +165,8 @@ class RealTui:
 
     def status(self):
         result = self.control({"action": "status"})
+        if result and self.expected_version and result.get("version") != self.expected_version:
+            raise AssertionError(f"Expected Pi {self.expected_version}, got {result.get('version')}")
         if result and self.container and not self.verified_image_guard:
             actual = subprocess.check_output(
                 ["docker", "exec", "--user", "1000:1000", self.container, "/usr/bin/sha256sum",

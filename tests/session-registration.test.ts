@@ -350,6 +350,8 @@ test("getter and notification errors do not poison refresh or erase known regist
   assert.equal(notices.at(-1), null);
   throwing = false;
   await lifecycle.refresh();
+  // refresh has a 250ms ACK budget, not a guarantee that slow IPC has finished.
+  await waitFor(() => fixture.requests.length === 2);
   assert.equal(fixture.requests.length, 2);
   assert.equal(fixture.requests[1].sessionName, "Known name");
   await lifecycle.stop();

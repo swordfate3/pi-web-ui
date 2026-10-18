@@ -68,4 +68,17 @@ PI_OFFLINE=1 node --import ./tests/register-ts.mjs --test \
 
 单元和 integration 的注册与版本源测试使用临时授权、合成元数据或固定源注入假响应；
 测试设置 `PI_OFFLINE=1`，不访问真实公开源。单独的公开源实查不发送生产登记、
-会话正文或凭据。不运行安装／更新命令；不把本轮检查等同于包已安装或线上已部署。
+会话正文或凭据。开发阶段不运行安装／更新命令；不把本轮检查等同于包已安装或线上已部署。
+
+## 发布前整合（用户另行授权）
+
+用户随后授权推送远程并部署本地。发布前保留并整合本机已有的
+`7d7c0e4` Pi 1.3.0 安全刷新兼容提交，避免更新安装时回退已审核的 allowlist。
+合并仅保留两边文档并重新构建 manifest，没有放宽未知 SDK 的拒绝边界。
+
+整合后重新验证：448 项单测（447 pass／1 optional skip／0 fail）、两套类型检查、
+生产构建／manifest通过；Biome 0 errors、原有30 warnings／1 info；真实Pi 1.3.0
+后端11/11通过。本轮遇到旧测试把 `refresh()` 的250ms预算误当IPC必完成的断言，
+修正为在原预算后等待观察到真实测试socket请求，不改变产品超时与重试行为。
+日志 `.tmp/hub-versions/release-{build,unit,check,integration}.log`。
+部署结果需以随后的Gate回执和实际安装核验为准；本节不是部署成功声明。

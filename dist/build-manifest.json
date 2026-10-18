@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 155,
-    "sha256": "412d14083a64a4ca2f66eff9d237f65a470e8a9496b0fee9d2d2834b008d739d",
+    "sha256": "a7c30717d583334d906181bf9e9cd562d25671dcda5de0c9c4903166ab718204",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -46,7 +46,7 @@
       },
       {
         "path": "extensions/runtime-control.ts",
-        "sha256": "6ece2b33c59217997abe633a43d72161b6d0682a252da89191d484b74b341bda"
+        "sha256": "ce4f6acec9485e50dfb31dca7ace0474d360a828eff65ffe8444c71dc794bd52"
       },
       {
         "path": "extensions/runtime-metadata.ts",

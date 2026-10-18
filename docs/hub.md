@@ -119,6 +119,61 @@ guard 是镜像中 root 所有、不可由共享卷替换的固定 Node preload�
 
 ## 本地快速开始
 
+### 可选：从管理页申请全局 Pi 更新
+
+“重启 Pi · 应用已安装更新”只刷新单个进程，不下载软件。新增的“全局 Pi 更新”
+则由 Hub 向 Gate 的 runtime API 申请安装精确版本，再由 Gate 在安全空闲时刷新
+共享 `pi-runtime` 的受管 Pi 子进程。它不更新 Web 扩展、Hub 镜像或系统依赖，
+也不重建 Docker 工作容器。
+
+管理员先在 Hub **私有配置**中显式配置另一项能力：
+
+```json
+{
+  "runtimeUpdates": {
+    "endpoint": "http://127.0.0.1:16182",
+    "credentialFile": "/hub/private/runtime-request.json"
+  }
+}
+```
+
+保留现有 `management`、`publicUrl`、`lifecycle` 等字段。管理页仍须使用独立的
+管理监听器/HTTPS origin 和一次性管理码；普通聊天 origin 不能调用此接口。
+`runtime-request.json` 使用 Gate 的**普通申请凭据**，格式为私有的
+`{"token":"64位申请凭据"}`；由管理员通过已有安全渠道配置0600文件并只读挂载。
+它与 `lifecycle.credentialFile` 的生命周期凭据用途不同，不能互换，
+更不能传入 Gate 管理员凭据、state 卷、Docker socket 或共享 Pi home。
+省略 `runtimeUpdates` 时此功能保持未配置，不影响原来的重启或聊天。
+
+使用步骤：
+
+1. 打开独立管理入口，解锁“运行管理”，在“全局 Pi 更新”输入精确稳定版本。
+   不接受 `latest`、范围、预发布或构建后缀；公开发布检查不是 Gate 已审核版本列表。
+   Gate 当前审核支持哪些 SDK，仍由部署管理员维护；格式正确不代表一定获准。
+2. 确认此次影响所有共享运行时的受管 Pi。页面只提交申请，不代替批准。
+   Gate runtime 策略为 `manual` 时，在可信宿主终端核对并运行
+   `gatectl runtime-approve <任务ID>`；`auto` 也不会跳过镜像、版本和空闲检查。
+   Hub 部署的自动策略不自动继承到 runtime 更新策略。
+3. 页面展示任务编号、精确版本、安装阶段和逐会话刷新状态。
+   正在生成、有排队输入或无法证明安全空闲的会话继续等待；安装完成不等于所有进程
+   已刷新。旧容器缺少镜像内的 supervisor/control 时，需先正常退出并使用受信新镜像
+   迁移一次；此按钮不绕过兼容检查，也不强行关闭旧容器。
+4. 提交前页面在当前浏览器标签的 `sessionStorage` 保存任务ID和版本，不保存管理码、
+   CSRF或任何 Gate token。提交响应丢失时只按原ID查询，不自动重复POST。
+   Hub重启后需重新解锁，任务仍保存在Gate自己的状态卷；不要换编号盲目重试未知结果。
+5. `failed`、`recovery_required` 等状态不显示为更新成功，也不从网页提供强制停止、
+   自动回滚、批准、改策略或解除恢复阻塞的功能。锁定管理不会取消已经提交的任务。
+
+受保护接口：`GET/POST /api/management/runtime-updates` 和
+`GET /api/management/runtime-updates/<ID>`。Hub只向固定的Gate `/v1/runtime-updates`
+路由转发白名单字段；不接受任意地址/命令，不跟随重定向，响应有大小及时间上限。
+任务回显不包含镜像策略摘要、凭据、容器身份、会话路径或安装助手内部记录。
+读取 Gate 的每次响应限时5秒、最多16 MiB；历史保留最近100个任务。
+目标记录会跨容器退出和更替累计，不按128个在线使用者的限制拒绝合法历史。
+单个任务在页面最多展示128条目标记录，优先非退出目标，超出会明确提示总数及展示上限；
+这不改变 Gate 的任务执行、完成判断或历史记录。超过响应预算时显示查询不可用，
+不能据此认为任务已失败、取消或可重新提交。
+
 ### 从 main 安装与更新
 
 本仓库 `main` 包含 Web 扩展和独立 Hub，未发布到上游 npm 包。

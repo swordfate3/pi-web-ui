@@ -1,10 +1,12 @@
+import { runtimePortalJs } from "./runtime-portal.ts";
+
 export const portalHtml = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pi · 会话总览</title><link rel="stylesheet" href="/hub.css"><script src="/hub-management.js" defer></script><script src="/hub.js" defer></script></head>
 <body><main><header><a class="brand" href="/sessions/" aria-label="Pi 会话首页"><span class="logo">π</span> Pi Web <span class="tag">HUB</span></a><span id="health" role="status">正在连接</span></header>
 <section class="intro"><span class="eyebrow">你的工作，随时接续</span><h1>所有会话，一个入口。</h1><p>选择正在运行的 Pi，在手机与电脑之间继续工作。</p></section>
 <section class="version-overview" aria-labelledby="versions-title"><div class="version-heading"><div><span class="eyebrow">SOFTWARE STATUS</span><h2 id="versions-title">版本与更新</h2></div><span id="version-summary" role="status">正在检查发布版本</span></div><div id="version-details" class="version-details"></div><p class="version-help">仅检查 Pi 与本 Web 扩展的公开发布版本，不自动安装或重启。会话版本为进程上报值，不等于磁盘已安装版本。构建不同不一定代表落后；其他扩展不在本次检查范围。</p></section>
-<details class="management"><summary>运行管理 <span id="management-status" role="status">正在检查能力</span></summary><p>只重启选中的 Pi 进程，加载已安装的更新；不重新创建容器、不下载更新。仅支持已保存且空闲的会话。</p><p id="management-help">管理员在 Hub 的可信终端运行 <code>pi-web-hub pair --config 配置文件</code>，生成一次性管理码（10 分钟有效）。网页登录不等于重启授权。</p><form id="management-unlock"><label for="management-code">一次性管理码</label><div class="controls"><input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="输入 32 位管理码" required><button type="submit">解锁管理</button></div></form><button id="management-logout" type="button" hidden>锁定管理</button><p id="management-notice" role="status" aria-live="polite"></p><div id="management-results" aria-live="polite"></div></details>
+<details class="management"><summary>运行管理 <span id="management-status" role="status">正在检查能力</span></summary><p>管理授权与网页登录分开。重启只刷新选中的空闲 Pi；全局运行时更新由 Gate 安装精确的已审计版本，两项操作彼此独立。</p><p id="management-help">管理员在 Hub 的可信终端运行 <code>pi-web-hub pair --config 配置文件</code>，生成一次性管理码（10 分钟有效）。</p><form id="management-unlock"><label for="management-code">一次性管理码</label><div class="controls"><input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="输入 32 位管理码" required><button type="submit">解锁管理</button></div></form><button id="management-logout" type="button" hidden>锁定管理</button><p id="management-notice" role="status" aria-live="polite"></p><section class="runtime-updates" aria-labelledby="runtime-update-title"><div class="runtime-update-heading"><h3 id="runtime-update-title">全局 Pi 运行时更新</h3><span id="runtime-update-status" role="status">正在检查能力</span></div><p>向 Gate 提交精确稳定版本；不会重建 Docker 镜像，也不会在网页批准更新。更新影响所有共享运行时使用者，忙碌目标会等待空闲，旧镜像需要迁移后才能受管。</p><p id="runtime-update-policy"></p><form id="runtime-update-form"><label for="runtime-update-version">精确稳定版本</label><div class="controls"><input id="runtime-update-version" type="text" inputmode="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="例如 1.3.0" required><button id="runtime-update-submit" type="submit" disabled>提交给 Gate</button></div></form><button id="runtime-update-query" type="button" hidden>按原任务编号查询</button><div id="runtime-update-results" aria-live="polite"></div></section><section class="restart-results" aria-label="进程重启结果"><div id="management-results" aria-live="polite"></div></section></details>
 <section class="toolbar" aria-label="会话操作"><div><h2>在线会话 <span id="count">0</span></h2><p id="updated">等待登记</p></div><div class="controls"><label><span class="sr-only">搜索会话</span><input id="search" type="search" placeholder="搜索项目或会话…"></label><button id="refresh" type="button">刷新</button></div></section>
 <div id="notice" role="status"></div><section id="sessions" class="grid" aria-label="在线 Pi 会话"></section>
 <section id="empty" class="empty" hidden><span class="empty-icon">π</span><h3>还没有在线会话</h3><p>为 Pi 配置本总管的登记 socket 和独立凭据。<br>已启动的会话会自动出现在这里。</p></section>
@@ -164,30 +166,40 @@ export const portalJs = `(() => {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });
 })();`;
 
-export const portalManagementCss = `.management{border:1px solid #dce5d7;background:#ffffffa8;border-radius:14px;padding:16px 20px;margin:0 0 28px;font-size:13px;line-height:1.7}.management summary{cursor:pointer;font-weight:600}.management summary span{font-weight:400;color:#718076;margin-left:10px}.management p{color:#657768;margin:12px 0}.management form label{display:block;margin-bottom:7px}.management .controls{flex-wrap:wrap}.management input{flex:1;max-width:360px;width:auto;min-width:0}.management button{min-height:42px}.management code{overflow-wrap:anywhere}.restart{display:block;width:100%;margin-top:10px;background:transparent;color:#64795e;font-size:12px}.restart-result{border-top:1px solid #e1e7dd;padding:10px 0}.restart-result p{overflow-wrap:anywhere}.restart-result .open{width:fit-content}#management-notice{color:#97613c}@media(max-width:600px){.management{padding:14px 16px}.management input{width:100%;flex-basis:100%;max-width:none}.management summary span{display:block;margin-left:0}.management .controls button{width:100%}}`;
+export const portalManagementCss = `.management{border:1px solid #dce5d7;background:#ffffffa8;border-radius:14px;padding:16px 20px;margin:0 0 28px;font-size:13px;line-height:1.7}.management summary{cursor:pointer;font-weight:600}.management summary span{font-weight:400;color:#718076;margin-left:10px}.management p{color:#657768;margin:12px 0}.management form label{display:block;margin-bottom:7px}.management .controls{flex-wrap:wrap}.management input{flex:1;max-width:360px;width:auto;min-width:0}.management button{min-height:42px}.management code{overflow-wrap:anywhere}.runtime-updates{border-top:1px solid #e1e7dd;margin-top:18px;padding-top:18px}.runtime-update-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.runtime-update-heading h3{font-size:14px;margin:0}.runtime-update-heading span,#runtime-update-policy{color:#718076;font-size:12px}.runtime-update-result,.restart-result{border-top:1px solid #e1e7dd;padding:10px 0}.runtime-update-result p,.restart-result p{overflow-wrap:anywhere}.runtime-update-result .runtime-update-heading{color:#334c3d;font-weight:600}.runtime-update-identity,.runtime-update-target{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}.runtime-update-target{padding-left:12px;border-left:3px solid #e4ebe0}.restart{display:block;width:100%;margin-top:10px;background:transparent;color:#64795e;font-size:12px}.restart-result .open{width:fit-content}#management-notice{color:#97613c}@media(max-width:600px){.management{padding:14px 16px}.management input{width:100%;flex-basis:100%;max-width:none}.management summary span{display:block;margin-left:0}.management .controls button{width:100%}}`;
 
 /** Separate trusted Hub script: never served by an individual Pi backend. */
 export const portalManagementJs = `(() => {
   const get = (id) => document.getElementById(id);
   let auth = { available: false, authorized: false };
+  let authGeneration = 0;
+  let authTransition = false;
   const operations = new Map();
-  let polling = false;
+  let polling;
   const notice = (text) => { get('management-notice').textContent = text; };
   const changed = () => window.dispatchEvent(new Event('pi-hub-management'));
   async function api(route, value) {
+    const generation = authGeneration;
+    const current = () => { if (generation !== authGeneration) { const error = new Error('旧管理请求已失效'); error.stale = true; throw error; } };
     const response = await fetch('/api/management/' + route, { method: value === undefined ? 'GET' : 'POST', cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(7000),
       headers: { 'Content-Type': 'application/json', ...(auth.csrf ? { 'X-Pi-Hub-Csrf': auth.csrf } : {}) }, body: value === undefined ? undefined : JSON.stringify(value) });
+    current();
     if (!response.ok) {
-      if (response.status === 401) { auth.authorized = false; auth.csrf = undefined; updateAuth(); }
-      throw new Error('管理请求未完成');
+      if (response.status === 401) { authGeneration++; auth.authorized = false; auth.csrf = undefined; runtimeUpdates.clearProtected(); updateAuth(); }
+      const error = new Error('管理请求未完成'); error.status = response.status; throw error;
     }
-    return response.json();
+    const result = await response.json(); current(); return result;
   }
+${runtimePortalJs}
+  const restartAvailable = () => auth.restartAvailable ?? auth.available;
   function updateAuth() {
-    get('management-status').textContent = !auth.available ? '未配置' : auth.authorized ? '已解锁 · 30 分钟有效' : '已锁定';
-    get('management-unlock').hidden = !auth.available || auth.authorized;
+    get('management-status').textContent = authTransition ? '正在处理管理登录或锁定…' : !auth.available ? '未配置' : auth.authorized ? '已解锁 · 30 分钟有效' : '已锁定';
+    get('management-unlock').hidden = !auth.available || auth.authorized || authTransition;
+    get('management-code').disabled = authTransition;
     get('management-logout').hidden = !auth.authorized;
-    get('management-help').textContent = !auth.available ? '本 Hub 尚未接入门禁的独立重启接口。旧容器需使用新镜像重新启动一次，不能通过 /reload 获得此能力。' : '管理员在 Hub 的可信终端运行 pi-web-hub pair --config 配置文件，生成一次性管理码。管理授权与网页登录分开，过期后需重新解锁。';
+    get('management-logout').disabled = authTransition;
+    get('management-help').textContent = !auth.available ? '本 Hub 尚未接入 Gate 管理能力。旧容器需使用新镜像重新启动一次，不能通过 /reload 获得受管能力。' : '管理员在 Hub 的可信终端运行 pi-web-hub pair --config 配置文件，生成一次性管理码。管理授权与网页登录分开，过期后需重新解锁。';
+    renderResults(); runtimeUpdates.updateAuth();
     changed();
   }
   function save() {
@@ -195,6 +207,7 @@ export const portalManagementJs = `(() => {
   }
   function renderResults() {
     get('management-results').replaceChildren();
+    if (!auth.authorized) return;
     for (const op of operations.values()) {
       const row = document.createElement('div'); row.className = 'restart-result';
       const text = document.createElement('p');
@@ -210,8 +223,9 @@ export const portalManagementJs = `(() => {
     }
   }
   async function poll() {
-    if (polling || !auth.authorized || !auth.available) return;
-    polling = true;
+    const generation = authGeneration;
+    if (polling === generation || !auth.authorized || !restartAvailable()) return;
+    polling = generation;
     try {
       for (const op of operations.values()) {
         if (op.done) continue;
@@ -220,14 +234,14 @@ export const portalManagementJs = `(() => {
           delete op.path;
           Object.assign(op, result);
           op.done = ['succeeded', 'failed', 'recovery_required', 'rejected', 'stale'].includes(op.status);
-        } catch { op.status = 'unknown'; }
+        } catch { if (generation !== authGeneration) return; op.status = 'unknown'; }
       }
-      save(); renderResults();
-    } finally { polling = false; }
+      if (generation === authGeneration) { save(); renderResults(); }
+    } finally { if (polling === generation) polling = undefined; }
   }
   window.piHubManagement = { attach(card, session) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'restart'; button.textContent = '重启 Pi · 应用已安装更新';
-    button.disabled = !auth.available || !auth.authorized || [...operations.values()].some((o) => o.generation === session.generation && !o.done);
+    button.disabled = !restartAvailable() || !auth.authorized || [...operations.values()].some((o) => o.generation === session.generation && !o.done);
     button.addEventListener('click', async () => {
       if (button.disabled) return;
       button.disabled = true;
@@ -246,26 +260,32 @@ export const portalManagementJs = `(() => {
         catch { notice('未收到提交结果，将按原操作编号查询。不要重新点击重启。'); }
         renderResults();
       } catch { notice('无法确认目标或授权已过期，请刷新管理状态后重试。'); }
-      finally { if (!submitted) button.disabled = !auth.available || !auth.authorized; }
+      finally { if (!submitted) button.disabled = !restartAvailable() || !auth.authorized; }
     });
     card.append(button);
   } };
   get('management-unlock').addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (authTransition) return;
     const input = get('management-code'); const code = input.value.trim(); input.value = '';
-    try { const result = await api('unlock', { code }); auth = { ...auth, ...result }; updateAuth(); notice('管理已解锁。请在对应会话卡片选择重启。'); void poll(); }
-    catch { notice('管理码无效、已使用或过期，请从可信终端重新获取。'); }
+    authTransition = true; updateAuth();
+    try { const result = await api('unlock', { code }); authGeneration++; auth = { ...auth, ...result }; runtimeUpdates.clearProtected(); updateAuth(); notice('管理已解锁。可独立选择进程重启或全局运行时更新。'); void poll(); void runtimeUpdates.poll(); }
+    catch (error) { if (!error.stale) notice('管理码无效、已使用或过期，请从可信终端重新获取。'); }
+    finally { authTransition = false; updateAuth(); }
   });
   get('management-logout').addEventListener('click', async () => {
-    try { await api('logout', {}); auth.authorized = false; auth.csrf = undefined; updateAuth(); notice('管理已锁定。已提交操作仍由门禁处理。'); }
-    catch { notice('锁定请求未完成，请关闭此页并让管理员撤销管理授权。'); }
+    if (authTransition) return;
+    authTransition = true; updateAuth();
+    try { await api('logout', {}); authGeneration++; auth.authorized = false; auth.csrf = undefined; runtimeUpdates.clearProtected(); updateAuth(); notice('管理已锁定。已提交操作仍由门禁处理。'); }
+    catch (error) { if (!error.stale) notice('锁定请求未完成，请关闭此页并让管理员撤销管理授权。'); }
+    finally { authTransition = false; updateAuth(); }
   });
   try {
     const saved = JSON.parse(sessionStorage.getItem('pi-hub-restarts') || '[]');
     if (Array.isArray(saved)) for (const o of saved.slice(0, 64)) if (/^[a-f0-9]{32}$/.test(o.id) && /^[a-f0-9]{32}$/.test(o.generation) && typeof o.label === 'string' && o.label.length <= 256) operations.set(o.id, { id: o.id, generation: o.generation, label: o.label, done: false, status: 'unknown' });
   } catch {}
-  void (async () => { try { auth = await api('status'); updateAuth(); renderResults(); await poll(); } catch { notice('无法查询运行管理能力。'); } })();
-  setInterval(poll, 2000);
+  void (async () => { try { auth = await api('status'); updateAuth(); await poll(); await runtimeUpdates.poll(); } catch { notice('无法查询运行管理能力。'); } })();
+  setInterval(async () => { await poll(); await runtimeUpdates.poll(); }, 2000);
 })();`;
 
 export const portalCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#21312c;background:#f6f8f5;font-synthesis:none}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 90% 0,#e6efdf,transparent 55%)}main{max-width:1080px;margin:auto;padding:32px 40px 24px;min-height:100dvh}header{display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:650;color:inherit;text-decoration:none}.logo{display:grid;place-items:center;border-radius:12px;background:#234c3c;color:#e8f3dd;width:42px;height:42px;font:32px Georgia,serif}.tag{font-size:10px;letter-spacing:2px;color:#758478;border:1px solid #d7dfd5;border-radius:5px;padding:4px 6px}#health{font-size:12px;color:#697c70}.connected{color:#347652!important}.disconnected{color:#a35437!important}.intro{padding:48px 0 34px}.eyebrow{font-size:12px;letter-spacing:2px;color:#718478}h1{margin:14px 0 16px;font-size:clamp(30px,4vw,46px);font-weight:600;letter-spacing:-1.5px}.intro p{margin:0;color:#718076;font-size:15px;line-height:1.8}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}h2{font-size:17px;font-weight:600;margin:0}#count{display:inline-grid;place-items:center;min-width:25px;height:23px;margin-left:8px;background:#e2ebe0;border-radius:7px;color:#476347;font-size:12px}#updated{font-size:12px;color:#879287;margin:8px 0 0}.controls{display:flex;gap:10px}input,button{font:inherit;border:1px solid #dce3d9;border-radius:9px;background:#fff;padding:11px 14px;font-size:13px;color:#415447}input{width:230px}button{cursor:pointer}button:hover{background:#eef3eb}button:disabled{opacity:.55}input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #93ad91;outline-offset:3px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}.card{display:flex;flex-direction:column;background:#ffffffdc;border:1px solid #e0e7dc;border-radius:16px;padding:24px;box-shadow:0 6px 24px #29412c04;min-width:0}.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.project-icon{display:grid;place-items:center;width:40px;height:40px;background:#edf3e8;color:#587452;border-radius:11px;font-size:23px}.online{font-size:11px;color:#39734e;background:#eff5eb;border-radius:20px;padding:5px 10px}.online:before{content:'●';font-size:8px;margin-right:5px}.card h3{font-size:18px;font-weight:600;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{font-size:12px;color:#899587;margin:10px 0 20px;display:flex;flex-wrap:wrap;min-width:0;align-items:baseline}.session-name{max-width:calc(100% - 52px);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card>.open{margin-top:auto}.meta>span:nth-child(2){flex-shrink:0}.version-lines{display:flex;flex-direction:column;gap:9px;flex-basis:100%;min-width:0;margin-top:18px;padding-top:16px;border-top:1px solid #edf0e9}.version-line{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;min-width:0;line-height:1.65}.version-label{font-weight:600;color:#64765f;min-width:48px}.version-value{color:#415447;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;min-width:0}.version-badge{border-radius:6px;padding:2px 7px;font-size:10px;line-height:1.6;overflow-wrap:anywhere}.version-badge.current{color:#356044;background:#edf4e9}.version-badge.update{color:#8a531d;background:#fff1d7}.version-badge.different{color:#805d2f;background:#f6efe0}.version-badge.unknown{color:#778174;background:#f1f3ef}.runtime-note{font-size:10px;color:#879180}.version-overview{border:1px solid #dce5d7;border-radius:16px;padding:22px 24px;background:#ffffffa8;margin-bottom:20px}.version-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}.version-heading .eyebrow{font-size:9px;letter-spacing:1.5px}.version-heading h2{margin-top:6px}.version-summary{font-size:12px;color:#72816e;line-height:1.8}.version-summary.has-update{color:#8a531d}.version-details{display:flex;flex-direction:column;gap:10px;margin-top:18px;font-size:12px}.release-target{color:#7c8975;font-size:11px;line-height:1.8;overflow-wrap:anywhere}.version-help{font-size:11px;color:#7c8975;line-height:1.8;margin:14px 0 0;padding-top:12px;border-top:1px solid #e8eee3}.open{display:block;text-align:center;color:#365b42;background:#f2f6ee;border:1px solid #e4ebdf;text-decoration:none;border-radius:8px;padding:11px;font-size:13px}.open:hover{background:#e7efdf}.empty{text-align:center;border:1px dashed #d6dfd0;border-radius:16px;padding:55px 20px;background:#ffffff70}.empty-icon{font:44px Georgia,serif;color:#8a9e82}.empty h3{font-size:17px;font-weight:500;margin:18px 0 10px}.empty p{font-size:13px;color:#7a8978;line-height:1.9}#notice{font-size:13px;color:#a35c3d;line-height:1.6;margin-bottom:14px}#notice:empty{display:none}footer{display:flex;justify-content:space-between;gap:15px;border-top:1px solid #e0e6db;margin-top:48px;padding-top:20px;font-size:11px;color:#96a18f}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}[hidden]{display:none!important}@media(max-width:600px){main{padding:24px 20px}header{gap:8px}.brand{font-size:17px;gap:8px}.logo{width:36px;height:36px;font-size:27px}#health{font-size:11px}.intro{padding:48px 0 34px}h1{letter-spacing:-1px;line-height:1.35}.toolbar{flex-direction:column;align-items:stretch;gap:18px}.controls label{flex:1;min-width:0}input{width:100%;min-width:0}.grid{grid-template-columns:1fr}.card{padding:22px}.card-top{margin-bottom:18px}footer{flex-direction:column;margin-top:32px;line-height:1.6}}`;

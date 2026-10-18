@@ -22,6 +22,8 @@
     "tests/hub-management-origin.test.ts",
     "tests/hub-portal-management.test.ts",
     "tests/hub-restart-api.test.ts",
+    "tests/hub-runtime-api.test.ts",
+    "tests/hub-runtime-portal.test.ts",
     "tests/pi-client-managed-restart.test.ts",
     "extensions/session-history.ts",
     "extensions/live-transport.ts",

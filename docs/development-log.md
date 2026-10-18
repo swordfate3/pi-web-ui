@@ -408,7 +408,12 @@
 - 使用最终构建和隔离真实 Pi 1.3.0 的 faux provider，在 Browser 1440×900 / 390×844 检查 system patch 后 2/2、切旧 1/2 再切新、继续两轮聊天；截图直接查看。原生 CDP click 未生效，使用 DOM button.click，无 React/store 注入；不称完整自动化浏览器 E2E。临时服务和专用标签已停止，不影响用户会话。
 - 用户授权推进 Git 推送与本机包更新；不含当前真实 Pi reload、新 Hub Gate 部署或容器重启。新扩展需目标 Pi 空闲后由用户 reload 生效，不声称已解除真实旧锁。完整结果和限制见[修订 system patch 验证](validation/revision-system-patch.md)。
 
-### 2026-10-18 · Hub 版本总览与会话软件信息
+#### 2026-10-18 · Pi Web UI 1.0.0 版本更新（待发布部署）
+
+- 将 `package.json` 与 `package-lock.json` 的包版本提升至 `1.0.0`，重建并更新 `dist/build-manifest.json`，Hub 和 Pi 扩展的版本元数据因此报告 1.0.0。
+- 验证：`npm run build:web`、`npm run verify:dist`、`npm run test:unit`（447 pass／1 optional skip）、连接 TypeScript 检查通过。尚未推送、申请 Gate 部署或更新任何 Pi 运行进程；此记录表示准备状态，不代表远程已发布。
+
+## 2026-10-18 · Hub 版本总览与会话软件信息
 
 - 入口新增只读「版本与更新」区域，显示 Hub 自有版本／构建、公开参考版本和检查时间；会话名下单列 Pi、Web 扩展包版本和 source fingerprint。旧客户端明确未上报，非受管 Pi 也有版本信息，不改变管理授权或重启资格。
 - 扩展 factory 捕获一次不可变软件元数据，续租不重读磁盘，防止把共享卷安装更新误显示成已加载更新。Pi 版本独立于 Web 元数据，缺少包／manifest 时仍保留已知 Pi 版本。

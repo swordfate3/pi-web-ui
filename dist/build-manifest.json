@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 155,
-    "sha256": "a7c30717d583334d906181bf9e9cd562d25671dcda5de0c9c4903166ab718204",
+    "sha256": "c99345193d3d2059a3e1373b6e053f13925a8ba06ccb64bdafc9c2844c935dfb",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -110,11 +110,11 @@
       },
       {
         "path": "package-lock.json",
-        "sha256": "108c04703aa86c72760bb5d730106e674777e78f147c82d68b8ef00076b1e9b3"
+        "sha256": "c7be1c882d6c5833294942dd9141a09f24d8de4e605db56267fbbf5ff35268cd"
       },
       {
         "path": "package.json",
-        "sha256": "3a220188af682c81c3cb0f98d578e10b44e513e4b47b07bba063eb77534e188a"
+        "sha256": "e4390d2a6821c2159bdf0a3b1781b76e3d98b6b638bf871b1c09efd16ea397f0"
       },
       {
         "path": "public/icons/pi-web-ui-192.png",

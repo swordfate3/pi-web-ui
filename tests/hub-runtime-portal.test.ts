@@ -84,6 +84,7 @@ function fixture(
     stored?: { id: string; version: string };
     storageThrows?: boolean;
     cookieJar?: boolean;
+    gateway?: boolean;
   } = {},
 ) {
   const elements = new Map<string, Element>();
@@ -175,9 +176,10 @@ function fixture(
           authorized,
           runtimeUpdatesAvailable,
           restartAvailable,
+          ...(options.gateway ? { authMode: "gateway" } : {}),
           ...(authorized ? { csrf: "csrf-value" } : {}),
         };
-      } else if (route.endsWith("/unlock")) {
+      } else if (route.endsWith("/unlock") || route.endsWith("/gateway")) {
         authorized = true;
         cookieUpdate = `paired-${++cookieSequence}`;
         sessions.add(cookieUpdate);
@@ -198,7 +200,13 @@ function fixture(
         status = detailStatus;
         result = detailJob;
       }
-      if (options.cookieJar && !cookieValid && !route.endsWith("/unlock") && !route.endsWith("/status")) {
+      if (
+        options.cookieJar &&
+        !cookieValid &&
+        !route.endsWith("/unlock") &&
+        !route.endsWith("/gateway") &&
+        !route.endsWith("/status")
+      ) {
         status = 401;
         result = {};
       }
@@ -271,6 +279,58 @@ function fixture(
     },
   };
 }
+
+test("gateway mode automatically uses the verified web login without pairing and respects explicit logout", async () => {
+  const f = fixture({ gateway: true, cookieJar: true, restartAvailable: false });
+  await settled();
+  assert.equal(f.get("management-unlock").hidden, true);
+  assert.equal(f.get("runtime-update-submit").disabled, false);
+  assert.match(f.text("management-help"), /网页登录/);
+  assert.equal(f.calls.filter((c) => c.route.endsWith("/gateway")).length, 1);
+  assert.equal(
+    f.calls.some((c) => c.route.endsWith("/unlock")),
+    false,
+  );
+  await f.submit("1.3.0");
+  assert.equal(f.calls.filter((c) => c.route.endsWith("/runtime-updates") && c.options.method === "POST").length, 1);
+  await f.get("management-logout").fire("click");
+  await f.intervals[0]();
+  assert.equal(f.get("runtime-update-submit").disabled, true);
+  assert.equal(f.get("management-gateway").hidden, false);
+  assert.equal(f.calls.filter((c) => c.route.endsWith("/gateway")).length, 1);
+  await f.get("management-gateway").fire("click");
+  await settled();
+  assert.match(f.text("management-status"), /已解锁/);
+  assert.equal(
+    f.get("runtime-update-submit").disabled,
+    true,
+    "the original pending update must still prevent duplicate submission",
+  );
+  assert.equal(f.calls.filter((c) => c.route.endsWith("/gateway")).length, 2);
+  assert.equal(f.calls.filter((c) => c.route.endsWith("/runtime-updates") && c.options.method === "POST").length, 1);
+});
+
+test("gateway re-entry cannot overlap logout or automatically replay an expired update submission", async () => {
+  const f = fixture({ gateway: true, cookieJar: true });
+  await settled();
+  const held = f.holdNextResponse("/logout", undefined, "POST");
+  const loggingOut = f.get("management-logout").fire("click");
+  await held.captured;
+  await f.get("management-gateway").fire("click");
+  assert.equal(f.calls.filter((c) => c.route.endsWith("/gateway")).length, 1);
+  held.release();
+  await loggingOut;
+  await f.get("management-gateway").fire("click");
+  await settled();
+  f.setPostResult(401, {});
+  await f.submit("1.3.0");
+  assert.equal(f.get("runtime-update-submit").disabled, true);
+  assert.equal(f.get("management-unlock").hidden, true);
+  assert.equal(f.get("management-gateway").hidden, false);
+  await f.intervals[0]();
+  assert.equal(f.calls.filter((c) => c.route.endsWith("/gateway")).length, 2);
+  assert.equal(f.calls.filter((c) => c.route.endsWith("/runtime-updates") && c.options.method === "POST").length, 1);
+});
 
 test("runtime update controls stay disabled while locked or unconfigured, and runtime-only management does not enable restart", async () => {
   const unconfigured = fixture({ runtimeUpdatesAvailable: false, restartAvailable: true });

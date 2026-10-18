@@ -19,6 +19,7 @@
     "tests/runtime-guard-process.test.ts",
     "tests/hub-lifecycle.test.ts",
     "tests/hub-management.test.ts",
+    "tests/hub-gateway-login.test.ts",
     "tests/hub-management-origin.test.ts",
     "tests/hub-portal-management.test.ts",
     "tests/hub-restart-api.test.ts",

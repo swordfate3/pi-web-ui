@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "source": {
-    "count": 157,
-    "sha256": "ae954212b8b305d0d8b0ab99d8b910df7bb4bb13e8bc9415fe37242f69e9559b",
+    "count": 158,
+    "sha256": "772d0cfe5e6cdf0719ccede7299a10ea4f9b96448b840d8b5ff51ec2b1dd06a4",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -78,7 +78,11 @@
       },
       {
         "path": "hub/config.ts",
-        "sha256": "0f640388880295b8c8bc8dba98a45480fe744a02cf4acd9dec5a26e4baceb02e"
+        "sha256": "c01f1b491328234f9eca41887ced37996ee6c0ca05a2f8c95b14586364086248"
+      },
+      {
+        "path": "hub/gateway-auth.ts",
+        "sha256": "4bfa613df73edd4182657f2622d8f92ad454df61a9e62e44a9b9fede20eaee02"
       },
       {
         "path": "hub/lifecycle.ts",
@@ -86,7 +90,7 @@
       },
       {
         "path": "hub/management.ts",
-        "sha256": "a8367713ef69c247532d4b847849ee19a2f083898b35b38d91068ebb226de500"
+        "sha256": "7e380dea276a5d1ff06806773f46b2ef54e2a9eac014de956e775aba465af19d"
       },
       {
         "path": "hub/package.json",
@@ -94,11 +98,11 @@
       },
       {
         "path": "hub/portal.ts",
-        "sha256": "7d0ead3cd7ec605d71cd66a2d870670c3e822b23bb44ca1feb2efae2c6115425"
+        "sha256": "351ac0c7ddf9c14b5bd84e7488746ba6f619364191a184a2f100d67d9c31d4f7"
       },
       {
         "path": "hub/restart-api.ts",
-        "sha256": "a81206a41b7dd4ce412d02a0876d35f39166ecd042a33ce2a043d5d71a7c22bb"
+        "sha256": "468db3c61646b4ea99479cb4b94d0ebcd98193dd50213a2294d5221360d9e086"
       },
       {
         "path": "hub/runtime-portal.ts",
@@ -110,7 +114,7 @@
       },
       {
         "path": "hub/server.ts",
-        "sha256": "1b9b7f5d91d45dee0bbc79a735ace72eb5dbf3a31f607d9750c8db32ffa3a473"
+        "sha256": "a83ebca1ec7d7d171275358492c624f98d9ac13f5039dca65f42e71b64bae6f8"
       },
       {
         "path": "hub/version-status.ts",
@@ -636,7 +640,7 @@
   },
   "outputs": {
     "count": 673,
-    "sha256": "363063650b5e4bf507f8e93a1ed0bc4817f3fb5385ec02c49a5e7d367a2473ba",
+    "sha256": "55e3df5cbe71ae128d3e7621cc1c760c79153c7b8ddcef4749b96e433605610c",
     "files": [
       {
         "path": "assets/abap-BF8NL95m.js",
@@ -3304,7 +3308,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "8ccaa34903cb1441b683daac8168f940dcf7ea61f84b9335e005593a53ba6412"
+        "sha256": "e78d5cb825f1824df27f3d7e1114daba7a6459e3dc004c0d749b0ae2361b2487"
       },
       {
         "path": "icons/pi-web-ui-192.png",

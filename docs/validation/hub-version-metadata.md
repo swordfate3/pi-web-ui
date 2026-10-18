@@ -18,11 +18,13 @@ GitHub REST ref 在诊断环境返回 403 限流；raw 文件和 Atom 源正常�
 - 新增 detached CLI 回归在旧 bundle 上失败（Hub metadata 为 undefined）；修复后通过。fixture 只提供 Node 与外部 `ws`，不带包信息；相邻伪造 `9.9.9` 包和断网也不能覆盖或擦除内嵌身份。
 - manifest 回归证明无 dist 时即可计算源码指纹，最终 manifest 同源，改版本会改变指纹。
 - 限流降级覆盖实际 GitHub feed 形状（含 `media:thumbnail`）、非法首 entry/SHA/重复或嵌套 ID/实体及危险声明、超大响应、超时、Atom/raw 两阶段取消；两个 raw 文件固定同一提交。
-- 最终单测 488 项：487 pass / 1 optional skip / 0 fail。构建、manifest、连接类型检查通过；Biome 243 文件 0 error，保留已有 30 warnings / 1 info。
+- 修复分支单测 488 项：487 pass / 1 optional skip / 0 fail。发布前保留并合入远程新网关登录提交 `bfd8a2f`，重建后的最终单测 496 项：495 pass / 1 optional skip / 0 fail；串行真实 Pi 集成 11/11，隔离 Git install/update/tarball 再次通过。构建、manifest、连接类型检查通过；最终 Biome 245 文件 0 error，保留已有 30 warnings / 1 info。
 - 专项版本/CLI 测试 26/26；Python gateway 15 pass / 1 optional skip。
 - Pi 1.3.0 真实 RPC+WS portable/Hub/revision 集成曾两轮 11/11 通过。最后并行压力运行中 portable 的 missing-capability 一次得到 200 而非 409（同一用例早先通过）；隔离重跑 portable 8/8 通过。fixture 先申请再释放随机端口、启动就绪仅以根路径 200 判断，存在端口复用竞争可能，但尚未证明该次失败根因；不隐去该失败，也不通过放宽认证断言修复。最终以 `--test-concurrency=1` 串行运行全部三组集成 11/11 通过，见 `/tmp/hub-versions-integration-serial.log`。
 - 真实 Pi 隔离 Git install/update、tarball、安装后 Hub 生命周期和 11 类 stale-source 拒绝通过。未更新个人安装目录或 reload 用户 Pi。
 - 真实公开源检查观察到 REST 403 → Atom 200 → 同 commit 两个 raw 200，得到 Pi 1.3.0 / Web 1.0.0。此证据仅代表诊断环境，不保证生产出网始终可用。
+
+最终合并验证日志：`/tmp/hub-versions-merged-{build,unit,check,integration,install}.log`。这些是当前维护环境中的原始日志，不保证随仓库分发或永久保留。
 
 ## 限制与部署
 

@@ -67,7 +67,7 @@
    新配置也可用 `pi-web-hub init --config <新文件> --port 16180 --management-port 16181`
    创建；现有配置由管理员保留原字段后加入上述可选项，不要覆盖或删除现有 state。
 
-手机使用：
+手机使用（默认配对模式；启用下面的网关登录模式后无需管理码）：
 
 1. 保留原有聊天 HTTPS/网关登录，点击“打开运行管理”进入**独立管理 origin**。
    管理员另在可信终端执行
@@ -119,6 +119,75 @@ guard 是镜像中 root 所有、不可由共享卷替换的固定 Node preload�
 
 ## 本地快速开始
 
+### 可选：沿用网页登录，无需管理码
+
+单用户自托管可以显式信任已有 HTTPS 登录网关：持有该网关有效账号密码的
+用户都可申请管理操作，但实际执行仍由 Gate 的独立策略决定。**这不是移除
+认证，也不会把手动审批改为自动审批。** 默认不配置此项时保留原有管理码流程。
+
+保留独立的聊天与管理 origin，在现有 Hub 私有配置的 `management` 中加入：
+
+```json
+{
+  "management": {
+    "port": 16183,
+    "publicUrl": "https://pi-admin.example.com/",
+    "gateway": {
+      "credentialFile": "/hub/private/gateway.json"
+    }
+  }
+}
+```
+
+`gateway.json` 是由管理员安全生成的0600私有文件，内容为
+`{"token":"64位随机小写十六进制网关凭据"}`。这与 Gate 的普通申请或生命周期
+凭据都不同；仅登录网关和 Hub 持有，不能放在共享 Pi home、浏览器、链接或日志中。
+开启后管理监听器对 HTML、静态资源及 API **逐请求**核验
+`X-Pi-Hub-Gateway` 和 `X-Pi-Hub-User`；仅设置用户名、Authorization、cookie
+或声称来自 loopback 都不能替代网关证明。轮换该凭据会使旧浏览器管理会话失效。
+用户标识限1–128个 Unicode 字母、数字和 `_.@+-`，不接受空格、逗号或控制字符。
+
+网关须先完成原有登录验证，再**覆盖**上游专用头。Caddy 结构示例如下；
+凭据用占位符表示，不要把真实值提交到仓库：
+
+```caddyfile
+pi-admin.example.com {
+    route {
+        basic_auth {
+            <现有用户名> <现有密码哈希>
+        }
+        reverse_proxy 127.0.0.1:13002 {
+            header_up X-Pi-Hub-Gateway <独立网关凭据>
+            header_up X-Pi-Hub-User {http.auth.user.id}
+            header_up -Authorization
+        }
+    }
+}
+```
+
+管理员应复用现有账号/密码哈希而非设置默认密码；专用头必须由网关覆盖，不能
+透传客户端提供的同名值。HTTP 无登录、仅任意注入身份头或依靠来源 IP 的部署
+不受支持。不要记录专用头，不向普通 Pi 反向代理传递它们。
+
+若网关在远程服务器，新增独立的**远端回环**反向转发，例如
+`-R 127.0.0.1:13002:127.0.0.1:16183`；保留原聊天的13001转发不变。
+独立管理域名的 DNS、HTTPS 证书、登录配置和隧道须先验证，再交付手机链接。
+Hub 配置本身不会创建这些资源；不得为省去 DNS 而把管理 API 合到聊天 origin。
+
+手机从“打开运行管理”进入管理站点后，页面自动把**已验证的网关身份**交换为
+30分钟的 HttpOnly、SameSite=Strict、HTTPS Secure 浏览器管理会话和 CSRF token，
+不再显示管理码表单。不同 origin 的浏览器可能再次询问**同一套**账号密码；
+这不等于新增密码，也不保证两个站点共享浏览器的 Basic 登录缓存。
+会话过期或点击“锁定管理”后，使用“使用网页登录解锁”按钮即可重新进入；
+退出后不会后台自动解锁，也不会重发未确认的更新申请。
+
+`POST /api/management/gateway` 只在此模式启用，只接受同 origin 的空 JSON对象，
+且必须携带网关证明；该会话建立接口不提交任何管理任务。
+其他管理写接口仍同时要求浏览器会话、精确 Origin 和 CSRF。
+浏览器会话还绑定网关用户，不能换一个账号继续使用原 cookie。
+`pair` 和配对解锁接口在此模式下禁用；`revoke-management` 仍可撤销全部现有
+浏览器授权，但不撤销网关账号本身，重新进入仍受网关登录控制。
+
 ### 可选：从管理页申请全局 Pi 更新
 
 “重启 Pi · 应用已安装更新”只刷新单个进程，不下载软件。新增的“全局 Pi 更新”
@@ -138,7 +207,7 @@ guard 是镜像中 root 所有、不可由共享卷替换的固定 Node preload�
 ```
 
 保留现有 `management`、`publicUrl`、`lifecycle` 等字段。管理页仍须使用独立的
-管理监听器/HTTPS origin 和一次性管理码；普通聊天 origin 不能调用此接口。
+管理监听器/HTTPS origin，以及默认配对或上面显式配置的网关登录；普通聊天 origin 不能调用此接口。
 `runtime-request.json` 使用 Gate 的**普通申请凭据**，格式为私有的
 `{"token":"64位申请凭据"}`；由管理员通过已有安全渠道配置0600文件并只读挂载。
 它与 `lifecycle.credentialFile` 的生命周期凭据用途不同，不能互换，

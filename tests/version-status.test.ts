@@ -200,7 +200,11 @@ test("failed checks do not retain a previous release as current, and malformed i
   status.close();
 });
 
-test("timeout aborts its request, close aborts in-flight work and malformed data is unavailable", async () => {
+test("timeout aborts its request, close aborts in-flight work and malformed data is unavailable", async (t) => {
+  // Production timers are deliberately unref'ed. The synthetic source below
+  // has no socket, so hold the test worker alive until its timeout can fire.
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
   let timedOut = false;
   const timeout = createVersionStatus({
     timeoutMs: 5,

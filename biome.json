@@ -53,6 +53,8 @@
       "tests/hub-management-origin.test.ts",
       "tests/hub-lifecycle.test.ts",
       "tests/hub-restart-api.test.ts",
+      "tests/hub-runtime-api.test.ts",
+      "tests/hub-runtime-portal.test.ts",
       "tests/hub-portal-management.test.ts",
       "tests/hub-versions-portal.test.ts",
       "tests/software-metadata.test.ts",

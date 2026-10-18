@@ -86,3 +86,26 @@ The container supervisor and trusted launcher are deployment responsibilities,
 not a mandatory daemon hidden in extension import. Their runtime socket is private
 to that container, not the shared Hub registry. No lifecycle provider configured
 means management is unavailable, without changing standalone extension behavior.
+
+## Optional global runtime update requests (2026-10-18)
+
+An independent `runtimeUpdates` provider configuration delegates exact stable Pi
+version requests to Gate's fixed loopback `/v1/runtime-updates` API. It uses the
+ordinary request credential, not the lifecycle or administrator credential.
+Pairing, separate management origin, CSRF and revocation checks also protect
+these routes. The browser never receives a Gate credential or approval ability.
+Omitting this provider preserves existing chat and restart behavior.
+
+Gate owns runtime policy, audited SDK versions, installation and safe consumer
+refresh. Hub only submits and projects bounded public progress. A Hub image's
+auto approval does not authorize runtime auto approval. Waiting for approval,
+waiting for idle and recovery-required outcomes remain distinct from success;
+the browser cannot clear a recovery block, force a restart or roll back software.
+Old containers without trusted runtime control still need operator migration.
+
+Before sending, the management page persists its task ID and exact version in
+tab-scoped session storage. An uncertain reply is recovered with GET of that ID,
+including after Hub restart and re-pairing; the browser never automatically
+repeats POST. Gate owns the durable task record. No installation or refresh is
+performed in the Hub or hidden inside extension import. See the optional global
+update section in the [operating guide](../hub.md).

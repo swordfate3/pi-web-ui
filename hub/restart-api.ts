@@ -5,6 +5,7 @@ import type { RuntimeMetadata } from "../extensions/runtime-metadata.ts";
 import { type HubConfig, privateDirectory, readPrivateJson } from "./config.ts";
 import { GateLifecycle, type LifecycleJob, type RestartRequest } from "./lifecycle.ts";
 import { HubManagement } from "./management.ts";
+import { GateRuntimeUpdates, RuntimeUpdateError, runtimeVersion } from "./runtime-updates.ts";
 
 type RouteIdentity = { runId: string; generation: string; runtime?: RuntimeMetadata };
 type Receipt = RestartRequest & { id: string; generation: string; requestedAt: number };
@@ -64,6 +65,7 @@ async function body(request: IncomingMessage): Promise<Record<string, unknown>> 
 export function createRestartApi(config: HubConfig, hooks: Hooks) {
   const management = new HubManagement(config);
   const provider = config.lifecycle ? new GateLifecycle(config.lifecycle) : undefined;
+  const runtimeProvider = config.runtimeUpdates ? new GateRuntimeUpdates(config.runtimeUpdates) : undefined;
   const receipts = path.join(config.stateDir, "restarts");
   if (provider) privateDirectory(receipts);
   const file = (id: string) => {
@@ -220,7 +222,11 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
       let unsubmittedReceipt: string | undefined;
       try {
         if (request.method === "GET" && pathname === "/api/management/status") {
-          reply(200, { available: !!provider, ...management.status(request) });
+          reply(200, {
+            available: !!provider || !!runtimeProvider,
+            ...(runtimeProvider ? { runtimeUpdatesAvailable: true, restartAvailable: !!provider } : {}),
+            ...management.status(request),
+          });
           return true;
         }
         if (request.method === "POST" && !sameOrigin) {
@@ -245,6 +251,70 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
           return true;
         }
         phase = "provider";
+        if (
+          pathname === "/api/management/runtime-updates" ||
+          /^\/api\/management\/runtime-updates\/[a-f0-9]{32}$/.test(pathname)
+        ) {
+          if (!runtimeProvider) {
+            reply(503, { error: "Global Pi updates are not configured" });
+            return true;
+          }
+          let result: unknown;
+          let status = 200;
+          try {
+            if (request.method === "GET") {
+              result =
+                pathname === "/api/management/runtime-updates"
+                  ? await runtimeProvider.status()
+                  : await runtimeProvider.operation(pathname.slice("/api/management/runtime-updates/".length));
+            } else if (request.method === "POST" && pathname === "/api/management/runtime-updates") {
+              let value: Record<string, unknown>;
+              try {
+                value = await body(request);
+              } catch {
+                revalidate();
+                reply(400, { error: "Invalid runtime update request" });
+                return true;
+              }
+              revalidate();
+              if (
+                Object.keys(value).sort().join(",") !== "idempotencyKey,version" ||
+                !runtimeVersion(value.version) ||
+                !hex(value.idempotencyKey)
+              ) {
+                reply(400, { error: "Exact stable Pi version and idempotency identity required" });
+                return true;
+              }
+              result = await runtimeProvider.submit(value.version, value.idempotencyKey);
+              status = 202;
+            } else {
+              reply(405, { error: "Method not allowed" });
+              return true;
+            }
+          } catch (error) {
+            if (!(error instanceof RuntimeUpdateError)) throw error;
+            // Do not relay upstream response bodies, credentials or private paths.
+            revalidate();
+            reply(error.status, {
+              error:
+                error.status === 400
+                  ? "Pi version rejected; use an audited exact stable version"
+                  : error.status === 409
+                    ? "Gate is busy or global updates are disabled"
+                    : error.status === 404
+                      ? "Runtime update not found; verify the original task ID"
+                      : "Runtime provider unavailable or outcome unknown; query the original task ID before retrying",
+            });
+            return true;
+          }
+          revalidate();
+          reply(status, result);
+          return true;
+        }
+        if (pathname.startsWith("/api/management/runtime-updates")) {
+          reply(404, { error: "Management route not found" });
+          return true;
+        }
         if (!provider) {
           reply(503, { error: "Managed restart is not configured" });
           return true;

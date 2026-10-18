@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "source": {
-    "count": 155,
-    "sha256": "c99345193d3d2059a3e1373b6e053f13925a8ba06ccb64bdafc9c2844c935dfb",
+    "count": 157,
+    "sha256": "03a35507676a7f353fad580ad0b2cc3cee7e06949199912a64b48bded96c78e3",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -78,7 +78,7 @@
       },
       {
         "path": "hub/config.ts",
-        "sha256": "c034d2a5b074dba2270776bdb69ae9802ca09c186022db90491e306596558c88"
+        "sha256": "0f640388880295b8c8bc8dba98a45480fe744a02cf4acd9dec5a26e4baceb02e"
       },
       {
         "path": "hub/lifecycle.ts",
@@ -94,11 +94,19 @@
       },
       {
         "path": "hub/portal.ts",
-        "sha256": "93af7b55ddfd5da147ee140ecaf0b352fd03aa789ea680f6362469a78796480c"
+        "sha256": "7d0ead3cd7ec605d71cd66a2d870670c3e822b23bb44ca1feb2efae2c6115425"
       },
       {
         "path": "hub/restart-api.ts",
-        "sha256": "d6559f4e0e499258420b966c465f7917bd409836230ab2704aa31d4031d6665b"
+        "sha256": "a81206a41b7dd4ce412d02a0876d35f39166ecd042a33ce2a043d5d71a7c22bb"
+      },
+      {
+        "path": "hub/runtime-portal.ts",
+        "sha256": "42df7a6baef57a33a5165fb2f432c3413149df6b24fcc3aca976f1f7e428e9ad"
+      },
+      {
+        "path": "hub/runtime-updates.ts",
+        "sha256": "17a353604a073103db9a0ff8a14e68807691c39dfd7c7716b560a91ad14010c2"
       },
       {
         "path": "hub/server.ts",
@@ -628,7 +636,7 @@
   },
   "outputs": {
     "count": 673,
-    "sha256": "3971353f04f9efbf064b59f13a2ed8928031d52b98fd120921dac7128ece0ec6",
+    "sha256": "5ab698de89ce47baf331172633f0b7d2c493843433d6e4d1ecfe517785d89286",
     "files": [
       {
         "path": "assets/abap-BF8NL95m.js",
@@ -3296,7 +3304,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "4445370c95324a13b8b78c72b8e103d5805db50aab5db2b739f8379063d1c67c"
+        "sha256": "03d7f012c1258f0fa99ff14021adb7cdfe2346ac31ca9bc16297f83201d00f36"
       },
       {
         "path": "icons/pi-web-ui-192.png",

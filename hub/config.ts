@@ -14,6 +14,7 @@ export type HubConfig = {
   leaseMs: number;
   publicUrl?: string;
   lifecycle?: LifecycleConfig;
+  runtimeUpdates?: LifecycleConfig;
   management?: { port: number; publicUrl?: string };
 };
 export type Grant = { run_id: string; token: string; label: string; backendHost: string; revoked?: boolean };
@@ -85,6 +86,7 @@ export function readHubConfig(file: string): HubConfig {
   if (process.platform === "win32")
     throw new Error("Bundled hub currently requires Unix IPC (Linux/macOS); standalone Pi Web still works");
   const lifecycle = value.lifecycle === undefined ? undefined : lifecycleConfig(value.lifecycle);
+  const runtimeUpdates = value.runtimeUpdates === undefined ? undefined : lifecycleConfig(value.runtimeUpdates);
   const management = value.management === undefined ? undefined : managementConfig(value.management, port, publicUrl);
   return {
     stateDir,
@@ -95,6 +97,7 @@ export function readHubConfig(file: string): HubConfig {
     leaseMs,
     publicUrl,
     ...(lifecycle ? { lifecycle } : {}),
+    ...(runtimeUpdates ? { runtimeUpdates } : {}),
     ...(management ? { management } : {}),
   };
 }

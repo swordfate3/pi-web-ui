@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 157,
-    "sha256": "03a35507676a7f353fad580ad0b2cc3cee7e06949199912a64b48bded96c78e3",
+    "sha256": "ae954212b8b305d0d8b0ab99d8b910df7bb4bb13e8bc9415fe37242f69e9559b",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -114,7 +114,7 @@
       },
       {
         "path": "hub/version-status.ts",
-        "sha256": "edff5306ae555a1a7a5009d082d7ad0c54c9a929107fdaaba801d47bdf8dc8a5"
+        "sha256": "c7254c76b005b1bd0307d23ee85dbd7182dea1ed0c6ceeef6f59577021ecb598"
       },
       {
         "path": "package-lock.json",
@@ -146,7 +146,7 @@
       },
       {
         "path": "scripts/web-dist.mjs",
-        "sha256": "0ad27b1e16849dec9a64f6628cac61e6b5e0a438df4a0bd9fafe9e2b3d78dd09"
+        "sha256": "2dd97a2bcfb99d6540a86ea1f3471a5e1ad2758bb9710c653fc2ad1e09192556"
       },
       {
         "path": "src/web/components/ai-elements/code-block.tsx",
@@ -630,13 +630,13 @@
       },
       {
         "path": "vite.hub.config.ts",
-        "sha256": "1470902768de314a50d6ac1f2a76d47d998d8bd00c4ec06713b56d2d0dea3684"
+        "sha256": "3a3cc7544f33de42889bc6bfd03e02b68b76bdca8b67c56a7bc05d1c67b20acd"
       }
     ]
   },
   "outputs": {
     "count": 673,
-    "sha256": "5ab698de89ce47baf331172633f0b7d2c493843433d6e4d1ecfe517785d89286",
+    "sha256": "363063650b5e4bf507f8e93a1ed0bc4817f3fb5385ec02c49a5e7d367a2473ba",
     "files": [
       {
         "path": "assets/abap-BF8NL95m.js",
@@ -3304,7 +3304,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "03d7f012c1258f0fa99ff14021adb7cdfe2346ac31ca9bc16297f83201d00f36"
+        "sha256": "8ccaa34903cb1441b683daac8168f940dcf7ea61f84b9335e005593a53ba6412"
       },
       {
         "path": "icons/pi-web-ui-192.png",

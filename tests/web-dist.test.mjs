@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { createManifest, verifyManifest, writeManifest } from "../scripts/web-dist.mjs";
+import { createManifest, createSourceInventory, verifyManifest, writeManifest } from "../scripts/web-dist.mjs";
 
 const SCRIPT = new URL("../scripts/web-dist.mjs", import.meta.url);
 const roots = new Set();
@@ -86,6 +86,18 @@ async function saveManifest(root, manifest) {
 afterEach(async () => {
   await Promise.all([...roots].map((root) => rm(root, { recursive: true, force: true })));
   roots.clear();
+});
+
+test("build-time source identity needs no dist and matches the final manifest", async () => {
+  const root = await fixture({ dist: false });
+  const before = await createSourceInventory(root);
+  await mkdir(path.join(root, "dist/hub"), { recursive: true });
+  await writeFile(path.join(root, "dist/index.html"), "<main>fixture</main>");
+  await writeFile(path.join(root, "dist/hub/pi-web-hub.mjs"), "// independent output\n");
+  const manifest = await createManifest(root);
+  assert.deepEqual(before, manifest.source);
+  await writeFile(path.join(root, "package.json"), '{"version":"1.0.1"}');
+  assert.notEqual((await createSourceInventory(root)).sha256, before.sha256);
 });
 
 test("creates and verifies deterministic source and output inventories", async () => {

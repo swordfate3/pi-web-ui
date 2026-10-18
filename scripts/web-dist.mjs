@@ -376,6 +376,11 @@ function assertInventoriesMatch(label, recorded, actual) {
 }
 
 /** Create a deterministic manifest from an existing source tree and Vite dist output. */
+/** Build-time identity of the same fixed source inputs, independent of existing dist outputs. */
+export async function createSourceInventory(rootPath = DEFAULT_ROOT) {
+  return inventorySource(await checkedRoot(rootPath));
+}
+
 export async function createManifest(rootPath = DEFAULT_ROOT) {
   const root = await checkedRoot(rootPath);
   return {

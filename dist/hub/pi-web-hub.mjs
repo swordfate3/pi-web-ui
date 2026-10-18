@@ -1552,71 +1552,199 @@ var PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 function isRecord(value) {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
-function boundedJson(response) {
-	return (async () => {
-		if (!response.ok || response.redirected) {
-			await response.body?.cancel().catch(() => {});
-			throw new Error("Version source unavailable");
-		}
-		const length = response.headers.get("content-length");
-		if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES)) {
-			await response.body?.cancel().catch(() => {});
-			throw new Error("Version source response too large");
-		}
-		if (!response.body) throw new Error("Version source response unavailable");
-		const reader = response.body.getReader();
-		const chunks = [];
-		let size = 0;
-		try {
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				size += value.byteLength;
-				if (size > MAX_BODY_BYTES) {
-					await reader.cancel();
-					throw new Error("Version source response too large");
-				}
-				chunks.push(value);
+async function boundedBody(response, signal) {
+	if (!response.ok || response.redirected) {
+		await response.body?.cancel().catch(() => {});
+		throw new Error("Version source unavailable");
+	}
+	const length = response.headers.get("content-length");
+	if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES)) {
+		await response.body?.cancel().catch(() => {});
+		throw new Error("Version source response too large");
+	}
+	if (!response.body) throw new Error("Version source response unavailable");
+	const reader = response.body.getReader();
+	const cancel = () => {
+		reader.cancel().catch(() => {});
+	};
+	signal.addEventListener("abort", cancel, { once: true });
+	if (signal.aborted) cancel();
+	const chunks = [];
+	let size = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			size += value.byteLength;
+			if (size > MAX_BODY_BYTES) {
+				await reader.cancel();
+				throw new Error("Version source response too large");
 			}
-		} finally {
-			reader.releaseLock();
+			chunks.push(value);
 		}
-		try {
-			return JSON.parse(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8"));
-		} catch {
-			throw new Error("Invalid version source response");
-		}
-	})();
+	} finally {
+		signal.removeEventListener("abort", cancel);
+		reader.releaseLock();
+	}
+	return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
 }
-async function getJson(fetcher, url, signal, headers, timeoutMs) {
+async function boundedJson(response, signal) {
+	try {
+		return JSON.parse((await boundedBody(response, signal)).toString("utf8"));
+	} catch {
+		throw new Error("Invalid version source response");
+	}
+}
+async function boundedText(response, signal) {
+	try {
+		return new TextDecoder("utf-8", { fatal: true }).decode(await boundedBody(response, signal));
+	} catch {
+		throw new Error("Invalid version source response");
+	}
+}
+async function getResponse(fetcher, url, signal, headers, timeoutMs, read) {
+	if (signal.aborted) throw new Error("Version source aborted");
 	const controller = new AbortController();
 	const requestSignal = AbortSignal.any([signal, controller.signal]);
 	let timer;
+	let onAbort;
 	const expired = new Promise((_resolve, reject) => {
 		timer = setTimeout(() => {
-			controller.abort();
 			reject(/* @__PURE__ */ new Error("Version source timed out"));
+			controller.abort();
 		}, timeoutMs);
 		timer.unref?.();
 	});
+	const cancelled = new Promise((_resolve, reject) => {
+		onAbort = () => reject(/* @__PURE__ */ new Error("Version source aborted"));
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 	try {
-		return await Promise.race([Promise.resolve().then(async () => {
-			return boundedJson(await fetcher(url, {
-				method: "GET",
-				redirect: "error",
-				signal: requestSignal,
-				headers: {
-					Accept: "application/json",
-					...headers
-				}
-			}));
-		}), expired]);
+		return await Promise.race([
+			Promise.resolve().then(async () => {
+				return read(await fetcher(url, {
+					method: "GET",
+					redirect: "error",
+					signal: requestSignal,
+					headers: {
+						Accept: "application/json",
+						...headers
+					}
+				}), requestSignal);
+			}),
+			expired,
+			cancelled
+		]);
 	} finally {
 		if (timer) clearTimeout(timer);
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
+}
+function getJson(fetcher, url, signal, headers, timeoutMs) {
+	return getResponse(fetcher, url, signal, headers, timeoutMs, boundedJson);
+}
+function getText(fetcher, url, signal, headers, timeoutMs) {
+	return getResponse(fetcher, url, signal, headers, timeoutMs, boundedText);
+}
+var ATOM_NAMESPACE = "http://www.w3.org/2005/Atom";
+var ATOM_COMMIT_ID = /^tag:github.com,2008:Grit::Commit\/([a-f0-9]{40})$/;
+/** A deliberately narrow Atom reader: accept only GitHub's fixed feed and its first direct entry ID. */
+function firstAtomCommit(xml) {
+	const stack = [];
+	let index = 0;
+	let rootSeen = false;
+	let entrySeen = false;
+	let idSeen = false;
+	let idClosed = false;
+	let idInvalid = false;
+	let idText = "";
+	const inFirstId = () => entrySeen && stack.length === 3 && stack[0] === "feed" && stack[1] === "entry" && stack[2] === "id";
+	while (index < xml.length) {
+		const nextTag = xml.indexOf("<", index);
+		const textEnd = nextTag < 0 ? xml.length : nextTag;
+		const text = xml.slice(index, textEnd);
+		if (inFirstId()) {
+			if (text.includes("&")) idInvalid = true;
+			idText += text;
+		} else if (!stack.length && text.trim()) return;
+		if (nextTag < 0) break;
+		index = nextTag;
+		if (xml.startsWith("<!--", index)) {
+			const end = xml.indexOf("-->", index + 4);
+			if (end < 0) return void 0;
+			if (inFirstId()) idInvalid = true;
+			index = end + 3;
+			continue;
+		}
+		if (xml.startsWith("<?", index)) {
+			const end = xml.indexOf("?>", index + 2);
+			if (end < 0) return void 0;
+			if (inFirstId()) idInvalid = true;
+			index = end + 2;
+			continue;
+		}
+		if (xml.startsWith("<![CDATA[", index)) {
+			const end = xml.indexOf("]]>", index + 9);
+			if (end < 0) return void 0;
+			if (inFirstId()) idInvalid = true;
+			index = end + 3;
+			continue;
+		}
+		if (xml.startsWith("<!", index)) return void 0;
+		let end = index + 1;
+		let quote = "";
+		for (; end < xml.length; end++) {
+			const char = xml[end];
+			if (quote) {
+				if (char === quote) quote = "";
+			} else if (char === "\"" || char === "'") quote = char;
+			else if (char === ">") break;
+		}
+		if (end === xml.length || quote) return void 0;
+		const source = xml.slice(index + 1, end).trim();
+		index = end + 1;
+		if (source.startsWith("/")) {
+			const match = /^\/([A-Za-z][A-Za-z0-9._-]*(?::[A-Za-z][A-Za-z0-9._-]*)?)\s*$/.exec(source);
+			if (!match || stack.at(-1) !== match[1]) return void 0;
+			const name = stack.pop();
+			if (name === "id" && entrySeen && stack.length === 2 && stack[1] === "entry") idClosed = true;
+			if (name === "entry" && entrySeen && stack.length === 1 && stack[0] === "feed") return (idSeen && idClosed && !idInvalid ? ATOM_COMMIT_ID.exec(idText) : void 0)?.[1];
+			if (name === "feed" && stack.length === 0) rootSeen = true;
+			continue;
+		}
+		const selfClosing = source.endsWith("/");
+		const opening = selfClosing ? source.slice(0, -1).trimEnd() : source;
+		const tag = /^([A-Za-z][A-Za-z0-9._-]*(?::[A-Za-z][A-Za-z0-9._-]*)?)([\s\S]*)$/.exec(opening);
+		if (!tag) return void 0;
+		const name = tag[1];
+		let attributes = tag[2];
+		const attrs = {};
+		while (attributes.trim()) {
+			attributes = attributes.trimStart();
+			const attribute = /^([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*("([^"<]*)"|'([^'<]*)')/.exec(attributes);
+			if (!attribute || Object.hasOwn(attrs, attribute[1])) return void 0;
+			attrs[attribute[1]] = attribute[3] ?? attribute[4];
+			attributes = attributes.slice(attribute[0].length);
+		}
+		if (!rootSeen && !stack.length) {
+			if (name !== "feed" || attrs.xmlns !== ATOM_NAMESPACE || selfClosing) return void 0;
+		} else if (!stack.length) return;
+		else if (Object.hasOwn(attrs, "xmlns")) return;
+		else if (name === "entry" && stack.length === 1 && stack[0] === "feed" && !entrySeen) entrySeen = true;
+		else if (inFirstId()) idInvalid = true;
+		if (entrySeen && name === "id" && stack.length === 2 && stack[0] === "feed" && stack[1] === "entry") {
+			if (idSeen) idInvalid = true;
+			idSeen = true;
+			if (Object.keys(attrs).length) idInvalid = true;
+		}
+		if (selfClosing) {
+			if (name === "id" && entrySeen && stack.length === 2 && stack[1] === "entry") idClosed = true;
+			if (name === "entry" && entrySeen && stack.length === 1 && stack[0] === "feed") return void 0;
+		} else stack.push(name);
 	}
 }
 /** Read only the fixed, public package sources; a single immutable Git revision supplies Web UI version and build. */
-async function fetchLatestVersions(fetcher, signal, requestTimeoutMs = 3e3) {
+async function fetchLatestVersions(fetcher, signal, requestTimeoutMs = 2e3) {
 	const settled = await Promise.allSettled([getJson(fetcher, "https://registry.npmjs.org/@earendil-works%2Fpi-coding-agent/latest", signal, void 0, requestTimeoutMs), getJson(fetcher, "https://api.github.com/repos/swordfate3/pi-web-ui/git/ref/heads/main", signal, {
 		Accept: "application/vnd.github+json",
 		"X-GitHub-Api-Version": "2022-11-28",
@@ -1625,10 +1753,28 @@ async function fetchLatestVersions(fetcher, signal, requestTimeoutMs = 3e3) {
 	let pi;
 	const piPayload = settled[0].status === "fulfilled" ? settled[0].value : void 0;
 	if (isRecord(piPayload) && piPayload.name === PI_PACKAGE_NAME && isStableSemver(piPayload.version)) pi = Object.freeze({ version: piPayload.version });
-	const refPayload = settled[1].status === "fulfilled" ? settled[1].value : void 0;
+	let refPayload = settled[1].status === "fulfilled" ? settled[1].value : void 0;
+	const isValidRef = (payload) => {
+		const object = isRecord(payload) ? payload.object : void 0;
+		return isRecord(object) && object.type === "commit" && typeof object.sha === "string" && COMMIT.test(object.sha);
+	};
+	if (!isValidRef(refPayload)) {
+		refPayload = void 0;
+		if (signal.aborted) throw new Error("Version source aborted");
+		try {
+			const revision = firstAtomCommit(await getText(fetcher, "https://github.com/swordfate3/pi-web-ui/commits/main.atom", signal, { Accept: "application/atom+xml" }, requestTimeoutMs));
+			if (revision) refPayload = { object: {
+				type: "commit",
+				sha: revision
+			} };
+		} catch {
+			if (signal.aborted) throw new Error("Version source aborted");
+		}
+	}
 	const object = isRecord(refPayload) ? refPayload.object : void 0;
 	let webUi;
 	if (isRecord(object) && object.type === "commit" && typeof object.sha === "string" && COMMIT.test(object.sha)) {
+		if (signal.aborted) throw new Error("Version source aborted");
 		const revision = object.sha;
 		const webResults = await Promise.allSettled([getJson(fetcher, `https://raw.githubusercontent.com/swordfate3/pi-web-ui/${revision}/package.json`, signal, void 0, requestTimeoutMs), getJson(fetcher, `https://raw.githubusercontent.com/swordfate3/pi-web-ui/${revision}/dist/build-manifest.json`, signal, void 0, requestTimeoutMs)]);
 		const webPayload = webResults[0].status === "fulfilled" ? webResults[0].value : void 0;
@@ -1639,14 +1785,26 @@ async function fetchLatestVersions(fetcher, signal, requestTimeoutMs = 3e3) {
 			build: source.sha256
 		});
 	}
+	if (signal.aborted) throw new Error("Version source aborted");
 	if (!pi && !webUi) throw new Error("Public version metadata unavailable");
 	return Object.freeze({
 		...pi ? { pi } : {},
 		...webUi ? { webUi } : {}
 	});
 }
-/** Capture the Hub package and its own build fingerprint; never infer it from the Pi child runtime. */
+/** Capture the Hub's loaded build identity, even when deployed without the surrounding package. */
 function captureHubMetadata(moduleUrl = import.meta.url) {
+	{
+		const embedded = {
+			"version": "1.0.0",
+			"build": "ae954212b8b305d0d8b0ab99d8b910df7bb4bb13e8bc9415fe37242f69e9559b"
+		};
+		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
+			version: embedded.version,
+			build: embedded.build
+		});
+		return;
+	}
 	let directory = path.dirname(fileURLToPath(moduleUrl));
 	let root;
 	for (let depth = 0; depth < 8; depth++) {

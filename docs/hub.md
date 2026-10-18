@@ -196,6 +196,13 @@ pi update git:github.com/swordfate3/pi-web-ui@main
 仍固定到旧功能分支的来源需要显式迁移到 `main`，不能靠更新旧分支获得新代码。
 如果之前启用了本地 release 或 npm 版，应检查 Pi 的 packages/extensions
 配置，只启用一份 Web 扩展；安装 Git 源不会自动替你停用另外的本地副本。
+Hub 的独立 JavaScript 构建内嵌包版本和与 `dist/build-manifest.json` 相同的源码指纹；
+即使镜像只携带 Hub 构建文件，也不再依赖附近的 `package.json` 报告自身版本。
+该信息描述构建，不是代码真实性证明。源码直接运行仍读取包目录元数据。
+公开 Web 参考版本先通过 GitHub REST 查询 `main` 的提交号；失败时只尝试固定仓库的
+Atom 提交源，随后仍按同一个不可变提交读取版本和构建清单。限流或两个来源均失败时
+如实显示检查不可用；不会把本机 Hub 版本当作公开最新版。
+
 更新后重新启动 Pi 最稳妥。拉取扩展不会自动更新或重启独立 Hub/Gate 容器、
 重建 Pi 容器、启用生命周期策略、启动总管或增加 Docker 挂载，
 也不会修改现有 WSL 服务或公网网关。通过镜像部署的 Hub 仍需单独部署包含

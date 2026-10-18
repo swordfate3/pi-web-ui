@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -90,6 +101,64 @@ test("standalone hub serves a portal and shuts down cleanly on SIGTERM", { timeo
   } finally {
     clearTimeout(timer);
     peer.destroy();
+  }
+});
+
+test("detached Hub bundle reports its embedded version/build without package files or network", {
+  timeout: 15000,
+}, async (t) => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const expected = {
+    version: JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version,
+    build: JSON.parse(readFileSync(path.join(root, "dist/build-manifest.json"), "utf8")).source.sha256,
+  };
+  const dir = mkdtempSync(path.join(tmpdir(), "pi-hub-detached-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const detached = path.join(dir, "hub.mjs");
+  copyFileSync(cli, detached);
+  // Only the declared external runtime dependency is available, not repository package metadata.
+  mkdirSync(path.join(dir, "node_modules"));
+  symlinkSync(realpathSync(path.join(root, "node_modules", "ws")), path.join(dir, "node_modules", "ws"), "dir");
+  for (const adjacentPackage of [undefined, { name: "@kkkiio/pi-web-ui", version: "9.9.9" }]) {
+    if (adjacentPackage) writeFileSync(path.join(dir, "package.json"), JSON.stringify(adjacentPackage));
+    const config = path.join(dir, adjacentPackage ? "misleading.json" : "absent.json");
+    const env = { ...process.env, PI_OFFLINE: "1" };
+    assert.equal(spawnSync(process.execPath, [detached, "init", "--config", config, "--port", "0"], { env }).status, 0);
+    const child = spawn(process.execPath, [detached, "serve", "--config", config], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const ready = await new Promise<{ localUrl: string }>((resolve, reject) => {
+        let output = "";
+        child.stdout.on("data", (chunk) => {
+          output += chunk;
+          if (output.includes("\n")) resolve(JSON.parse(output.split("\n")[0]));
+        });
+        child.once("error", reject);
+        child.once("exit", () => reject(new Error("Detached Hub stopped before ready")));
+      });
+      const response = await fetch(`${ready.localUrl}api/sessions`);
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.deepEqual(body.sessions, []);
+      assert.deepEqual(body.versions.hub, expected, "bundle identity must not be guessed from adjacent disk files");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const settled = await (await fetch(`${ready.localUrl}api/sessions`)).json();
+      assert.equal(settled.versions.status, "unavailable", "offline reference check is unavailable, not fake success");
+      assert.deepEqual(settled.versions.hub, expected, "offline reference failure cannot erase running Hub identity");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const closed = new Promise((resolve) => child.once("exit", resolve));
+        const timer = setTimeout(() => child.kill("SIGKILL"), 2000);
+        child.kill("SIGTERM");
+        try {
+          await closed;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    }
   }
 });
 

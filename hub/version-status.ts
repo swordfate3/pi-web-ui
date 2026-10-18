@@ -40,59 +40,82 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function boundedJson(response: Response): Promise<unknown> {
-  return (async () => {
-    if (!response.ok || response.redirected) {
-      await response.body?.cancel().catch(() => {});
-      throw new Error("Version source unavailable");
-    }
-    const length = response.headers.get("content-length");
-    if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES)) {
-      await response.body?.cancel().catch(() => {});
-      throw new Error("Version source response too large");
-    }
-    if (!response.body) throw new Error("Version source response unavailable");
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > MAX_BODY_BYTES) {
-          await reader.cancel();
-          throw new Error("Version source response too large");
-        }
-        chunks.push(value);
+async function boundedBody(response: Response, signal: AbortSignal): Promise<Buffer> {
+  if (!response.ok || response.redirected) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error("Version source unavailable");
+  }
+  const length = response.headers.get("content-length");
+  if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES)) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error("Version source response too large");
+  }
+  if (!response.body) throw new Error("Version source response unavailable");
+  const reader = response.body.getReader();
+  const cancel = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted) cancel();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        await reader.cancel();
+        throw new Error("Version source response too large");
       }
-    } finally {
-      reader.releaseLock();
+      chunks.push(value);
     }
-    try {
-      return JSON.parse(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8"));
-    } catch {
-      throw new Error("Invalid version source response");
-    }
-  })();
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
 }
 
-async function getJson(
+async function boundedJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  try {
+    return JSON.parse((await boundedBody(response, signal)).toString("utf8"));
+  } catch {
+    throw new Error("Invalid version source response");
+  }
+}
+
+async function boundedText(response: Response, signal: AbortSignal): Promise<string> {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(await boundedBody(response, signal));
+  } catch {
+    throw new Error("Invalid version source response");
+  }
+}
+
+async function getResponse<T>(
   fetcher: VersionFetch,
   url: string,
   signal: AbortSignal,
   headers: HeadersInit | undefined,
   timeoutMs: number,
-) {
+  read: (response: Response, signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (signal.aborted) throw new Error("Version source aborted");
   const controller = new AbortController();
   const requestSignal = AbortSignal.any([signal, controller.signal]);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
   const expired = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      controller.abort();
       reject(new Error("Version source timed out"));
+      controller.abort();
     }, timeoutMs);
     timer.unref?.();
+  });
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new Error("Version source aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
     return await Promise.race([
@@ -103,20 +126,169 @@ async function getJson(
           signal: requestSignal,
           headers: { Accept: "application/json", ...headers },
         });
-        return boundedJson(response);
+        return read(response, requestSignal);
       }),
       expired,
+      cancelled,
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
   }
+}
+
+function getJson(
+  fetcher: VersionFetch,
+  url: string,
+  signal: AbortSignal,
+  headers: HeadersInit | undefined,
+  timeoutMs: number,
+) {
+  return getResponse(fetcher, url, signal, headers, timeoutMs, boundedJson);
+}
+
+function getText(
+  fetcher: VersionFetch,
+  url: string,
+  signal: AbortSignal,
+  headers: HeadersInit | undefined,
+  timeoutMs: number,
+) {
+  return getResponse(fetcher, url, signal, headers, timeoutMs, boundedText);
+}
+
+const ATOM_NAMESPACE = "http://www.w3.org/2005/Atom";
+const ATOM_COMMIT_ID = /^tag:github.com,2008:Grit::Commit\/([a-f0-9]{40})$/;
+
+/** A deliberately narrow Atom reader: accept only GitHub's fixed feed and its first direct entry ID. */
+function firstAtomCommit(xml: string): string | undefined {
+  const stack: string[] = [];
+  let index = 0;
+  let rootSeen = false;
+  let entrySeen = false;
+  let idSeen = false;
+  let idClosed = false;
+  let idInvalid = false;
+  let idText = "";
+  const inFirstId = () =>
+    entrySeen && stack.length === 3 && stack[0] === "feed" && stack[1] === "entry" && stack[2] === "id";
+
+  while (index < xml.length) {
+    const nextTag = xml.indexOf("<", index);
+    const textEnd = nextTag < 0 ? xml.length : nextTag;
+    const text = xml.slice(index, textEnd);
+    if (inFirstId()) {
+      if (text.includes("&")) idInvalid = true;
+      idText += text;
+    } else if (!stack.length && text.trim()) {
+      return undefined;
+    }
+    if (nextTag < 0) break;
+    index = nextTag;
+
+    if (xml.startsWith("<!--", index)) {
+      const end = xml.indexOf("-->", index + 4);
+      if (end < 0) return undefined;
+      if (inFirstId()) idInvalid = true;
+      index = end + 3;
+      continue;
+    }
+    if (xml.startsWith("<?", index)) {
+      const end = xml.indexOf("?>", index + 2);
+      if (end < 0) return undefined;
+      if (inFirstId()) idInvalid = true;
+      index = end + 2;
+      continue;
+    }
+    if (xml.startsWith("<![CDATA[", index)) {
+      const end = xml.indexOf("]]>", index + 9);
+      if (end < 0) return undefined;
+      if (inFirstId()) idInvalid = true;
+      index = end + 3;
+      continue;
+    }
+    if (xml.startsWith("<!", index)) return undefined;
+
+    let end = index + 1;
+    let quote = "";
+    for (; end < xml.length; end++) {
+      const char = xml[end];
+      if (quote) {
+        if (char === quote) quote = "";
+      } else if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === ">") {
+        break;
+      }
+    }
+    if (end === xml.length || quote) return undefined;
+    const source = xml.slice(index + 1, end).trim();
+    index = end + 1;
+
+    const closing = source.startsWith("/");
+    if (closing) {
+      const match = /^\/([A-Za-z][A-Za-z0-9._-]*(?::[A-Za-z][A-Za-z0-9._-]*)?)\s*$/.exec(source);
+      if (!match || stack.at(-1) !== match[1]) return undefined;
+      const name = stack.pop();
+      if (name === "id" && entrySeen && stack.length === 2 && stack[1] === "entry") idClosed = true;
+      if (name === "entry" && entrySeen && stack.length === 1 && stack[0] === "feed") {
+        const matchId = idSeen && idClosed && !idInvalid ? ATOM_COMMIT_ID.exec(idText) : undefined;
+        return matchId?.[1];
+      }
+      if (name === "feed" && stack.length === 0) rootSeen = true;
+      continue;
+    }
+
+    const selfClosing = source.endsWith("/");
+    const opening = selfClosing ? source.slice(0, -1).trimEnd() : source;
+    const tag = /^([A-Za-z][A-Za-z0-9._-]*(?::[A-Za-z][A-Za-z0-9._-]*)?)([\s\S]*)$/.exec(opening);
+    if (!tag) return undefined;
+    const name = tag[1];
+    let attributes = tag[2];
+    const attrs: Record<string, string> = {};
+    while (attributes.trim()) {
+      attributes = attributes.trimStart();
+      const attribute = /^([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*("([^"<]*)"|'([^'<]*)')/.exec(attributes);
+      if (!attribute || Object.hasOwn(attrs, attribute[1])) return undefined;
+      attrs[attribute[1]] = attribute[3] ?? attribute[4];
+      attributes = attributes.slice(attribute[0].length);
+    }
+
+    if (!rootSeen && !stack.length) {
+      if (name !== "feed" || attrs.xmlns !== ATOM_NAMESPACE || selfClosing) return undefined;
+    } else if (!stack.length) {
+      return undefined;
+    } else if (Object.hasOwn(attrs, "xmlns")) {
+      return undefined;
+    } else if (name === "entry" && stack.length === 1 && stack[0] === "feed" && !entrySeen) {
+      entrySeen = true;
+    } else if (inFirstId()) {
+      idInvalid = true;
+    }
+
+    if (entrySeen && name === "id" && stack.length === 2 && stack[0] === "feed" && stack[1] === "entry") {
+      if (idSeen) idInvalid = true;
+      idSeen = true;
+      if (Object.keys(attrs).length) idInvalid = true;
+    }
+
+    if (selfClosing) {
+      if (name === "id" && entrySeen && stack.length === 2 && stack[1] === "entry") idClosed = true;
+      if (name === "entry" && entrySeen && stack.length === 1 && stack[0] === "feed") return undefined;
+    } else {
+      stack.push(name);
+    }
+  }
+  return undefined;
 }
 
 /** Read only the fixed, public package sources; a single immutable Git revision supplies Web UI version and build. */
 export async function fetchLatestVersions(
   fetcher: VersionFetch,
   signal: AbortSignal,
-  requestTimeoutMs = 3_000,
+  // Three sequential GitHub stages (REST ref, Atom fallback, immutable raw files)
+  // must fit comfortably inside createVersionStatus's 8-second overall deadline.
+  requestTimeoutMs = 2_000,
 ): Promise<LatestVersions> {
   const settled = await Promise.allSettled([
     getJson(
@@ -143,10 +315,32 @@ export async function fetchLatestVersions(
   if (isRecord(piPayload) && piPayload.name === PI_PACKAGE_NAME && isStableSemver(piPayload.version))
     pi = Object.freeze({ version: piPayload.version });
 
-  const refPayload = settled[1].status === "fulfilled" ? settled[1].value : undefined;
+  let refPayload: unknown = settled[1].status === "fulfilled" ? settled[1].value : undefined;
+  const isValidRef = (payload: unknown) => {
+    const object = isRecord(payload) ? payload.object : undefined;
+    return isRecord(object) && object.type === "commit" && typeof object.sha === "string" && COMMIT.test(object.sha);
+  };
+  if (!isValidRef(refPayload)) {
+    refPayload = undefined;
+    if (signal.aborted) throw new Error("Version source aborted");
+    try {
+      const atom = await getText(
+        fetcher,
+        "https://github.com/swordfate3/pi-web-ui/commits/main.atom",
+        signal,
+        { Accept: "application/atom+xml" },
+        requestTimeoutMs,
+      );
+      const revision = firstAtomCommit(atom);
+      if (revision) refPayload = { object: { type: "commit", sha: revision } };
+    } catch {
+      if (signal.aborted) throw new Error("Version source aborted");
+    }
+  }
   const object = isRecord(refPayload) ? refPayload.object : undefined;
   let webUi: LatestVersions["webUi"];
   if (isRecord(object) && object.type === "commit" && typeof object.sha === "string" && COMMIT.test(object.sha)) {
+    if (signal.aborted) throw new Error("Version source aborted");
     const revision = object.sha;
     const webResults = await Promise.allSettled([
       getJson(
@@ -178,12 +372,22 @@ export async function fetchLatestVersions(
       webUi = Object.freeze({ version: webPayload.version, build: source.sha256 });
   }
 
+  if (signal.aborted) throw new Error("Version source aborted");
   if (!pi && !webUi) throw new Error("Public version metadata unavailable");
   return Object.freeze({ ...(pi ? { pi } : {}), ...(webUi ? { webUi } : {}) });
 }
 
-/** Capture the Hub package and its own build fingerprint; never infer it from the Pi child runtime. */
+// Vite replaces this only in the standalone Hub bundle. Source execution uses disk metadata below.
+declare const __PI_WEB_HUB_METADATA__: Readonly<{ version: string; build: string }> | undefined;
+
+/** Capture the Hub's loaded build identity, even when deployed without the surrounding package. */
 export function captureHubMetadata(moduleUrl = import.meta.url): { version: string; build?: string } | undefined {
+  if (typeof __PI_WEB_HUB_METADATA__ !== "undefined") {
+    const embedded = __PI_WEB_HUB_METADATA__;
+    if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build))
+      return Object.freeze({ version: embedded.version, build: embedded.build });
+    return undefined;
+  }
   let directory = path.dirname(fileURLToPath(moduleUrl));
   let root: string | undefined;
   for (let depth = 0; depth < 8; depth++) {

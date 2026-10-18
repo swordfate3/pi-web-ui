@@ -11,6 +11,10 @@ const piBody = { name: "@earendil-works/pi-coding-agent", version: "1.3.0" };
 const commit = "c".repeat(40);
 const webBody = { name: "@kkkiio/pi-web-ui", version: "0.1.2" };
 const manifestBody = { source: { sha256: "a".repeat(64) } };
+const atomId = (sha = commit) => `tag:github.com,2008:Grit::Commit/${sha}`;
+const atomEntry = (id: string) => `<entry><id>${id}</id></entry>`;
+const atomFeed = (entries: string) =>
+  `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">${entries}</feed>`;
 function response(value: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" }, ...init });
 }
@@ -45,6 +49,159 @@ test("reads only fixed public version endpoints; Web files share one immutable G
   assert.equal(webFiles.length, 2);
   assert.ok(webFiles.every(({ url }) => url.includes(`/${commit}/`)));
   assert.ok(!JSON.stringify(calls).match(/token|session|cookie|authorization/i));
+});
+
+test("403 GitHub ref falls back to the fixed Atom feed and reads both raw files from its commit", async () => {
+  const { fetcher, calls } = versionFetch({
+    "api.github.com": new Response("rate limited", { status: 403 }),
+    "commits/main.atom": new Response(
+      `<?xml version="1.0" encoding="UTF-8"?>
+      <feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xml:lang="en-US">
+        <id>tag:github.com,2008:/swordfate3/pi-web-ui/commits/main</id>
+        <entry><id>${atomId()}</id><title>Synthetic commit</title>
+          <media:thumbnail url="https://example.invalid/avatar?a=1&amp;b=2"/>
+          <content type="html">&lt;pre&gt;Synthetic commit&lt;/pre&gt;</content>
+        </entry>
+        ${atomEntry(atomId("d".repeat(40)))}
+      </feed>`,
+      { status: 200 },
+    ),
+  });
+  assert.deepEqual(await fetchLatestVersions(fetcher, new AbortController().signal), {
+    pi: { version: "1.3.0" },
+    webUi: { version: "0.1.2", build: "a".repeat(64) },
+  });
+  const atom = calls.filter(({ url }) => url === "https://github.com/swordfate3/pi-web-ui/commits/main.atom");
+  assert.equal(atom.length, 1);
+  assert.equal(atom[0].init?.redirect, "error");
+  assert.equal((atom[0].init?.headers as Record<string, string>).Accept, "application/atom+xml");
+  const raw = calls.filter(({ url }) => url.includes("raw.githubusercontent.com"));
+  assert.deepEqual(raw.map(({ url }) => url).sort(), [
+    `https://raw.githubusercontent.com/swordfate3/pi-web-ui/${commit}/dist/build-manifest.json`,
+    `https://raw.githubusercontent.com/swordfate3/pi-web-ui/${commit}/package.json`,
+  ]);
+  assert.ok(calls.every(({ init }) => init?.method === "GET" && init.redirect === "error"));
+  assert.ok(!JSON.stringify(calls).match(/token|session|cookie|authorization/i));
+});
+
+test("Atom fallback uses only a valid first entry id and rejects invalid first entries and SHAs", async () => {
+  const cases = [
+    atomFeed(`${atomEntry("tag:github.com,2008:Grit::Commit/not-a-sha")}${atomEntry(atomId())}`),
+    atomFeed(`${atomEntry(atomId("A".repeat(40)))}${atomEntry(atomId())}`),
+    atomFeed(`${atomEntry(atomId("c".repeat(39)))}${atomEntry(atomId())}`),
+    atomFeed(`<entry/><entry><id>${atomId()}</id></entry>`),
+    atomFeed(`<entry><id xmlns="http://evil.invalid">${atomId()}</id></entry>`),
+    atomFeed(`<entry><id>${atomId()}</id><id>${atomId()}</id></entry>`),
+    atomFeed(`<entry><content>${atomEntry(atomId())}</content></entry>`),
+    atomFeed(`<entry><id>${atomId().replace("c", "&#99;")}</id></entry>`),
+    `<!DOCTYPE feed SYSTEM "https://example.invalid/entity">${atomFeed(atomEntry(atomId()))}`,
+  ];
+  for (const atom of cases) {
+    const { fetcher, calls } = versionFetch({
+      "api.github.com": new Response("forbidden", { status: 403 }),
+      "commits/main.atom": new Response(atom, { status: 200 }),
+    });
+    assert.deepEqual(await fetchLatestVersions(fetcher, new AbortController().signal), { pi: { version: "1.3.0" } });
+    assert.equal(
+      calls.some(({ url }) => url.includes("raw.githubusercontent.com")),
+      false,
+    );
+  }
+});
+
+test("Atom fallback enforces the body limit and reports a source partial without reading raw files", async () => {
+  for (const oversized of [
+    new Response(new Uint8Array(256 * 1024 + 1), { status: 200 }),
+    new Response("small", { status: 200, headers: { "content-length": "262145" } }),
+  ]) {
+    const { fetcher, calls } = versionFetch({
+      "api.github.com": new Response("rate limited", { status: 403 }),
+      "commits/main.atom": oversized,
+    });
+    assert.deepEqual(await fetchLatestVersions(fetcher, new AbortController().signal), { pi: { version: "1.3.0" } });
+    assert.equal(
+      calls.some(({ url }) => url.includes("raw.githubusercontent.com")),
+      false,
+    );
+  }
+});
+
+test("Atom fallback request timeout aborts only that request and keeps healthy Pi data", async (t) => {
+  const keeper = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keeper));
+  let atomAborted = false;
+  const base = versionFetch({ "api.github.com": new Response("rate limited", { status: 403 }) });
+  const fetcher: VersionFetch = async (url, init) => {
+    if (String(url) !== "https://github.com/swordfate3/pi-web-ui/commits/main.atom") return base.fetcher(url, init);
+    return new Promise((_resolve, reject) =>
+      init?.signal?.addEventListener(
+        "abort",
+        () => {
+          atomAborted = true;
+          reject(new Error("atom timeout"));
+        },
+        { once: true },
+      ),
+    );
+  };
+  assert.deepEqual(await fetchLatestVersions(fetcher, new AbortController().signal, 10), { pi: { version: "1.3.0" } });
+  assert.equal(atomAborted, true);
+});
+
+test("caller cancellation aborts the Atom fallback and does not return stale public data", async (t) => {
+  const keeper = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keeper));
+  const controller = new AbortController();
+  let atomAborted = false;
+  const base = versionFetch({ "api.github.com": new Response("rate limited", { status: 403 }) });
+  const fetcher: VersionFetch = async (url, init) => {
+    if (String(url) !== "https://github.com/swordfate3/pi-web-ui/commits/main.atom") return base.fetcher(url, init);
+    return new Promise((_resolve, reject) =>
+      init?.signal?.addEventListener(
+        "abort",
+        () => {
+          atomAborted = true;
+          reject(new Error("cancelled"));
+        },
+        { once: true },
+      ),
+    );
+  };
+  const pending = fetchLatestVersions(fetcher, controller.signal);
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  await assert.rejects(pending);
+  assert.equal(atomAborted, true);
+});
+
+test("caller cancellation during immutable raw requests rejects on both ref paths", async () => {
+  for (const useAtom of [false, true]) {
+    const controller = new AbortController();
+    const base = versionFetch(
+      useAtom
+        ? {
+            "api.github.com": new Response("limited", { status: 403 }),
+            "commits/main.atom": new Response(atomFeed(atomEntry(atomId()))),
+          }
+        : {},
+    );
+    let started!: () => void;
+    const rawStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const fetcher: VersionFetch = async (url, init) => {
+      if (!String(url).includes("raw.githubusercontent.com")) return base.fetcher(url, init);
+      started();
+      return new Promise((_resolve, reject) => {
+        if (init?.signal?.aborted) reject(new Error("cancelled"));
+        else init?.signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+      });
+    };
+    const pending = fetchLatestVersions(fetcher, controller.signal);
+    await rawStarted;
+    controller.abort();
+    await assert.rejects(pending, /aborted/);
+  }
 });
 
 test("partial version source failure preserves only independently validated stable release data", async () => {

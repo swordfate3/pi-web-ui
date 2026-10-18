@@ -407,3 +407,12 @@
 - 主线程重建 dist 并验证 manifest；重新执行 424 单测（423 pass / 1 skip）、两套类型检查、Biome 0 error（30 warnings / 1 info）、当前 SDK 修订及翻页 integration 2/2、portable integration 8/8、Python gateway 15 pass / 1 skip、真实 Git install/update/tarball/Hub lifecycle fixture 及 11 类 stale-input 拒绝，均通过。
 - 使用最终构建和隔离真实 Pi 1.3.0 的 faux provider，在 Browser 1440×900 / 390×844 检查 system patch 后 2/2、切旧 1/2 再切新、继续两轮聊天；截图直接查看。原生 CDP click 未生效，使用 DOM button.click，无 React/store 注入；不称完整自动化浏览器 E2E。临时服务和专用标签已停止，不影响用户会话。
 - 用户授权推进 Git 推送与本机包更新；不含当前真实 Pi reload、新 Hub Gate 部署或容器重启。新扩展需目标 Pi 空闲后由用户 reload 生效，不声称已解除真实旧锁。完整结果和限制见[修订 system patch 验证](validation/revision-system-patch.md)。
+
+### 2026-10-18 · Hub 版本总览与会话软件信息
+
+- 入口新增只读「版本与更新」区域，显示 Hub 自有版本／构建、公开参考版本和检查时间；会话名下单列 Pi、Web 扩展包版本和 source fingerprint。旧客户端明确未上报，非受管 Pi 也有版本信息，不改变管理授权或重启资格。
+- 扩展 factory 捕获一次不可变软件元数据，续租不重读磁盘，防止把共享卷安装更新误显示成已加载更新。Pi 版本独立于 Web 元数据，缺少包／manifest 时仍保留已知 Pi 版本。
+- Hub 首次列表读取后异步查询固定 npm／GitHub 公开源；Web 文件来自同一个不可变 commit，独立请求限时、整体截止、单飞和至少五分钟成功／失败冷却；关闭取消后台查询，`PI_OFFLINE=1` 不联网。不读取会话正文、扫描任意扩展或发送凭据。
+- 区分可更新、与公开版一致、构建不同、版本较新、未上报与检查不可用；相同包版本不同构建不伪装成确定升级。桌面 1440×1000、手机 390×844 合成浏览器截图已查看，长名字截断、版本行换行、无手机横向溢出；原有搜索可用。这是视觉检查，不是完整 Pi 浏览器 E2E。
+- 最终 447 单测（446 pass／1 optional skip）、类型／构建／manifest通过，Biome 239 文件 0 errors（已有30 warnings／1 info）；真实 Pi 1.3.0 后端11/11、1.1.0后端9/9通过。审查发现的独立运行时 fixture 来源与单源超时 partial 丢失均修复并补验证。默认公开源实查仅取得Pi参考版本，Web来源不可用如实降级。
+- 本轮仅开发及隔离验证，未提交／推送、安装扩展、刷新用户 Pi、部署 Hub 或重启容器。完整证据与限制见[Hub 版本展示验证](validation/hub-version-display.md)。

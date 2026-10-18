@@ -34,6 +34,7 @@ import { startRuntimeControl, taintRuntimeInput } from "./runtime-control.ts";
 import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
+import { captureSoftwareMetadata } from "./software-metadata.ts";
 import { serveWorkspaceUpload, WorkspaceUploads } from "./workspace-uploads.ts";
 
 type BrowserImage = {
@@ -314,6 +315,9 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 export default function (pi: ExtensionAPI) {
+  // Snapshot package/build metadata once for this extension runtime. This is
+  // descriptive only: renewals never inspect disk or imply running updated code.
+  const softwareMetadata = captureSoftwareMetadata(VERSION);
   let server: http.Server | null = null;
   let listenController: AbortController | null = null;
   let registration: SessionRegistration | null = null;
@@ -3293,6 +3297,7 @@ export default function (pi: ExtensionAPI) {
           },
           () => (latestCtx ? pi.getSessionName() : null),
           runtimeMetadata,
+          softwareMetadata,
         );
       }
     };

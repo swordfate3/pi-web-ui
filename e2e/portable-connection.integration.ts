@@ -1,8 +1,8 @@
 // Backend integration only; browser product E2E is the Playwright-BDD suite.
 import assert from "node:assert/strict";
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn, spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -195,6 +195,20 @@ test("real Pi registers natively, guards WebSockets, and unregisters on stop", {
   await pi.ready();
   await eventually(() => pi.requests.length > 0, "No native registration request received");
   assert.equal(pi.requests[0].port, pi.port);
+  const version = spawnSync(process.env.PI_E2E_BIN || path.join(root, "node_modules/.bin/pi"), ["--version"], {
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  assert.equal(version.status, 0);
+  const software = {
+    piVersion: version.stdout.trim(),
+    webUi: {
+      version: JSON.parse(readFileSync(path.join(runtimeDir, "package.json"), "utf8")).version,
+      build: JSON.parse(readFileSync(path.join(runtimeDir, "dist/build-manifest.json"), "utf8")).source.sha256,
+    },
+  };
+  assert.deepEqual(pi.requests[0].software, software, "unmanaged real Pi registers its loaded software versions");
+  assert.equal(pi.requests[0].runtime, undefined, "display metadata does not manufacture managed restart capability");
   const generation = String(pi.requests[0].generation);
   const challenge = "3".repeat(48);
   const identity = await fetch(`http://127.0.0.1:${pi.port}/.pi-web-identity`, {
@@ -241,6 +255,7 @@ test("real Pi registers natively, guards WebSockets, and unregisters on stop", {
   );
   const reloaded = pi.requests.filter((value) => value.action === "register")[2];
   assert.notEqual(reloaded.generation, next.generation);
+  assert.deepEqual(reloaded.software, software, "the new extension runtime recaptures the same installed build");
   assert.equal(pi.requests.filter((value) => value.action === "unregister").length, 2);
   await pi.ready();
   const exited = pi.closed();

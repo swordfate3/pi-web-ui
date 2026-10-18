@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "source": {
-    "count": 153,
-    "sha256": "d10167847e7b93ad674d4e59067331c981b330b4aa2dc5d164be008cfc4e02e3",
+    "count": 155,
+    "sha256": "412d14083a64a4ca2f66eff9d237f65a470e8a9496b0fee9d2d2834b008d739d",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -34,7 +34,7 @@
       },
       {
         "path": "extensions/mirror-server.ts",
-        "sha256": "13b3bbd7ec70bf5d15e0cd22f6b579b7fdf52e6a0849fa21c006f2abc1de3550"
+        "sha256": "29aff4c19cf00f180458bd75cc1e399a9a7dc0985c449f9b583cc5e9e150f69f"
       },
       {
         "path": "extensions/remote-access/gateway.py",
@@ -62,11 +62,15 @@
       },
       {
         "path": "extensions/session-registration.ts",
-        "sha256": "4e750fd93ada8ca40c967c4c1375accd775c2b4aacd0e09ef239a08cf828d5ff"
+        "sha256": "e480587359546d196b186056f912cdaa33da9cf3187b4c3ed12c661ef148dbf9"
       },
       {
         "path": "extensions/session-usage.ts",
         "sha256": "20d67c5fa993901aead51e11ba795c5ecd928fc2bb02ea68f25ad23e643ce436"
+      },
+      {
+        "path": "extensions/software-metadata.ts",
+        "sha256": "5aa12f2d5a29ebeedeb783ea4d20bdb8533a7b85015fae3ae31dba8e81f8c438"
       },
       {
         "path": "extensions/workspace-uploads.ts",
@@ -90,7 +94,7 @@
       },
       {
         "path": "hub/portal.ts",
-        "sha256": "7ada905284def7892cadd6aba2fbf3c69fbcb2d98d7ce5468438dbc9f72fd47f"
+        "sha256": "93af7b55ddfd5da147ee140ecaf0b352fd03aa789ea680f6362469a78796480c"
       },
       {
         "path": "hub/restart-api.ts",
@@ -98,7 +102,11 @@
       },
       {
         "path": "hub/server.ts",
-        "sha256": "afa7ad84604397d3c562505fbfc739d4a753915e94a319dc98b7e0a06370f63a"
+        "sha256": "1b9b7f5d91d45dee0bbc79a735ace72eb5dbf3a31f607d9750c8db32ffa3a473"
+      },
+      {
+        "path": "hub/version-status.ts",
+        "sha256": "edff5306ae555a1a7a5009d082d7ad0c54c9a929107fdaaba801d47bdf8dc8a5"
       },
       {
         "path": "package-lock.json",
@@ -130,7 +138,7 @@
       },
       {
         "path": "scripts/web-dist.mjs",
-        "sha256": "3463c2421ea88a4281e25402d50c381d9360f40f2c72bc59491dbb6fd9ae3b8e"
+        "sha256": "0ad27b1e16849dec9a64f6628cac61e6b5e0a438df4a0bd9fafe9e2b3d78dd09"
       },
       {
         "path": "src/web/components/ai-elements/code-block.tsx",
@@ -620,7 +628,7 @@
   },
   "outputs": {
     "count": 673,
-    "sha256": "df7fb948d7eb1ac66b4c5d469672a8898d07b57b4d1a3da7efe5a5b8342c6e61",
+    "sha256": "3971353f04f9efbf064b59f13a2ed8928031d52b98fd120921dac7128ece0ec6",
     "files": [
       {
         "path": "assets/abap-BF8NL95m.js",
@@ -3288,7 +3296,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "811dd704c58bcd1f6a213ef1c853f4a2aa386130894344dc9687f71c9194012c"
+        "sha256": "4445370c95324a13b8b78c72b8e103d5805db50aab5db2b739f8379063d1c67c"
       },
       {
         "path": "icons/pi-web-ui-192.png",

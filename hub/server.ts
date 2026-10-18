@@ -6,6 +6,7 @@ import path from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { type RuntimeMetadata, readRuntimeMetadata } from "../extensions/runtime-metadata.ts";
+import { readSoftwareMetadata, type SoftwareMetadata } from "../extensions/software-metadata.ts";
 import {
   type Grant,
   type HubConfig,
@@ -16,6 +17,7 @@ import {
 } from "./config.ts";
 import { portalCss, portalJs, portalManagementCss, portalManagementJs, renderPortalHtml } from "./portal.ts";
 import { createRestartApi } from "./restart-api.ts";
+import { createVersionStatus, type VersionStatusOptions } from "./version-status.ts";
 
 type Session = {
   grant: Grant;
@@ -25,6 +27,7 @@ type Session = {
   since: number;
   sessionName: string | null;
   runtime?: RuntimeMetadata;
+  software?: SoftwareMetadata;
 };
 type Handoff = {
   grant: Grant;
@@ -125,7 +128,7 @@ function backendHeaders(request: IncomingMessage, session: Session) {
 }
 
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
-export async function startHub(config: HubConfig) {
+export async function startHub(config: HubConfig, options: { versions?: VersionStatusOptions } = {}) {
   if (config.management) managementConfig(config.management, config.port, config.publicUrl);
   privateDirectory(config.runtimeDir);
   // Exclusive acquisition precedes any asynchronous stale-socket recovery.
@@ -141,7 +144,7 @@ export async function startHub(config: HubConfig) {
   };
   try {
     writeFileSync(owner, JSON.stringify({ pid: process.pid }), { flag: "wx", mode: 0o600 });
-    const hub = await startLockedHub(config);
+    const hub = await startLockedHub(config, options);
     let closing: Promise<void> | undefined;
     return {
       ...hub,
@@ -156,7 +159,7 @@ export async function startHub(config: HubConfig) {
   }
 }
 
-async function startLockedHub(config: HubConfig) {
+async function startLockedHub(config: HubConfig, options: { versions?: VersionStatusOptions }) {
   privateDirectory(config.stateDir);
   privateDirectory(config.runtimeDir);
   privateDirectory(path.join(config.stateDir, "grants"));
@@ -198,6 +201,7 @@ async function startLockedHub(config: HubConfig) {
   };
   let stopped = false;
   let pending = Promise.resolve();
+  const versionStatus = createVersionStatus(options.versions);
   let url = "";
   let managementUrl: string | undefined;
   const restarting = new Map<string, { id: string; runtimeId: string; deadline?: number }>();
@@ -384,6 +388,7 @@ async function startLockedHub(config: HubConfig) {
     const sessionName =
       typeof value.sessionName === "string" ? value.sessionName.replace(/\p{Cc}/gu, " ").trim() || null : null;
     const runtime = value.runtime === undefined ? undefined : readRuntimeMetadata(value.runtime);
+    const software = value.software === undefined ? undefined : readSoftwareMetadata(value.software);
     const port = Number(value.port);
     if (owner) {
       if (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port)
@@ -402,6 +407,7 @@ async function startLockedHub(config: HubConfig) {
       session.expires = Date.now() + config.leaseMs;
       session.sessionName = sessionName;
       session.runtime = runtime;
+      session.software = software;
     } else
       sessions.set(generation, {
         grant,
@@ -411,6 +417,7 @@ async function startLockedHub(config: HubConfig) {
         since: Date.now(),
         sessionName,
         runtime,
+        software,
       });
     pruneHandoffs();
     if (!session) {
@@ -663,6 +670,7 @@ async function startLockedHub(config: HubConfig) {
         return;
       }
       if (pathname === "/api/sessions") {
+        versionStatus.ensureStarted();
         const items = [...sessions.keys()]
           .map(current)
           .filter((s): s is Session => Boolean(s))
@@ -673,10 +681,11 @@ async function startLockedHub(config: HubConfig) {
             path: admin ? `${config.publicUrl ?? url}s/${s.generation}/` : `/s/${s.generation}/`,
             since: s.since,
             ...(s.runtime ? { runtime: { version: s.runtime.version, managed: s.runtime.managed } } : {}),
+            ...(s.software ? { software: s.software } : {}),
           }));
         response
           .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
-          .end(JSON.stringify({ sessions: items }));
+          .end(JSON.stringify({ sessions: items, versions: versionStatus.snapshot() }));
         return;
       }
       const asset =
@@ -895,6 +904,7 @@ async function startLockedHub(config: HubConfig) {
       if (closing) return closing;
       stopped = true;
       handoffs.clear();
+      versionStatus.close();
       clearInterval(sweep);
       for (const id of sessions.keys()) retire(id);
       for (const peer of peers) peer.destroy();

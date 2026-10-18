@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import net from "node:net";
 import { type RegistrationConfig, validatedPublicUrl } from "./connection-config.ts";
 import { type RuntimeMetadata, readRuntimeMetadata } from "./runtime-metadata.ts";
+import { readSoftwareMetadata, type SoftwareMetadata } from "./software-metadata.ts";
 
 type Credential = { run_id: string; token: string };
 const mac = (token: string, text: string) => createHmac("sha256", token).update(text).digest("hex");
@@ -22,6 +23,7 @@ type RegistrationTarget = {
   onUrl: (url: string | null) => void;
   getSessionName: () => unknown;
   getRuntime: () => RuntimeMetadata | undefined;
+  software?: SoftwareMetadata;
 };
 
 /** One Pi server lifetime, not a multi-process session manager or login provider. */
@@ -50,6 +52,7 @@ export class SessionRegistration {
     port?: number,
     sessionName?: string | null,
     runtime?: RuntimeMetadata,
+    software?: SoftwareMetadata,
   ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const client = net.createConnection(this.socketPath);
@@ -69,7 +72,7 @@ export class SessionRegistration {
       client.once("close", () => finish(new Error("Pi Web registration unavailable")));
       client.once("connect", () =>
         client.write(
-          `${JSON.stringify({ action, ...this.credential, generation, ...(port === undefined ? {} : { port, sessionName, ...(runtime ? { runtime } : {}) }) })}\n`,
+          `${JSON.stringify({ action, ...this.credential, generation, ...(port === undefined ? {} : { port, sessionName, ...(runtime ? { runtime } : {}), ...(software ? { software } : {}) }) })}\n`,
         ),
       );
       client.on("data", (chunk: Buffer) => {
@@ -100,12 +103,15 @@ export class SessionRegistration {
     onUrl: (url: string | null) => void,
     getSessionName: () => unknown = () => null,
     getRuntime: () => RuntimeMetadata | undefined = () => undefined,
+    software?: SoftwareMetadata,
   ): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     const epoch = ++this.epoch;
     this.generation = randomBytes(16).toString("hex");
-    this.target = { epoch, port, onUrl, getSessionName, getRuntime };
+    // This is an initialization-time immutable display snapshot. Renewals never
+    // reread package files, and do not imply that an on-disk update is running.
+    this.target = { epoch, port, onUrl, getSessionName, getRuntime, software };
     await this.enqueueRefresh(this.target).done;
     if (epoch !== this.epoch) return;
     this.timer = setInterval(() => {
@@ -163,7 +169,8 @@ export class SessionRegistration {
               .slice(0, 256) || null
           : null;
       const runtime = readRuntimeMetadata(target.getRuntime());
-      const reply = (await this.request("register", this.generation, target.port, sessionName, runtime)) as {
+      const software = readSoftwareMetadata(target.software);
+      const reply = (await this.request("register", this.generation, target.port, sessionName, runtime, software)) as {
         url?: unknown;
       };
       url = validatedPublicUrl(reply?.url);

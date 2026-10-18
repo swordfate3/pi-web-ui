@@ -181,7 +181,11 @@ async function fixture(t: test.TestContext, leaseMs = 45000) {
   const configFile = path.join(dir, "config.json");
   initializeHub(configFile, { port: 0, leaseMs });
   const config = readHubConfig(configFile);
-  let hub = await startHub(config);
+  const versions = {
+    source: async () => ({ pi: { version: "1.1.0" }, webUi: { version: "0.1.1", build: "a".repeat(64) } }),
+    hub: { version: "0.1.1", build: "b".repeat(64) },
+  };
+  let hub = await startHub(config, { versions });
   const backends: { stop: () => Promise<void> }[] = [];
   t.after(async () => {
     for (const backend of backends) await backend.stop();
@@ -277,7 +281,7 @@ async function fixture(t: test.TestContext, leaseMs = 45000) {
     },
     async restart() {
       await hub.close();
-      hub = await startHub(config);
+      hub = await startHub(config, { versions });
     },
   };
 }
@@ -658,6 +662,66 @@ test("display names update on the same route, are bounded and nullable, and cann
   assert.equal(current.sessionName, null);
   assert.equal(current.path, original.path);
   assert.equal(current.since, original.since);
+});
+
+test("software is bounded display metadata independent of managed control, with stable renewal routes", async (t) => {
+  const f = await fixture(t);
+  const a = await f.backend("Software fixture");
+  const list = async () => await (await fetch(`${f.hub.url}api/sessions`)).json();
+  const original = (await list()).sessions[0];
+  assert.equal(original.software, undefined, "legacy registrations remain supported");
+  const renew = (software: unknown, runtime?: unknown) =>
+    exchange(f.hub.socketPath, {
+      action: "register",
+      ...a.credential,
+      generation: original.generation,
+      port: a.port,
+      software,
+      runtime,
+    });
+  const software = { piVersion: "1.3.0", webUi: { version: "0.1.1", build: "c".repeat(64) } };
+  assert.equal((await renew(software)).ok, true);
+  const first = (await list()).sessions[0];
+  assert.deepEqual(first.software, software);
+  assert.equal(first.runtime, undefined, "software never creates managed restart authority");
+  assert.equal(first.path, original.path);
+  assert.equal(first.since, original.since);
+  assert.equal(first.generation, original.generation);
+  for (const invalid of [
+    null,
+    [],
+    { piVersion: "latest" },
+    { ...software, runtimeId: "secret" },
+    {
+      ...software,
+      webUi: { ...software.webUi, build: "x".repeat(64) },
+    },
+  ])
+    assert.equal((await renew(invalid)).ok, false);
+  assert.deepEqual((await list()).sessions[0].software, software, "invalid software cannot overwrite metadata");
+  const runtime = {
+    runtimeId: "private-runtime",
+    sessionId: "private-session",
+    leafId: "private-leaf",
+    version: "1.3.0",
+    managed: true,
+  };
+  assert.equal((await renew(software, runtime)).ok, true);
+  const managed = await list();
+  assert.deepEqual(managed.sessions[0].runtime, { version: "1.3.0", managed: true });
+  const serialized = JSON.stringify(managed);
+  for (const secret of [
+    a.credential.run_id,
+    a.credential.token,
+    runtime.runtimeId,
+    runtime.sessionId,
+    runtime.leafId,
+  ]) {
+    assert.ok(!serialized.includes(secret), "session list cannot leak internal control identities or credentials");
+  }
+  assert.ok(["ok", "checking"].includes(managed.versions.status));
+  assert.equal((await renew({ piVersion: "1.4.0" })).ok, true);
+  assert.deepEqual((await list()).sessions[0].software, { piVersion: "1.4.0" });
 });
 
 test("two separately authorized sessions route HTTP and remove only the stopped generation", async (t) => {

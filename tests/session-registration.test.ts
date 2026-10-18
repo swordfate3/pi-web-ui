@@ -16,7 +16,13 @@ import {
 
 const credential = { run_id: "a".repeat(32), token: "b".repeat(64) };
 const proof = (text: string) => createHmac("sha256", credential.token).update(text).digest("hex");
-type Request = typeof credential & { action: string; generation: string; port?: number; sessionName?: string | null };
+type Request = typeof credential & {
+  action: string;
+  generation: string;
+  port?: number;
+  sessionName?: string | null;
+  software?: { piVersion: string; webUi?: { version: string; build?: string } };
+};
 
 async function registry(t: test.TestContext, reply: (request: Request, socket: net.Socket) => void) {
   const dir = mkdtempSync(path.join(tmpdir(), "pi-register-"));
@@ -296,6 +302,30 @@ test("stop/start fences old refreshes, callbacks and errors and serializes unreg
     );
     await lifecycle.stop();
   }
+});
+
+test("software snapshot is included in renewals without changing the route identity", async (t) => {
+  const f = await registry(t, (_request, socket) => socket.end(registeredReply));
+  const lifecycle = createSessionRegistration(f);
+  t.after(() => lifecycle.stop());
+  const software = Object.freeze({
+    piVersion: "1.3.0",
+    webUi: Object.freeze({ version: "0.1.1", build: "a".repeat(64) }),
+  });
+  await lifecycle.start(
+    43210,
+    () => {},
+    () => "Synthetic name",
+    () => undefined,
+    software,
+  );
+  await lifecycle.refresh();
+  assert.equal(f.requests.length, 2);
+  assert.deepEqual(f.requests[0].software, software);
+  assert.deepEqual(f.requests[1].software, software);
+  assert.equal(f.requests[0].generation, f.requests[1].generation);
+  assert.equal(f.requests[0].action, "register");
+  assert.equal(f.requests[1].action, "register");
 });
 
 test("getter and notification errors do not poison refresh or erase known registry metadata", async (t) => {

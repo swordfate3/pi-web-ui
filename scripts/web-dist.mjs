@@ -19,6 +19,7 @@ const SOURCE_FILES = [
   "extensions/connection-config.ts",
   "extensions/connection-listener.ts",
   "extensions/session-registration.ts",
+  "extensions/software-metadata.ts",
   "extensions/runtime-control.ts",
   "extensions/runtime-metadata.ts",
   "extensions/runtime-stdin-guard.mjs",

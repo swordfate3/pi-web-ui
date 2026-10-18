@@ -2,10 +2,11 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import net, { isIP } from "node:net";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
+import { fileURLToPath } from "node:url";
 //#region \0rolldown/runtime.js
 var __defProp = Object.defineProperty;
 var __esmMin = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
@@ -527,12 +528,57 @@ function readRuntimeMetadata(value) {
 	};
 }
 //#endregion
+//#region extensions/software-metadata.ts
+var SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+var STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+var SHA256$1 = /^[a-f0-9]{64}$/;
+function validSemver(value, stableOnly) {
+	if (typeof value !== "string" || value.length > 64) return false;
+	const match = (stableOnly ? STABLE_SEMVER : SEMVER).exec(value);
+	if (!match) return false;
+	if ([
+		match[1],
+		match[2],
+		match[3]
+	].some((part) => !Number.isSafeInteger(Number(part)))) return false;
+	return !match[4] || match[4].split(".").every((part) => !/^\d+$/.test(part) || part === "0" || !part.startsWith("0"));
+}
+function isStableSemver(value) {
+	return validSemver(value, true);
+}
+function isDisplayVersion(value) {
+	return validSemver(value, false);
+}
+function isRecord$1(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function hasExactKeys(value, keys) {
+	return Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+}
+/** Validate only bounded display metadata; this is never an authorization identity. */
+function readSoftwareMetadata(value) {
+	if (value === void 0) return void 0;
+	if (!isRecord$1(value) || !hasExactKeys(value, value.webUi === void 0 ? ["piVersion"] : ["piVersion", "webUi"]) || !isDisplayVersion(value.piVersion)) throw new Error("Invalid software metadata");
+	const webUi = value.webUi;
+	if (webUi === void 0) return Object.freeze({ piVersion: value.piVersion });
+	if (!isRecord$1(webUi) || !hasExactKeys(webUi, webUi.build === void 0 ? ["version"] : ["version", "build"])) throw new Error("Invalid software metadata");
+	if (!isStableSemver(webUi.version) || webUi.build !== void 0 && (typeof webUi.build !== "string" || !SHA256$1.test(webUi.build))) throw new Error("Invalid software metadata");
+	return Object.freeze({
+		piVersion: value.piVersion,
+		webUi: Object.freeze({
+			version: webUi.version,
+			...webUi.build === void 0 ? {} : { build: webUi.build }
+		})
+	});
+}
+//#endregion
 //#region hub/portal.ts
 var portalHtml = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pi · 会话总览</title><link rel="stylesheet" href="/hub.css"><script src="/hub-management.js" defer><\/script><script src="/hub.js" defer><\/script></head>
 <body><main><header><a class="brand" href="/sessions/" aria-label="Pi 会话首页"><span class="logo">π</span> Pi Web <span class="tag">HUB</span></a><span id="health" role="status">正在连接</span></header>
 <section class="intro"><span class="eyebrow">你的工作，随时接续</span><h1>所有会话，一个入口。</h1><p>选择正在运行的 Pi，在手机与电脑之间继续工作。</p></section>
+<section class="version-overview" aria-labelledby="versions-title"><div class="version-heading"><div><span class="eyebrow">SOFTWARE STATUS</span><h2 id="versions-title">版本与更新</h2></div><span id="version-summary" role="status">正在检查发布版本</span></div><div id="version-details" class="version-details"></div><p class="version-help">仅检查 Pi 与本 Web 扩展的公开发布版本，不自动安装或重启。会话版本为进程上报值，不等于磁盘已安装版本。构建不同不一定代表落后；其他扩展不在本次检查范围。</p></section>
 <details class="management"><summary>运行管理 <span id="management-status" role="status">正在检查能力</span></summary><p>只重启选中的 Pi 进程，加载已安装的更新；不重新创建容器、不下载更新。仅支持已保存且空闲的会话。</p><p id="management-help">管理员在 Hub 的可信终端运行 <code>pi-web-hub pair --config 配置文件</code>，生成一次性管理码（10 分钟有效）。网页登录不等于重启授权。</p><form id="management-unlock"><label for="management-code">一次性管理码</label><div class="controls"><input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="输入 32 位管理码" required><button type="submit">解锁管理</button></div></form><button id="management-logout" type="button" hidden>锁定管理</button><p id="management-notice" role="status" aria-live="polite"></p><div id="management-results" aria-live="polite"></div></details>
 <section class="toolbar" aria-label="会话操作"><div><h2>在线会话 <span id="count">0</span></h2><p id="updated">等待登记</p></div><div class="controls"><label><span class="sr-only">搜索会话</span><input id="search" type="search" placeholder="搜索项目或会话…"></label><button id="refresh" type="button">刷新</button></div></section>
 <div id="notice" role="status"></div><section id="sessions" class="grid" aria-label="在线 Pi 会话"></section>
@@ -552,6 +598,7 @@ function renderPortalHtml(admin, chatUrl, managementUrl) {
 var portalJs = `(() => {
   const get = (id) => document.getElementById(id);
   let items = [];
+  let versions = { status: 'checking' };
   let loading = false;
   let refreshAgain = false;
   let lastRender = '';
@@ -565,13 +612,71 @@ var portalJs = `(() => {
   // Legacy launchers append a short run ID to the grant's project label.
   // Display-only: keep the original API label and capability route untouched.
   const projectLabel = (label) => label.replace(/ · [a-f0-9]{8}$/i, '').trim() || label;
+  const element = (tag, className, text) => {
+    const node = document.createElement(tag); node.className = className; node.textContent = text; return node;
+  };
+  const semver = (version) => {
+    if (typeof version !== 'string' || version.length > 64 || !/^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$/.test(version)) return null;
+    const parts = version.split('+')[0].split('.').map(Number); return parts.every(Number.isSafeInteger) ? parts : null;
+  };
+  function comparison(current, target, build) {
+    if (!current) return { tone: 'unknown', text: '版本未上报' };
+    if (!target) return { tone: 'unknown', text: '更新状态未知' };
+    const a = semver(current.version); const b = semver(target.version);
+    if (!a || !b) return { tone: 'unknown', text: '版本无法比较' };
+    for (let i = 0; i < 3; i++) {
+      if (a[i] < b[i]) return { tone: 'update', text: '可更新至 ' + target.version };
+      if (a[i] > b[i]) return { tone: 'different', text: '高于发布版本' };
+    }
+    if (build) {
+      if (!current.build || !target.build) return { tone: 'unknown', text: '构建未上报 · 无法确认一致' };
+      if (current.build !== target.build) return { tone: 'different', text: '与发布构建不同' };
+    }
+    return { tone: 'current', text: '与发布版本一致' };
+  }
+  function versionLine(label, current, target, build) {
+    const line = element('span', 'version-line', '');
+    line.append(element('span', 'version-label', label));
+    const value = element('span', 'version-value', current?.version || '未上报');
+    if (current?.build) { value.textContent += ' · ' + current.build.slice(0, 8); value.title = '构建 SHA-256：' + current.build; }
+    const result = comparison(current, target, build);
+    const badge = element('span', 'version-badge ' + result.tone, result.text);
+    if (result.tone === 'different') badge.title = '构建或版本不同不证明落后，可能来自本地修改、其他分支或较新开发版本。';
+    else if (result.tone === 'update') badge.title = label === 'Pi' ? '检测到较新的公开稳定版本；安装和进程刷新仍需独立的更新流程。' : '检测到较新的包版本；更新安装不代表运行中的扩展或 Hub 已重新加载。';
+    line.append(value, badge);
+    return line;
+  }
+  function renderVersions() {
+    const known = versions.status === 'ok' || versions.status === 'partial';
+    const targetPi = known ? versions.pi : undefined;
+    const targetWeb = known ? versions.webUi : undefined;
+    let updates = 0; let differences = 0;
+    for (const session of items) {
+      const pi = session.software?.piVersion || session.runtime?.version;
+      const states = [comparison(pi ? { version: pi } : undefined, targetPi, false), comparison(session.software?.webUi, targetWeb, true)];
+      if (states.some((s) => s.tone === 'update')) updates++;
+      if (states.some((s) => s.tone === 'different')) differences++;
+    }
+    const hubState = comparison(versions.hub, targetWeb, true);
+    let status = versions.status === 'checking' ? '正在检查发布版本' : !known ? '发布检查不可用 · 更新状态未知' : versions.status === 'partial' ? '部分发布信息不可用' : '已检查公开发布版本';
+    if (updates) status += ' · ' + updates + ' 个会话可更新';
+    if (differences) status += ' · ' + differences + ' 个会话存在版本差异';
+    if (hubState.tone === 'update' || hubState.tone === 'different') status += ' · Hub 存在版本差异';
+    const summary = get('version-summary'); summary.textContent = status;
+    summary.className = 'version-summary' + (updates ? ' has-update' : '');
+    const details = get('version-details'); details.replaceChildren();
+    details.append(versionLine('Hub', versions.hub, targetWeb, true));
+    details.append(element('span', 'release-target', '公开发布：Pi ' + (targetPi?.version || '未知') + ' / Web 扩展 ' + (targetWeb?.version || '未知') + (targetWeb?.build ? ' · ' + targetWeb.build.slice(0, 8) : '')));
+    if (versions.checkedAt) details.append(element('span', 'release-target', '检查时间：' + new Date(versions.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' · 发布检查最多每 5 分钟一次'));
+  }
   function render() {
     const query = get('search').value.toLocaleLowerCase();
     const visible = items.filter((s) => projectLabel(s.label).toLocaleLowerCase().includes(query) || (s.sessionName || '未命名会话').toLocaleLowerCase().includes(query));
     get('notice').textContent = items.length && !visible.length ? '没有匹配的会话，请尝试其他关键词。' : '';
-    const renderKey = JSON.stringify([items, query]);
+    const renderKey = JSON.stringify([items, query, versions]);
     if (renderKey === lastRender) return;
     lastRender = renderKey;
+    renderVersions();
     get('sessions').replaceChildren();
     get('count').textContent = String(items.length);
     get('empty').hidden = items.length !== 0;
@@ -586,9 +691,13 @@ var portalJs = `(() => {
       const name = document.createElement('span'); name.className = 'session-name'; name.textContent = session.sessionName || '未命名会话'; name.title = name.textContent;
       const since = document.createElement('span'); since.textContent = ' · ' + new Date(session.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       meta.append(name, since);
-      if (session.runtime) {
-        const version = document.createElement('span'); version.textContent = ' · Pi ' + session.runtime.version + (session.runtime.managed ? ' · 受管运行' : ' · 不支持重启'); meta.append(version);
-      }
+      const known = versions.status === 'ok' || versions.status === 'partial';
+      const software = element('span', 'version-lines', '');
+      const piVersion = session.software?.piVersion || session.runtime?.version;
+      software.append(versionLine('Pi', piVersion ? { version: piVersion } : undefined, known ? versions.pi : undefined, false));
+      software.append(versionLine('Web 扩展', session.software?.webUi, known ? versions.webUi : undefined, true));
+      if (session.runtime?.managed) software.append(element('span', 'runtime-note', '受管运行 · 重启资格需另行检查'));
+      meta.append(software);
       const link = document.createElement('a'); link.className = 'open'; link.href = session.path; link.textContent = '打开会话 ↗';
       link.addEventListener('click', (event) => {
         if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -603,12 +712,12 @@ var portalJs = `(() => {
     try {
       const response = await fetch('/api/sessions', { cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error();
-      const data = await response.json(); items = data.sessions; render();
+      const data = await response.json(); items = data.sessions; versions = data.versions || { status: 'unavailable' }; render();
       get('health').textContent = '● 总管已连接'; get('health').className = 'connected';
       get('updated').textContent = '刚刚更新 · 每 5 秒自动刷新';
     } catch {
       // Do not leave stale sessions looking online when the hub is unavailable.
-      items = []; render(); get('health').textContent = '连接中断'; get('health').className = 'disconnected';
+      items = []; versions = { status: 'unavailable' }; render(); get('health').textContent = '连接中断'; get('health').className = 'disconnected';
       get('notice').textContent = '暂时无法连接总管。请检查服务，或点击刷新重试。';
     } finally {
       loading = false; get('refresh').disabled = false;
@@ -727,7 +836,7 @@ var portalManagementJs = `(() => {
   void (async () => { try { auth = await api('status'); updateAuth(); renderResults(); await poll(); } catch { notice('无法查询运行管理能力。'); } })();
   setInterval(poll, 2000);
 })();`;
-var portalCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#21312c;background:#f6f8f5;font-synthesis:none}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 90% 0,#e6efdf,transparent 55%)}main{max-width:1080px;margin:auto;padding:32px 40px 24px;min-height:100dvh}header{display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:650;color:inherit;text-decoration:none}.logo{display:grid;place-items:center;border-radius:12px;background:#234c3c;color:#e8f3dd;width:42px;height:42px;font:32px Georgia,serif}.tag{font-size:10px;letter-spacing:2px;color:#758478;border:1px solid #d7dfd5;border-radius:5px;padding:4px 6px}#health{font-size:12px;color:#697c70}.connected{color:#347652!important}.disconnected{color:#a35437!important}.intro{padding:68px 0 48px}.eyebrow{font-size:12px;letter-spacing:2px;color:#718478}h1{margin:14px 0 16px;font-size:clamp(30px,4vw,46px);font-weight:600;letter-spacing:-1.5px}.intro p{margin:0;color:#718076;font-size:15px;line-height:1.8}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}h2{font-size:17px;font-weight:600;margin:0}#count{display:inline-grid;place-items:center;min-width:25px;height:23px;margin-left:8px;background:#e2ebe0;border-radius:7px;color:#476347;font-size:12px}#updated{font-size:12px;color:#879287;margin:8px 0 0}.controls{display:flex;gap:10px}input,button{font:inherit;border:1px solid #dce3d9;border-radius:9px;background:#fff;padding:11px 14px;font-size:13px;color:#415447}input{width:230px}button{cursor:pointer}button:hover{background:#eef3eb}button:disabled{opacity:.55}input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #93ad91;outline-offset:3px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}.card{background:#ffffffdc;border:1px solid #e0e7dc;border-radius:16px;padding:24px;box-shadow:0 6px 24px #29412c04;min-width:0}.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.project-icon{display:grid;place-items:center;width:40px;height:40px;background:#edf3e8;color:#587452;border-radius:11px;font-size:23px}.online{font-size:11px;color:#39734e;background:#eff5eb;border-radius:20px;padding:5px 10px}.online:before{content:'●';font-size:8px;margin-right:5px}.card h3{font-size:18px;font-weight:600;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{font-size:12px;color:#899587;margin:10px 0 24px;display:flex;min-width:0}.session-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta>span:last-child{flex-shrink:0}.open{display:block;text-align:center;color:#365b42;background:#f2f6ee;border:1px solid #e4ebdf;text-decoration:none;border-radius:8px;padding:11px;font-size:13px}.open:hover{background:#e7efdf}.empty{text-align:center;border:1px dashed #d6dfd0;border-radius:16px;padding:55px 20px;background:#ffffff70}.empty-icon{font:44px Georgia,serif;color:#8a9e82}.empty h3{font-size:17px;font-weight:500;margin:18px 0 10px}.empty p{font-size:13px;color:#7a8978;line-height:1.9}#notice{font-size:13px;color:#a35c3d;line-height:1.6;margin-bottom:14px}#notice:empty{display:none}footer{display:flex;justify-content:space-between;gap:15px;border-top:1px solid #e0e6db;margin-top:48px;padding-top:20px;font-size:11px;color:#96a18f}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}[hidden]{display:none!important}@media(max-width:600px){main{padding:24px 20px}header{gap:8px}.brand{font-size:17px;gap:8px}.logo{width:36px;height:36px;font-size:27px}#health{font-size:11px}.intro{padding:48px 0 34px}h1{letter-spacing:-1px;line-height:1.35}.toolbar{flex-direction:column;align-items:stretch;gap:18px}.controls label{flex:1;min-width:0}input{width:100%;min-width:0}.grid{grid-template-columns:1fr}.card{padding:22px}.card-top{margin-bottom:18px}footer{flex-direction:column;margin-top:32px;line-height:1.6}}`;
+var portalCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#21312c;background:#f6f8f5;font-synthesis:none}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 90% 0,#e6efdf,transparent 55%)}main{max-width:1080px;margin:auto;padding:32px 40px 24px;min-height:100dvh}header{display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:650;color:inherit;text-decoration:none}.logo{display:grid;place-items:center;border-radius:12px;background:#234c3c;color:#e8f3dd;width:42px;height:42px;font:32px Georgia,serif}.tag{font-size:10px;letter-spacing:2px;color:#758478;border:1px solid #d7dfd5;border-radius:5px;padding:4px 6px}#health{font-size:12px;color:#697c70}.connected{color:#347652!important}.disconnected{color:#a35437!important}.intro{padding:48px 0 34px}.eyebrow{font-size:12px;letter-spacing:2px;color:#718478}h1{margin:14px 0 16px;font-size:clamp(30px,4vw,46px);font-weight:600;letter-spacing:-1.5px}.intro p{margin:0;color:#718076;font-size:15px;line-height:1.8}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}h2{font-size:17px;font-weight:600;margin:0}#count{display:inline-grid;place-items:center;min-width:25px;height:23px;margin-left:8px;background:#e2ebe0;border-radius:7px;color:#476347;font-size:12px}#updated{font-size:12px;color:#879287;margin:8px 0 0}.controls{display:flex;gap:10px}input,button{font:inherit;border:1px solid #dce3d9;border-radius:9px;background:#fff;padding:11px 14px;font-size:13px;color:#415447}input{width:230px}button{cursor:pointer}button:hover{background:#eef3eb}button:disabled{opacity:.55}input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #93ad91;outline-offset:3px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}.card{display:flex;flex-direction:column;background:#ffffffdc;border:1px solid #e0e7dc;border-radius:16px;padding:24px;box-shadow:0 6px 24px #29412c04;min-width:0}.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.project-icon{display:grid;place-items:center;width:40px;height:40px;background:#edf3e8;color:#587452;border-radius:11px;font-size:23px}.online{font-size:11px;color:#39734e;background:#eff5eb;border-radius:20px;padding:5px 10px}.online:before{content:'●';font-size:8px;margin-right:5px}.card h3{font-size:18px;font-weight:600;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{font-size:12px;color:#899587;margin:10px 0 20px;display:flex;flex-wrap:wrap;min-width:0;align-items:baseline}.session-name{max-width:calc(100% - 52px);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card>.open{margin-top:auto}.meta>span:nth-child(2){flex-shrink:0}.version-lines{display:flex;flex-direction:column;gap:9px;flex-basis:100%;min-width:0;margin-top:18px;padding-top:16px;border-top:1px solid #edf0e9}.version-line{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;min-width:0;line-height:1.65}.version-label{font-weight:600;color:#64765f;min-width:48px}.version-value{color:#415447;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;min-width:0}.version-badge{border-radius:6px;padding:2px 7px;font-size:10px;line-height:1.6;overflow-wrap:anywhere}.version-badge.current{color:#356044;background:#edf4e9}.version-badge.update{color:#8a531d;background:#fff1d7}.version-badge.different{color:#805d2f;background:#f6efe0}.version-badge.unknown{color:#778174;background:#f1f3ef}.runtime-note{font-size:10px;color:#879180}.version-overview{border:1px solid #dce5d7;border-radius:16px;padding:22px 24px;background:#ffffffa8;margin-bottom:20px}.version-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}.version-heading .eyebrow{font-size:9px;letter-spacing:1.5px}.version-heading h2{margin-top:6px}.version-summary{font-size:12px;color:#72816e;line-height:1.8}.version-summary.has-update{color:#8a531d}.version-details{display:flex;flex-direction:column;gap:10px;margin-top:18px;font-size:12px}.release-target{color:#7c8975;font-size:11px;line-height:1.8;overflow-wrap:anywhere}.version-help{font-size:11px;color:#7c8975;line-height:1.8;margin:14px 0 0;padding-top:12px;border-top:1px solid #e8eee3}.open{display:block;text-align:center;color:#365b42;background:#f2f6ee;border:1px solid #e4ebdf;text-decoration:none;border-radius:8px;padding:11px;font-size:13px}.open:hover{background:#e7efdf}.empty{text-align:center;border:1px dashed #d6dfd0;border-radius:16px;padding:55px 20px;background:#ffffff70}.empty-icon{font:44px Georgia,serif;color:#8a9e82}.empty h3{font-size:17px;font-weight:500;margin:18px 0 10px}.empty p{font-size:13px;color:#7a8978;line-height:1.9}#notice{font-size:13px;color:#a35c3d;line-height:1.6;margin-bottom:14px}#notice:empty{display:none}footer{display:flex;justify-content:space-between;gap:15px;border-top:1px solid #e0e6db;margin-top:48px;padding-top:20px;font-size:11px;color:#96a18f}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}[hidden]{display:none!important}@media(max-width:600px){main{padding:24px 20px}header{gap:8px}.brand{font-size:17px;gap:8px}.logo{width:36px;height:36px;font-size:27px}#health{font-size:11px}.intro{padding:48px 0 34px}h1{letter-spacing:-1px;line-height:1.35}.toolbar{flex-direction:column;align-items:stretch;gap:18px}.controls label{flex:1;min-width:0}input{width:100%;min-width:0}.grid{grid-template-columns:1fr}.card{padding:22px}.card-top{margin-bottom:18px}footer{flex-direction:column;margin-top:32px;line-height:1.6}}`;
 //#endregion
 //#region hub/restart-api.ts
 init_config();
@@ -1017,6 +1126,253 @@ function createRestartApi(config, hooks) {
 	};
 }
 //#endregion
+//#region hub/version-status.ts
+var SHA256 = /^[a-f0-9]{64}$/;
+var COMMIT = /^[a-f0-9]{40}$/;
+var CACHE_MS = 300 * 1e3;
+var REQUEST_TIMEOUT_MS = 8e3;
+var MAX_BODY_BYTES = 256 * 1024;
+var PACKAGE_NAME = "@kkkiio/pi-web-ui";
+var PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
+function isRecord(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function boundedJson(response) {
+	return (async () => {
+		if (!response.ok || response.redirected) {
+			await response.body?.cancel().catch(() => {});
+			throw new Error("Version source unavailable");
+		}
+		const length = response.headers.get("content-length");
+		if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_BODY_BYTES)) {
+			await response.body?.cancel().catch(() => {});
+			throw new Error("Version source response too large");
+		}
+		if (!response.body) throw new Error("Version source response unavailable");
+		const reader = response.body.getReader();
+		const chunks = [];
+		let size = 0;
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				size += value.byteLength;
+				if (size > MAX_BODY_BYTES) {
+					await reader.cancel();
+					throw new Error("Version source response too large");
+				}
+				chunks.push(value);
+			}
+		} finally {
+			reader.releaseLock();
+		}
+		try {
+			return JSON.parse(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8"));
+		} catch {
+			throw new Error("Invalid version source response");
+		}
+	})();
+}
+async function getJson(fetcher, url, signal, headers, timeoutMs) {
+	const controller = new AbortController();
+	const requestSignal = AbortSignal.any([signal, controller.signal]);
+	let timer;
+	const expired = new Promise((_resolve, reject) => {
+		timer = setTimeout(() => {
+			controller.abort();
+			reject(/* @__PURE__ */ new Error("Version source timed out"));
+		}, timeoutMs);
+		timer.unref?.();
+	});
+	try {
+		return await Promise.race([Promise.resolve().then(async () => {
+			return boundedJson(await fetcher(url, {
+				method: "GET",
+				redirect: "error",
+				signal: requestSignal,
+				headers: {
+					Accept: "application/json",
+					...headers
+				}
+			}));
+		}), expired]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+/** Read only the fixed, public package sources; a single immutable Git revision supplies Web UI version and build. */
+async function fetchLatestVersions(fetcher, signal, requestTimeoutMs = 3e3) {
+	const settled = await Promise.allSettled([getJson(fetcher, "https://registry.npmjs.org/@earendil-works%2Fpi-coding-agent/latest", signal, void 0, requestTimeoutMs), getJson(fetcher, "https://api.github.com/repos/swordfate3/pi-web-ui/git/ref/heads/main", signal, {
+		Accept: "application/vnd.github+json",
+		"X-GitHub-Api-Version": "2022-11-28",
+		"User-Agent": "pi-web-ui-hub-version-check"
+	}, requestTimeoutMs)]);
+	let pi;
+	const piPayload = settled[0].status === "fulfilled" ? settled[0].value : void 0;
+	if (isRecord(piPayload) && piPayload.name === PI_PACKAGE_NAME && isStableSemver(piPayload.version)) pi = Object.freeze({ version: piPayload.version });
+	const refPayload = settled[1].status === "fulfilled" ? settled[1].value : void 0;
+	const object = isRecord(refPayload) ? refPayload.object : void 0;
+	let webUi;
+	if (isRecord(object) && object.type === "commit" && typeof object.sha === "string" && COMMIT.test(object.sha)) {
+		const revision = object.sha;
+		const webResults = await Promise.allSettled([getJson(fetcher, `https://raw.githubusercontent.com/swordfate3/pi-web-ui/${revision}/package.json`, signal, void 0, requestTimeoutMs), getJson(fetcher, `https://raw.githubusercontent.com/swordfate3/pi-web-ui/${revision}/dist/build-manifest.json`, signal, void 0, requestTimeoutMs)]);
+		const webPayload = webResults[0].status === "fulfilled" ? webResults[0].value : void 0;
+		const manifestPayload = webResults[1].status === "fulfilled" ? webResults[1].value : void 0;
+		const source = isRecord(manifestPayload) ? manifestPayload.source : void 0;
+		if (isRecord(webPayload) && webPayload.name === PACKAGE_NAME && isStableSemver(webPayload.version) && isRecord(source) && typeof source.sha256 === "string" && SHA256.test(source.sha256)) webUi = Object.freeze({
+			version: webPayload.version,
+			build: source.sha256
+		});
+	}
+	if (!pi && !webUi) throw new Error("Public version metadata unavailable");
+	return Object.freeze({
+		...pi ? { pi } : {},
+		...webUi ? { webUi } : {}
+	});
+}
+/** Capture the Hub package and its own build fingerprint; never infer it from the Pi child runtime. */
+function captureHubMetadata(moduleUrl = import.meta.url) {
+	let directory = path.dirname(fileURLToPath(moduleUrl));
+	let root;
+	for (let depth = 0; depth < 8; depth++) {
+		try {
+			const packagePath = path.join(directory, "package.json");
+			if (statSync(packagePath).size > 32 * 1024) throw new Error();
+			const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
+			if (isRecord(manifest) && manifest.name === PACKAGE_NAME && isStableSemver(manifest.version)) {
+				root = directory;
+				break;
+			}
+		} catch {}
+		const parent = path.dirname(directory);
+		if (parent === directory) break;
+		directory = parent;
+	}
+	if (!root) return void 0;
+	try {
+		const packagePath = path.join(root, "package.json");
+		const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
+		let build;
+		try {
+			const buildPath = path.join(root, "dist", "build-manifest.json");
+			if (statSync(buildPath).size > MAX_BODY_BYTES) throw new Error();
+			const buildManifest = JSON.parse(readFileSync(buildPath, "utf8"));
+			const source = isRecord(buildManifest) ? buildManifest.source : void 0;
+			if (isRecord(source) && typeof source.sha256 === "string" && SHA256.test(source.sha256)) build = source.sha256;
+		} catch {}
+		return Object.freeze({
+			version: manifest.version,
+			...build ? { build } : {}
+		});
+	} catch {
+		return;
+	}
+}
+/** Background-only, single-flight version lookup with bounded requests and cooldown even after failures. */
+function createVersionStatus(options = {}) {
+	const now = options.now ?? Date.now;
+	const cacheMs = Math.max(CACHE_MS, options.cacheMs ?? 0);
+	const timeoutMs = Math.max(1, options.timeoutMs ?? REQUEST_TIMEOUT_MS);
+	const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
+	const source = options.source ?? (process.env.PI_OFFLINE === "1" ? async (_signal) => {
+		throw new Error("Version checks disabled in offline mode");
+	} : (signal) => fetchLatestVersions(fetcher, signal));
+	const localHub = options.hub ?? captureHubMetadata();
+	const hub = localHub ? Object.freeze({ ...localHub }) : void 0;
+	let status = Object.freeze({
+		status: "checking",
+		...hub ? { hub } : {}
+	});
+	let inFlight;
+	let timer;
+	let controller;
+	let activeTimeout;
+	let rejectActive;
+	let nextCheckAt = 0;
+	let closed = false;
+	const check = () => {
+		if (closed || inFlight) return inFlight ?? Promise.resolve();
+		if (now() < nextCheckAt) return Promise.resolve();
+		if (timer) clearTimeout(timer);
+		timer = void 0;
+		controller = new AbortController();
+		const active = controller;
+		let rejectTimeout;
+		const expired = new Promise((_resolve, reject) => {
+			rejectTimeout = reject;
+		});
+		rejectActive = rejectTimeout;
+		activeTimeout = setTimeout(() => {
+			active.abort();
+			rejectTimeout(/* @__PURE__ */ new Error("Version check timed out"));
+		}, timeoutMs);
+		activeTimeout.unref?.();
+		inFlight = (async () => {
+			try {
+				const result = await Promise.race([Promise.resolve().then(() => source(active.signal)), expired]);
+				if (closed || active.signal.aborted) return;
+				if (!isRecord(result) || Object.keys(result).some((key) => key !== "pi" && key !== "webUi")) throw new Error("Invalid version source result");
+				const pi = result.pi;
+				const webUi = result?.webUi;
+				const validPi = isRecord(pi) && Object.keys(pi).join(",") === "version" && isStableSemver(pi.version);
+				const validWeb = isRecord(webUi) && Object.keys(webUi).sort().join(",") === "build,version" && isStableSemver(webUi.version) && typeof webUi.build === "string" && SHA256.test(webUi.build);
+				if (!validPi && !validWeb) throw new Error("Invalid version source result");
+				status = Object.freeze({
+					status: validPi && validWeb ? "ok" : "partial",
+					checkedAt: now(),
+					...validPi ? { pi: Object.freeze({ version: pi.version }) } : {},
+					...validWeb ? { webUi: Object.freeze({
+						version: webUi.version,
+						build: webUi.build
+					}) } : {},
+					...hub ? { hub } : {}
+				});
+			} catch {
+				if (closed) return;
+				status = Object.freeze({
+					status: "unavailable",
+					checkedAt: now(),
+					...hub ? { hub } : {}
+				});
+			} finally {
+				if (activeTimeout) clearTimeout(activeTimeout);
+				activeTimeout = void 0;
+				rejectActive = void 0;
+				if (controller === active) controller = void 0;
+				inFlight = void 0;
+				if (!closed) {
+					nextCheckAt = now() + cacheMs;
+					timer = setTimeout(() => {
+						timer = void 0;
+						check();
+					}, Math.max(0, nextCheckAt - now()));
+					timer.unref?.();
+				}
+			}
+		})();
+		return inFlight;
+	};
+	return {
+		snapshot: () => status,
+		ensureStarted: () => {
+			check();
+		},
+		/** Test/maintenance seam. HTTP handlers use snapshot only and never await this. */
+		refresh: check,
+		close: () => {
+			if (closed) return;
+			closed = true;
+			if (timer) clearTimeout(timer);
+			timer = void 0;
+			if (activeTimeout) clearTimeout(activeTimeout);
+			activeTimeout = void 0;
+			controller?.abort();
+			rejectActive?.(/* @__PURE__ */ new Error("Version checker closed"));
+			rejectActive = void 0;
+		}
+	};
+}
+//#endregion
 //#region hub/server.ts
 init_config();
 var mac = (token, value) => createHmac("sha256", token).update(value).digest("hex");
@@ -1092,7 +1448,7 @@ function backendHeaders(request, session) {
 	return headers;
 }
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
-async function startHub(config) {
+async function startHub(config, options = {}) {
 	if (config.management) managementConfig(config.management, config.port, config.publicUrl);
 	privateDirectory(config.runtimeDir);
 	const lock = path.join(config.runtimeDir, "hub.lock");
@@ -1108,7 +1464,7 @@ async function startHub(config) {
 			flag: "wx",
 			mode: 384
 		});
-		const hub = await startLockedHub(config);
+		const hub = await startLockedHub(config, options);
 		let closing;
 		return {
 			...hub,
@@ -1122,7 +1478,7 @@ async function startHub(config) {
 		throw error;
 	}
 }
-async function startLockedHub(config) {
+async function startLockedHub(config, options) {
 	privateDirectory(config.stateDir);
 	privateDirectory(config.runtimeDir);
 	privateDirectory(path.join(config.stateDir, "grants"));
@@ -1160,6 +1516,7 @@ async function startLockedHub(config) {
 	};
 	let stopped = false;
 	let pending = Promise.resolve();
+	const versionStatus = createVersionStatus(options.versions);
 	let url = "";
 	let managementUrl;
 	const restarting = /* @__PURE__ */ new Map();
@@ -1297,6 +1654,7 @@ async function startLockedHub(config) {
 		if (value.sessionName !== void 0 && value.sessionName !== null && (typeof value.sessionName !== "string" || value.sessionName.length > 256)) throw new Error("Registration rejected");
 		const sessionName = typeof value.sessionName === "string" ? value.sessionName.replace(/\p{Cc}/gu, " ").trim() || null : null;
 		const runtime = value.runtime === void 0 ? void 0 : readRuntimeMetadata(value.runtime);
+		const software = value.software === void 0 ? void 0 : readSoftwareMetadata(value.software);
 		const port = Number(value.port);
 		if (owner) {
 			if (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port) throw new Error("ended generation");
@@ -1317,6 +1675,7 @@ async function startLockedHub(config) {
 			session.expires = Date.now() + config.leaseMs;
 			session.sessionName = sessionName;
 			session.runtime = runtime;
+			session.software = software;
 		} else sessions.set(generation, {
 			grant,
 			generation,
@@ -1324,7 +1683,8 @@ async function startLockedHub(config) {
 			expires: Date.now() + config.leaseMs,
 			since: Date.now(),
 			sessionName,
-			runtime
+			runtime,
+			software
 		});
 		pruneHandoffs();
 		if (!session) {
@@ -1560,6 +1920,7 @@ async function startLockedHub(config) {
 				return;
 			}
 			if (pathname === "/api/sessions") {
+				versionStatus.ensureStarted();
 				const items = [...sessions.keys()].map(current).filter((s) => Boolean(s)).map((s) => ({
 					label: s.grant.label,
 					sessionName: s.sessionName,
@@ -1569,12 +1930,16 @@ async function startLockedHub(config) {
 					...s.runtime ? { runtime: {
 						version: s.runtime.version,
 						managed: s.runtime.managed
-					} } : {}
+					} } : {},
+					...s.software ? { software: s.software } : {}
 				}));
 				response.writeHead(200, {
 					"Content-Type": "application/json",
 					"Cache-Control": "no-store"
-				}).end(JSON.stringify({ sessions: items }));
+				}).end(JSON.stringify({
+					sessions: items,
+					versions: versionStatus.snapshot()
+				}));
 				return;
 			}
 			const asset = pathname === "/sessions/" ? ["text/html", renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl)] : pathname === "/hub.js" ? ["text/javascript", portalJs] : admin && pathname === "/hub-management.js" ? ["text/javascript", portalManagementJs] : pathname === "/hub.css" ? ["text/css", portalCss + portalManagementCss] : void 0;
@@ -1757,6 +2122,7 @@ async function startLockedHub(config) {
 			if (closing) return closing;
 			stopped = true;
 			handoffs.clear();
+			versionStatus.close();
 			clearInterval(sweep);
 			for (const id of sessions.keys()) retire(id);
 			for (const peer of peers) peer.destroy();

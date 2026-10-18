@@ -1,4 +1,4 @@
-"""Separate synthetic TUI guard acceptance; reuse, never edit, main's launcher."""
+"""Synthetic TUI guard acceptance, optionally against PI_RUNTIME_TEST_IMAGE."""
 import importlib.util
 import json
 import os
@@ -30,11 +30,13 @@ class GuardTui(unittest.TestCase):
         cap = self.command("issue", "--label", "Guard synthetic", "--output", str(self.directory / "cap.json"))
         run = self.directory / "run"; run.mkdir()
         original_exec = os.execvpe
+        image = os.environ.get("PI_RUNTIME_TEST_IMAGE")
         def with_probe(executable, argv, env):
-            original_exec(executable, [*argv, "--extension", str(ROOT / "e2e/fixtures/stdin-guard-probe.ts")], env)
+            probe = "/workspace/.test-package/e2e/fixtures/stdin-guard-probe.ts" if image else str(ROOT / "e2e/fixtures/stdin-guard-probe.ts")
+            original_exec(executable, [*argv, "--extension", probe], env)
         # Child launch only: no production API or SDK method is mocked.
         with patch.object(fixture.os, "execvpe", with_probe):
-            self.tui = fixture.RealTui(run, hub, cap, "guard")
+            self.tui = fixture.RealTui(run, hub, cap, "guard", docker_image=image)
         self.old = fixture.wait_for(self.tui.status)
         self.assertFalse(self.old["busy"], "fresh preloaded TUI must be eligible: " + (self.tui.workspace / "guard-start.json").read_text() + " version=" + self.old["version"])
 
@@ -49,6 +51,26 @@ class GuardTui(unittest.TestCase):
 
     def ipc(self, action, **extra):
         # Only this fixture's synthetic child credential; never logged or persisted.
+        if self.tui.container:
+            script = """import json, socket, sys
+from pathlib import Path
+child = Path('/proc/1/task/1/children').read_text().split()[0]
+environment = dict(item.split(b'=', 1) for item in Path('/proc/' + child + '/environ').read_bytes().split(b'\\0') if b'=' in item)
+request = json.loads(sys.argv[1])
+request['token'] = environment[b'PI_RUNTIME_CHILD_TOKEN'].decode()
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.settimeout(3)
+    connection.connect('/run/pi-runtime/extension.sock')
+    connection.sendall((json.dumps(request) + '\\n').encode())
+    raw = b''
+    while b'\\n' not in raw:
+        raw += connection.recv(16384)
+    print(json.dumps(json.loads(raw)))
+"""
+            result = subprocess.check_output(["docker", "exec", "--user", "1000:1000", self.tui.container,
+                                              "/usr/bin/python3", "-I", "-c", script,
+                                              json.dumps({"action": action, **extra})], text=True, timeout=5)
+            return json.loads(result)
         children = Path(f"/proc/{self.tui.pid}/task/{self.tui.pid}/children").read_text().split()
         child = children[0]
         environment = dict(item.split(b"=", 1) for item in Path(f"/proc/{child}/environ").read_bytes().split(b"\0") if b"=" in item)

@@ -407,3 +407,9 @@
 - 主线程重建 dist 并验证 manifest；重新执行 424 单测（423 pass / 1 skip）、两套类型检查、Biome 0 error（30 warnings / 1 info）、当前 SDK 修订及翻页 integration 2/2、portable integration 8/8、Python gateway 15 pass / 1 skip、真实 Git install/update/tarball/Hub lifecycle fixture 及 11 类 stale-input 拒绝，均通过。
 - 使用最终构建和隔离真实 Pi 1.3.0 的 faux provider，在 Browser 1440×900 / 390×844 检查 system patch 后 2/2、切旧 1/2 再切新、继续两轮聊天；截图直接查看。原生 CDP click 未生效，使用 DOM button.click，无 React/store 注入；不称完整自动化浏览器 E2E。临时服务和专用标签已停止，不影响用户会话。
 - 用户授权推进 Git 推送与本机包更新；不含当前真实 Pi reload、新 Hub Gate 部署或容器重启。新扩展需目标 Pi 空闲后由用户 reload 生效，不声称已解除真实旧锁。完整结果和限制见[修订 system patch 验证](validation/revision-system-patch.md)。
+
+### 2026-10-18 · Pi 1.3.0 安全刷新兼容
+
+- 将运行控制适配器从仅允许已审核的 Pi 1.1.0 扩展为允许 1.1.0／1.3.0，修复实际安装 1.3.0 后始终报告 busy 的兼容问题。未知 SDK 继续拒绝，不放宽终端输入、异步命令、prepare 或会话身份保护。
+- 独立 Docker Pi 1.3.0 验证同容器内子进程刷新后精确保留 session／leaf／model／thinking、无提示重放、另一实例不受影响；6 项真实终端输入和异步命令保护验收通过。完整默认单测 425 项（424 pass／1 optional skip），类型检查、构建、dist 对应性和检查无 error，已有 warnings 保留。
+- 本次只修改运行控制后端和测试，未改变网页布局。代码位于独立本地分支，尚未推送远程；不声称当前旧生产容器已采用新 supervisor 或已刷新 Pi。与全局更新门控的部署状态由宿主运维记录另行说明。[验证和边界](validation/runtime-control-1.3.md)。

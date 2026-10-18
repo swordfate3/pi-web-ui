@@ -107,6 +107,22 @@ test("prepare freezes one exact saved session and only a matching cancel release
   }
 });
 
+test("audited Pi 1.3.0 can prepare while unknown versions stay blocked", async () => {
+  const f = await fixture();
+  try {
+    f.set({ version: "1.3.0" });
+    assert.equal((await f.request({ action: "snapshot" })).result.busy, false);
+    const expected = { runtime_id: "runtime-1", session_id: "session-1", leaf_id: "leaf-1" };
+    assert.equal((await f.request({ action: "prepare", operation_id: operation, expected })).ok, true);
+    assert.equal((await f.request({ action: "cancel", operation_id: operation })).ok, true);
+    f.set({ version: "99.0.0" });
+    assert.equal((await f.request({ action: "snapshot" })).result.busy, true);
+    assert.equal((await f.request({ action: "prepare", operation_id: operation, expected })).ok, false);
+  } finally {
+    await f.close();
+  }
+});
+
 for (const state of [{ idle: false }, { pending: true }, { busy: true }, { session_file: null }]) {
   test(`prepare refuses unsafe state ${JSON.stringify(state)}`, async () => {
     const f = await fixture();

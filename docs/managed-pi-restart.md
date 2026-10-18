@@ -194,6 +194,13 @@ the execution budget nor a still-live browser connection's recovery budget.
 
 ## Conservative terminal eligibility
 
+The runtime-control adapter currently audits Pi **1.1.0 and 1.3.0**. Both retain
+the image-owned stdin guard; unknown SDK versions remain ineligible rather than
+being assumed compatible. Pi 1.3.0 was checked using an isolated real Docker TUI
+for exact session/leaf recovery and terminal/async-command protection. Updating
+this allowlist requires the same real-runtime validation, not just a version
+string change. See [the validation record](validation/runtime-control-1.3.md).
+
 SDK idle state cannot prove that arbitrary terminal commands, extension dialogs
 or background shell operations have finished. The image-owned guard observes the
 verified SDK stdin-data path before listeners and permanently marks unverified

@@ -1884,8 +1884,8 @@ async function fetchLatestVersions(fetcher, signal, requestTimeoutMs = 2e3) {
 function captureHubMetadata(moduleUrl = import.meta.url) {
 	{
 		const embedded = {
-			"version": "1.0.0",
-			"build": "772d0cfe5e6cdf0719ccede7299a10ea4f9b96448b840d8b5ff51ec2b1dd06a4"
+			"version": "1.0.1",
+			"build": "5c43f219cb950c64346efead6be8e185d7b019a915283480217183a1515dddee"
 		};
 		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
 			version: embedded.version,

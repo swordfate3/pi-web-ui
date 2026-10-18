@@ -1,5 +1,12 @@
 # Pi Web UI 开发日志
 
+## Web / Hub 1.0.1 版本标记
+
+- 将 `99aa20f` / `772d0cfe…` 对应发布内容从 1.0.0 提升为 1.0.1，仅调整 package / lock 根版本并重建随包 dist，不修改功能实现。版本参与源码身份计算，新指纹为 `5c43f219cb950c64346efead6be8e185d7b019a915283480217183a1515dddee`；旧运行进程仍如实上报旧版。
+- 构建、manifest、连接 TypeScript 检查和 Hub CLI 11/11 通过；496 单测为 495 pass / 1 optional skip，真实 Pi 后端串行集成 11/11。Biome 245 文件无 error，保留既有 30 warnings / 1 info；未重做浏览器截图或完整浏览器 E2E，未修改 UI 实现。
+- 首轮单测因继承容器 `NODE_OPTIONS` 预加载 stdin guard，导致 absent/incompatible 两个隔离场景失败；仅对测试命令清空该变量后全部通过，不修改运行中 Pi 的 guard。连接类型检查初次因复用依赖缺少已声明的 @types/ws 失败；隔离 node_modules 复用另一现有开发树的声明后通过，未下载依赖或改变 lock。
+- 本次不更新个人安装目录、不 reload 运行中 Pi、不 npm publish、不创建 npm 发布 tag；原工作区 README 教程及其他未提交修改不混入本次版本发布。推送后为同一完整提交申请 Hub Gate，申请不等于审批或部署完成。
+
 ## 2026-10-18 · Hub 独立构建版本身份与公开版本限流降级
 
 - 修复仅部署 Hub bundle 时自身版本缺失：构建内嵌 1.0.0 和与最终 manifest 同源的源码指纹，不受相邻错误包信息影响；直接源码运行保留原读取方式。

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 158,
-    "sha256": "772d0cfe5e6cdf0719ccede7299a10ea4f9b96448b840d8b5ff51ec2b1dd06a4",
+    "sha256": "5c43f219cb950c64346efead6be8e185d7b019a915283480217183a1515dddee",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -122,11 +122,11 @@
       },
       {
         "path": "package-lock.json",
-        "sha256": "c7be1c882d6c5833294942dd9141a09f24d8de4e605db56267fbbf5ff35268cd"
+        "sha256": "d220a89eaf50ebb4ca278bdb05c8239121f67809ef0c09e04e76a3f3fda57d28"
       },
       {
         "path": "package.json",
-        "sha256": "e4390d2a6821c2159bdf0a3b1781b76e3d98b6b638bf871b1c09efd16ea397f0"
+        "sha256": "1598db71aba68e3fe1cfc099b44aea6cf148074da4cbc655b46b74166b874d34"
       },
       {
         "path": "public/icons/pi-web-ui-192.png",
@@ -640,7 +640,7 @@
   },
   "outputs": {
     "count": 673,
-    "sha256": "55e3df5cbe71ae128d3e7621cc1c760c79153c7b8ddcef4749b96e433605610c",
+    "sha256": "73526843842d82ead8f2096e5a0317680b08713a641b0968441e5529c87cc845",
     "files": [
       {
         "path": "assets/abap-BF8NL95m.js",
@@ -3308,7 +3308,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "e78d5cb825f1824df27f3d7e1114daba7a6459e3dc004c0d749b0ae2361b2487"
+        "sha256": "ddbc428ccda5d4f37345dfcf46aca401d53840765701d7b92f6beed8e627092c"
       },
       {
         "path": "icons/pi-web-ui-192.png",

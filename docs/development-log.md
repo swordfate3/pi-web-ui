@@ -471,3 +471,11 @@
 - 可选私有申请凭据与lifecycle凭据分离；无Docker、批准或策略修改能力。保留原任务ID处理未知结果；历史读取适配100任务和跨容器更替累计目标，页面截断明确提示。
 - 修正授权代际、旧200／401、晚到logout cookie及残留忙碌文案，独立复审无剩余可操作问题。新增接口15项、页面17项；最终完整480项（479通过／1可选skip），两套类型、构建、dist一致性、Biome无error（保留30 warnings／1 info）及桌面1440／手机390打包浏览器视觉检查通过。模拟Gate不等于真实Pi全局更新E2E。
 - 没有提交或推送、安装生产包、申请生产更新、迁移旧容器或重启服务。[验证、证据与上线前提](validation/hub-runtime-updates.md)。
+
+## 2026-10-20 · 有界 Hub 状态 Task 2（源码完成，未构建/部署）
+
+- 在 `codex/bounded-hub-state` / `90e5ecc` 上实现跨进程写锁、canonical state 服务锁、8 MiB逻辑预算/512活动grant、安全余量和grant先于export发布；有界登记采用经过认证协商的b2命名空间，保持所有legacy墓碑，不放宽run/operation ID。
+- 每方向FIFO最多512 KiB等待加一条16 MiB在途消息，发送回调和出站排空共同释放名额；显式1 MiB文件预览、流式HTTP和原有权限/接续语义保留。默认8个并发浏览器配对（不是Pi容器数），双向payload总额264 MiB；512 MiB容器RSS未做压力担保。
+- 不具备完整依赖/Gate幂等保留证明时，grant/回执保守保留且超额拒绝。export外部删除不自动抵扣预留；不承诺无限run churn。锁崩溃恢复需要可信管理员，不自动抢占。升级必须Hub-first并升级所有CLI写入者。管理origin新增仅聚合数值的storage诊断。
+- TDD和自审覆盖2,000次轮换、重放/撤销/跨进程竞争、断开peer排队名额、慢消费者和b2 URL消费者；定向210/210，全源码563项（562通过、1可选skip、0失败），两套tsc、Biome 0 errors（33 warnings/7 infos）及diff检查通过。没有子代理、生产凭据/状态访问或模型流量。
+- Task 3接管dist/打包Pi/浏览器/文档验收；必须把新增 `extensions/hub-generation.ts` 加入固定manifest白名单。未改dist、未推送、未部署/重启，保留未跟踪node_modules符号链接。完整命令/RED-GREEN/边界记录于本任务要求的 `.superpowers/sdd/2026-10-20-bounded-hub-state/task-2-report.md`。

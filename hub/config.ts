@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 import { validatedPublicUrl } from "../extensions/connection-config.ts";
 import { type LifecycleConfig, lifecycleConfig } from "./lifecycle.ts";
+import { privateStateDirectory, publishCredential, readStateJson, withStateWriter } from "./state-budget.ts";
 
 export type HubConfig = {
   stateDir: string;
@@ -17,28 +18,21 @@ export type HubConfig = {
   runtimeUpdates?: LifecycleConfig;
   management?: { port: number; publicUrl?: string; gateway?: { credentialFile: string } };
 };
-export type Grant = { run_id: string; token: string; label: string; backendHost: string; revoked?: boolean };
+export type Grant = {
+  run_id: string;
+  token: string;
+  label: string;
+  backendHost: string;
+  revoked?: boolean;
+  exportBytes?: number;
+};
 
 export function privateDirectory(directory: string) {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const stat = lstatSync(directory);
-  if (
-    !stat.isDirectory() ||
-    (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()))
-  ) {
-    throw new Error("Hub state directory must be private and owned by the current user");
-  }
+  privateStateDirectory(directory);
 }
 
 export function readPrivateJson(file: string) {
-  const stat = lstatSync(file);
-  if (
-    !stat.isFile() ||
-    stat.size > 8192 ||
-    (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()))
-  )
-    throw new Error("Invalid private hub file");
-  return JSON.parse(readFileSync(file, "utf8"));
+  return readStateJson(file);
 }
 
 export function initializeHub(
@@ -161,7 +155,8 @@ export function readGrant(config: HubConfig, runId: string): Grant {
     grant.label.length > 120 ||
     hasControls(grant.label) ||
     typeof grant.backendHost !== "string" ||
-    !validHost(grant.backendHost)
+    !validHost(grant.backendHost) ||
+    (grant.revoked !== undefined && typeof grant.revoked !== "boolean")
   )
     throw new Error("Invalid session capability");
   return grant;
@@ -174,25 +169,41 @@ export function issueSession(config: HubConfig, output: string, options: { label
   if (!validHost(backendHost) || !options.label.trim() || options.label.length > 120 || hasControls(options.label))
     throw new Error("Invalid session label or backend host");
   const credential = { run_id: randomBytes(16).toString("hex"), token: randomBytes(32).toString("hex") };
-  const grant = { ...credential, label: options.label, backendHost };
+  const grant = {
+    ...credential,
+    label: options.label,
+    backendHost,
+    revoked: false,
+    exportBytes: Buffer.byteLength(`${JSON.stringify(credential)}\n`),
+  };
   // Never overwrite an existing credential/config. The private grant directory is admin-only.
-  const resolvedOutput = path.resolve(output);
-  if (resolvedOutput === config.socketPath || resolvedOutput.startsWith(`${config.stateDir}${path.sep}`)) {
+  const resolvedOutput = path.join(realpathSync(path.dirname(path.resolve(output))), path.basename(output));
+  const stateRoot = realpathSync(config.stateDir);
+  if (
+    resolvedOutput === config.socketPath ||
+    resolvedOutput === stateRoot ||
+    resolvedOutput.startsWith(`${stateRoot}${path.sep}`)
+  ) {
     throw new Error("Session credential must be outside the administrator state directory");
   }
-  writeFileSync(resolvedOutput, `${JSON.stringify(credential)}\n`, { flag: "wx", mode: 0o600 });
-  writeFileSync(path.join(config.stateDir, "grants", `${credential.run_id}.json`), `${JSON.stringify(grant)}\n`, {
-    flag: "wx",
-    mode: 0o600,
+  withStateWriter(config, (writer) => {
+    try {
+      lstatSync(resolvedOutput);
+      throw new Error("Credential output already exists");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    writer.write(`grants/${credential.run_id}.json`, grant, { exclusive: true });
+    // Do not delete this grant on failed/ambiguous export publication. It may
+    // already have escaped to a caller; its reservation remains charged.
+    publishCredential(resolvedOutput, credential);
   });
   return credential;
 }
 
 export function revokeSession(config: HubConfig, runId: string) {
-  const grant = readGrant(config, runId);
-  writeFileSync(
-    path.join(config.stateDir, "grants", `${runId}.json`),
-    `${JSON.stringify({ ...grant, revoked: true })}\n`,
-    { mode: 0o600 },
-  );
+  withStateWriter(config, (writer) => {
+    const grant = readGrant(config, runId);
+    if (!grant.revoked) writer.write(`grants/${runId}.json`, { ...grant, revoked: true }, { security: true });
+  });
 }

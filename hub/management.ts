@@ -1,9 +1,10 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, constants, existsSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
-import { type HubConfig, privateDirectory, readPrivateJson } from "./config.ts";
+import { type HubConfig, readPrivateJson } from "./config.ts";
 import { gatewayIdentity } from "./gateway-auth.ts";
+import { type StateWriter, withStateWriter } from "./state-budget.ts";
 
 type ManagementState = { epoch: string; pairHash: string | null; expires: number; failures: number };
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -28,38 +29,26 @@ function readState(config: HubConfig): ManagementState | undefined {
   return value;
 }
 
-function saveState(config: HubConfig, value: ManagementState) {
-  privateDirectory(config.stateDir);
-  const temporary = path.join(config.stateDir, `.management-${randomBytes(12).toString("hex")}`);
-  const fd = openSync(
-    temporary,
-    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
-    0o600,
-  );
-  try {
-    writeFileSync(fd, `${JSON.stringify(value)}\n`);
-  } finally {
-    closeSync(fd);
-  }
-  try {
-    renameSync(temporary, stateFile(config));
-  } finally {
-    if (existsSync(temporary)) unlinkSync(temporary);
-  }
+function saveState(writer: StateWriter, value: ManagementState, security = false) {
+  writer.write("management.json", value, { security });
 }
 
 /** Trusted CLI only: return a short-lived code to its administrator's terminal. */
 export function issueManagementCode(config: HubConfig, now = Date.now()) {
   if (config.management?.gateway) throw new Error("Management uses the configured gateway login, not pairing codes");
-  const code = randomBytes(16).toString("hex");
-  const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
-  const expires = now + 600_000;
-  saveState(config, { epoch, pairHash: digest(code), expires, failures: 0 });
-  return { code, expiresAt: expires };
+  return withStateWriter(config, (writer) => {
+    const code = randomBytes(16).toString("hex");
+    const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
+    const expires = now + 600_000;
+    saveState(writer, { epoch, pairHash: digest(code), expires, failures: 0 });
+    return { code, expiresAt: expires };
+  });
 }
 
 export function revokeManagement(config: HubConfig) {
-  saveState(config, { epoch: randomBytes(32).toString("hex"), pairHash: null, expires: 0, failures: 0 });
+  withStateWriter(config, (writer) =>
+    saveState(writer, { epoch: randomBytes(32).toString("hex"), pairHash: null, expires: 0, failures: 0 }, true),
+  );
 }
 
 /** Additional management privilege, deliberately separate from gateway/list access. */
@@ -132,26 +121,30 @@ export class HubManagement {
 
   unlock(code: unknown) {
     if (this.config.management?.gateway) throw new Error("Gateway login required");
-    const state = readState(this.config);
-    if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10)
-      throw new Error("Management unlock rejected");
-    if (!hex(code, 32) || !equal(digest(code), state.pairHash)) {
-      saveState(this.config, { ...state, failures: state.failures + 1 });
-      throw new Error("Management unlock rejected");
-    }
-    saveState(this.config, { ...state, pairHash: null, expires: 0 });
-    return this.createSession(state);
+    return withStateWriter(this.config, (writer) => {
+      const state = readState(this.config);
+      if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10)
+        throw new Error("Management unlock rejected");
+      if (!hex(code, 32) || !equal(digest(code), state.pairHash)) {
+        saveState(writer, { ...state, failures: state.failures + 1 }, true);
+        throw new Error("Management unlock rejected");
+      }
+      saveState(writer, { ...state, pairHash: null, expires: 0 }, true);
+      return this.createSession(state);
+    });
   }
 
   unlockGateway(request: IncomingMessage) {
     const identity = gatewayIdentity(this.config, request);
     if (!identity) throw new Error("Verified gateway login required");
-    let state = readState(this.config);
-    if (!state) {
-      state = { epoch: randomBytes(32).toString("hex"), pairHash: null, expires: 0, failures: 0 };
-      saveState(this.config, state);
-    }
-    return this.createSession(state, identity);
+    return withStateWriter(this.config, (writer) => {
+      let state = readState(this.config);
+      if (!state) {
+        state = { epoch: randomBytes(32).toString("hex"), pairHash: null, expires: 0, failures: 0 };
+        saveState(writer, state);
+      }
+      return this.createSession(state, identity);
+    });
   }
 
   private createSession(state: ManagementState, gateway?: string) {

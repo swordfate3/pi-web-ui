@@ -1,6 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pipeline } from "node:stream";
 import { constants, createBrotliCompress, createGzip } from "node:zlib";
+import { HUB_LIMITS } from "./limits.ts";
+
+let activeCompressors = 0;
 
 function encoding(accept: string | undefined): "br" | "gzip" | undefined {
   if (!accept) return;
@@ -55,6 +58,7 @@ export function proxySessionResponse(
     if (!vary.some((value) => value === "*" || value.toLowerCase() === "accept-encoding")) vary.push("Accept-Encoding");
     headers.vary = vary.join(", ");
     coding = encoding(request.headers["accept-encoding"]);
+    if (request.method !== "HEAD" && activeCompressors >= HUB_LIMITS.httpCompression) coding = undefined;
     if (coding) {
       headers["content-encoding"] = coding;
       for (const name of ["content-length", "etag", "content-md5", "digest"]) delete headers[name];
@@ -67,6 +71,7 @@ export function proxySessionResponse(
     upstream.resume();
     response.end();
   } else if (coding) {
+    activeCompressors++;
     // Streaming keeps memory bounded and propagates backpressure/abort through
     // both sockets. Moderate levels avoid blocking a single-core Hub on Brotli.
     const compressor =
@@ -74,6 +79,7 @@ export function proxySessionResponse(
         ? createBrotliCompress({ params: { [constants.BROTLI_PARAM_QUALITY]: 4 } })
         : createGzip({ level: 6 });
     pipeline(upstream, compressor, response, (error) => {
+      activeCompressors--;
       if (error) response.destroy();
     });
   } else {

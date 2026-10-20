@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -223,6 +223,45 @@ test("management is optional and loopback access alone cannot authorize a restar
   await f.unlock();
   assert.equal((await f.request("restarts", f.payload)).status, 503);
   assert.equal(f.posts(), 0);
+});
+
+test("receipt admission shares the byte quota and never submits after refusal", async (t) => {
+  const f = await fixture(t);
+  await f.unlock();
+  writeFileSync(path.join(f.config.stateDir, "foreign-retained-state"), Buffer.alloc(8 * 1024 * 1024), { mode: 0o600 });
+  assert.equal((await f.request("restarts", f.payload)).status, 409);
+  assert.equal(f.receiptExists(), false);
+  assert.equal(f.posts(), 0);
+});
+
+test("receipt clocks use the writer fence and preserve existing idempotency evidence", async (t) => {
+  const f = await fixture(t);
+  await f.unlock();
+  assert.equal((await f.request("restarts", f.payload)).status, 202);
+  const receiptFile = path.join(f.config.stateDir, "restarts", `${key}.json`);
+  const original = readFileSync(receiptFile, "utf8");
+  f.setJob({ id: key, status: "running", stage: "starting", started_at: Date.now() });
+  mkdirSync(path.join(f.config.stateDir, ".writer.lock"), { mode: 0o700 });
+  assert.equal((await f.request(`restarts/${key}`)).status, 409);
+  assert.equal(existsSync(path.join(f.config.stateDir, "restarts", `${key}.started.json`)), false);
+  assert.equal(readFileSync(receiptFile, "utf8"), original);
+  assert.equal(f.posts(), 1);
+});
+
+test("storage diagnostics require management authorization and expose aggregate budgets only", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.request("storage")).status, 401);
+  assert.equal((await fetch(`${f.url}api/management/storage`)).status, 404);
+  await f.unlock();
+  const response = await f.request("storage");
+  assert.equal(response.status, 200);
+  const value = await response.json();
+  assert.equal(value.limitBytes, 8388608);
+  assert.equal(value.activeGrantLimit, 512);
+  assert.equal(value.activeGrants, 1);
+  assert.ok(value.logicalBytes > 0 && value.logicalBytes <= 8388608);
+  for (const forbidden of [f.runId, f.config.stateDir, "runtime-old", "session-saved"])
+    assert.ok(!JSON.stringify(value).includes(forbidden));
 });
 
 const completedJob = () => ({

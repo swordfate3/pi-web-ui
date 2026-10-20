@@ -88,6 +88,12 @@ test("resolves UUID upload endpoint under current Hub generation and reverse-pro
     `${ORIGIN}${SCOPE.generation}api/uploads/${UUID}`,
   );
   assert.equal(workspaceUploadUrl(`/api/uploads/${UUID}`, ORIGIN, "/prefix/"), `${ORIGIN}/prefix/api/uploads/${UUID}`);
+  const boundedPath = `/s/b2-${"a".repeat(32)}-${"0".repeat(15)}1-${"b".repeat(32)}/`;
+  assert.equal(
+    workspaceUploadUrl(`/api/uploads/${UUID}`, ORIGIN, boundedPath),
+    `${ORIGIN}${boundedPath}api/uploads/${UUID}`,
+  );
+  assert.throws(() => workspaceUploadUrl(`/s/${"c".repeat(32)}/api/uploads/${UUID}`, ORIGIN, boundedPath));
   for (const unsafe of [
     `https://attacker.invalid/api/uploads/${UUID}`,
     `//attacker.invalid/api/uploads/${UUID}`,

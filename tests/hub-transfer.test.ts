@@ -28,10 +28,15 @@ async function fixture(t: test.TestContext, options: { backendCompression?: bool
   let responseHeaders: http.OutgoingHttpHeaders = { "Content-Type": "application/javascript" };
   let responseBody = script;
   let interrupted = false;
+  let held = false;
+  const releases: (() => void)[] = [];
   const server = http.createServer((request, response) => {
     if (!registration.guard(request, response)) return;
     response.writeHead(status, { "Content-Length": responseBody.length, ...responseHeaders });
-    if (interrupted) {
+    if (held) {
+      response.write(responseBody.subarray(0, 16384));
+      releases.push(() => response.end(responseBody.subarray(16384)));
+    } else if (interrupted) {
       response.write(responseBody.subarray(0, 16));
       setImmediate(() => response.destroy());
     } else {
@@ -56,6 +61,7 @@ async function fixture(t: test.TestContext, options: { backendCompression?: bool
     sessionUrl = value ?? "";
   });
   t.after(async () => {
+    for (const release of releases) release();
     await registration.stop();
     for (const client of wss.clients) client.terminate();
     await new Promise<void>((resolve) => wss.close(() => resolve()));
@@ -79,6 +85,13 @@ async function fixture(t: test.TestContext, options: { backendCompression?: bool
     },
     interrupt(value: boolean) {
       interrupted = value;
+    },
+    hold(value: boolean) {
+      held = value;
+    },
+    release() {
+      held = false;
+      for (const release of releases.splice(0)) release();
     },
   };
 }
@@ -111,6 +124,111 @@ function binaryMessage(client: WebSocket) {
     client.once("error", reject);
   });
 }
+
+test("explicit 1MiB JSON file previews pass intact in both directions on a draining connection", async (t) => {
+  const f = await fixture(t);
+  const client = new WebSocket(f.url.replace("http:", "ws:") + "ws", {
+    origin: new URL(f.url).origin,
+    perMessageDeflate: false,
+  });
+  t.after(() => client.terminate());
+  await binaryMessage(client);
+  const frame = JSON.stringify({
+    type: "res",
+    id: "file-preview",
+    ok: true,
+    result: { content: "文".repeat(Math.floor(1048576 / 3)) },
+  });
+  assert.ok(Buffer.byteLength(frame) > 1048576);
+  const received = new Promise<string>((resolve, reject) => {
+    client.on("message", (data, binary) => {
+      if (!binary && data.toString().includes('"file-preview"')) resolve(data.toString());
+    });
+    client.once("error", reject);
+    client.once("close", () => reject(new Error("preview connection closed")));
+  });
+  client.send(frame);
+  assert.equal(await received, frame);
+});
+
+test("browser admission includes pending handshakes and caps retained forwarding pairs at eight", async (t) => {
+  const f = await fixture(t);
+  const clients: WebSocket[] = [];
+  t.after(() => {
+    for (const client of clients) client.terminate();
+  });
+  for (let i = 0; i < 8; i++) {
+    const client = new WebSocket(f.url.replace("http:", "ws:") + "ws", { origin: new URL(f.url).origin });
+    clients.push(client);
+    await binaryMessage(client);
+  }
+  const rejected = new WebSocket(f.url.replace("http:", "ws:") + "ws", { origin: new URL(f.url).origin });
+  clients.push(rejected);
+  await new Promise<void>((resolve, reject) => {
+    rejected.once("error", (error) => {
+      assert.match(error.message, /503/);
+      resolve();
+    });
+    rejected.once("open", () => reject(new Error("ninth pair admitted")));
+  });
+});
+
+test("a stalled upstream send closes the browser with a reconnectable slow-consumer reason", {
+  timeout: 5000,
+}, async (t) => {
+  const f = await fixture(t);
+  const client = new WebSocket(f.url.replace("http:", "ws:") + "ws", {
+    origin: new URL(f.url).origin,
+    perMessageDeflate: false,
+  });
+  t.after(() => client.terminate());
+  await binaryMessage(client);
+  const frame = Buffer.alloc(1024 * 1024, 42);
+  let admitted!: () => void;
+  const firstSend = new Promise<void>((resolve) => {
+    admitted = resolve;
+  });
+  const original = WebSocket.prototype.send;
+  // Hold the real Hub's upstream send, not the queue. The second incoming
+  // frame must hit its occupied in-flight slot and close the real browser.
+  t.mock.method(WebSocket.prototype, "send", function (this: WebSocket, ...args: Parameters<WebSocket["send"]>) {
+    if (this !== client && Buffer.isBuffer(args[0]) && args[0].equals(frame)) {
+      admitted();
+      return;
+    }
+    return original.apply(this, args);
+  });
+  const closed = once(client, "close");
+  client.send(frame);
+  await firstSend;
+  client.send(frame);
+  const [code, reason] = await closed;
+  assert.equal(code, 1013);
+  assert.equal(reason.toString(), "Slow consumer; reconnect");
+});
+
+test("only two HTTP compressors run concurrently; excess assets stream identity without a body cache", async (t) => {
+  const f = await fixture(t);
+  f.hold(true);
+  const responses: http.IncomingMessage[] = [];
+  try {
+    for (let i = 0; i < 3; i++) {
+      responses.push(
+        await new Promise<http.IncomingMessage>((resolve, reject) => {
+          const req = http.get(f.url + asset, { headers: { "Accept-Encoding": "gzip" } }, resolve);
+          req.once("error", reject);
+        }),
+      );
+    }
+    assert.deepEqual(
+      responses.map((r) => r.headers["content-encoding"]),
+      ["gzip", "gzip", undefined],
+    );
+  } finally {
+    f.release();
+    for (const response of responses) response.resume();
+  }
+});
 
 for (const [accept, coding] of [
   ["gzip", "gzip"],

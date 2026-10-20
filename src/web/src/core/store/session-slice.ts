@@ -1,6 +1,11 @@
 import { boundedJson } from "../../../../../extensions/bounded-json";
 import { extractText, extractThinking, extractToolCalls, findLastUsage, syncToItems } from "../chat-conversion";
-import { boundConversationWindow, boundedToolOutput, retainWindowArtifacts } from "../conversation-window";
+import {
+  boundConversationWindow,
+  boundedToolOutput,
+  boundHistoryWindow,
+  retainWindowArtifacts,
+} from "../conversation-window";
 import { recentHistoryRange } from "../history-dates";
 import { workspaceUploadText } from "../i18n";
 import { parseMessageRevision, revisionDeadline } from "../message-revision";
@@ -320,6 +325,8 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
       // Keep navigation state aligned with the retained tree on a rejected snapshot.
       if (!decodedTree.ok) selectedTreeEntryId = get().selectedTreeEntryId;
 
+      const historyWindow = keepPage ? null : boundHistoryWindow(items, entries, sync.history);
+
       set({
         artifacts,
         conversationSyncError: decodedTree.error,
@@ -328,7 +335,10 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
         contextWindowSize: sync.model?.contextWindow || get().contextWindowSize,
         currentModel: sync.model || null,
         error: sessionChanged ? null : get().error,
-        items,
+        items: historyWindow?.items ?? items,
+        ...(historyWindow?.limited
+          ? { transportNotice: uiText("Conversation window limited. Older content remains in the original session.") }
+          : {}),
         lastUsage: findLastUsage(entries),
         leafId: decodedTree.ok ? (sync.leafId ?? null) : get().leafId,
         sessionId: sync.sessionId ?? previousSessionId,
@@ -342,7 +352,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
         thinkingLevel: sync.thinkingLevel || "off",
         availableThinkingLevels: sync.availableThinkingLevels || ["off"],
         tree,
-        history: sync.history ?? null,
+        history: historyWindow?.history ?? sync.history ?? null,
         ...(keepPage
           ? {
               items: get().items,

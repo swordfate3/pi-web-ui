@@ -66,7 +66,12 @@ export type MessageRevisionPreview = {
   runtimeId: string;
 };
 
-export type ChatItem = { historyPreview?: boolean; detailEntryId?: string } & (
+export type ChatItem = {
+  historyPreview?: boolean;
+  detailEntryId?: string;
+  /** Browser boundary omissions, not tool associations or cached source bodies. */
+  omittedEntryIds?: string[];
+} & (
   | {
       kind: "message";
       id: string;

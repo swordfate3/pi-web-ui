@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { selectSessionHistory } from "../extensions/session-history.ts";
+import { entryDetailTargets } from "../src/web/src/core/conversation-window.ts";
 import { dispatchPiEvent } from "../src/web/src/core/store/event-dispatch.ts";
 import { createSessionSlice } from "../src/web/src/core/store/session-slice.ts";
-import type { StateSyncPayload } from "../src/web/src/core/types.ts";
+import type { SessionEntry, StateSyncPayload } from "../src/web/src/core/types.ts";
 
 const range = { from: 1_700_000_000_000, to: 1_700_086_400_000 };
 function snapshot(text: string, sessionId = "s", runtimeId = "r"): StateSyncPayload {
@@ -32,6 +34,205 @@ function store() {
   });
   return state;
 }
+
+function toolEntries(count: number, calls = 8): SessionEntry[] {
+  return Array.from({ length: count }, (_, i) => ({
+    type: "message",
+    id: `entry-${i}`,
+    timestamp: new Date(range.from + i).toISOString(),
+    message: {
+      role: "assistant",
+      content: Array.from({ length: calls }, (_, j) => ({
+        type: "toolCall",
+        id: `call-${i}-${j}`,
+        name: "read",
+        arguments: { path: `${i}-${j}.txt` },
+      })),
+    },
+  }));
+}
+
+function historyStore(entries: SessionEntry[]) {
+  const state = store();
+  const requests: Array<{ method: string; params: unknown }> = [];
+  state.send = async (method, params) => {
+    requests.push({ method, params });
+    assert.equal(method, "get_history");
+    assert.deepEqual(params, {
+      ...range,
+      sessionId: "s",
+      runtimeId: "r",
+      ...(state.historyBefore ? { before: state.historyBefore } : {}),
+    });
+    return { ...selectSessionHistory(entries, [], params as typeof range), sessionId: "s", runtimeId: "r" };
+  };
+  return { state, requests };
+}
+
+test("snapshot row eviction exposes an exact older cursor and recovers every entry without duplicates", async () => {
+  for (const count of [40, 80]) {
+    const entries = toolEntries(count);
+    const original = JSON.stringify(entries);
+    const { state, requests } = historyStore(entries);
+    await state.loadHistory(range);
+    assert.equal(requests.length, 1, "no automatic older-page fetch");
+    assert.equal(state.items.length, 200);
+    assert.equal(state.items[0].entryId, `entry-${count - 25}`);
+    assert.equal(state.history?.nextBefore, `entry-${count - 25}`, "cursor must not skip browser-evicted entries");
+    assert.equal(state.history?.returned, 25);
+    const seen = new Set<string>();
+    let pages = 0;
+    for (;;) {
+      assert.ok(++pages <= 4, "older pages must make progress");
+      const ids = new Set(
+        state.items.map((item) => {
+          assert.ok(item.entryId);
+          return item.entryId;
+        }),
+      );
+      assert.equal(state.history?.returned, ids.size);
+      assert.equal(state.history?.total, count);
+      for (const id of ids) {
+        assert.ok(!seen.has(id), `duplicate ${id}`);
+        seen.add(id);
+      }
+      assert.equal(
+        state.items.some((item) => item.historyPreview),
+        false,
+        "complete boundary entry is not a preview",
+      );
+      const before = state.history?.nextBefore;
+      if (!before) break;
+      assert.notEqual(before, state.historyBefore);
+      await state.loadHistory(range, before);
+    }
+    assert.equal(seen.size, count);
+    assert.equal(JSON.stringify(entries), original);
+  }
+});
+
+test("partial tool entry boundary is an explicit full-entry detail target, not an automatic fetch", async () => {
+  const entries = toolEntries(40, 9);
+  const original = JSON.stringify(entries);
+  const { state, requests } = historyStore(entries);
+  await state.loadHistory(range);
+  assert.equal(state.items[0].id, "call-17-7");
+  assert.equal(state.items[0].entryId, "entry-17");
+  assert.equal(state.items[0].historyPreview, true);
+  assert.deepEqual(entryDetailTargets(state.items[0]), ["entry-17"]);
+  assert.deepEqual(state.items[0].relatedEntryIds, ["entry-17"]);
+  assert.equal(state.history?.returned, 23);
+  assert.equal(state.history?.truncatedEntries, 1);
+  assert.equal(state.history?.nextBefore, "entry-17");
+  assert.equal(requests.length, 1);
+  state.send = async (method, params) => {
+    assert.equal(method, "get_entry_detail");
+    assert.deepEqual(params, { sessionId: "s", runtimeId: "r", entryId: "entry-17" });
+    return { sessionId: "s", runtimeId: "r", entryId: "entry-17", text: "all nine tool calls", nextCursor: null };
+  };
+  await state.loadEntryDetail(entryDetailTargets(state.items[0])[0]);
+  assert.equal(state.entryDetail?.text, "all nine tool calls");
+  assert.equal(JSON.stringify(entries), original);
+});
+
+test("byte-driven snapshot eviction also preserves traversable history and retained counts", async () => {
+  let nested: unknown = Array.from({ length: 400 }, () => ({ value: "x" }));
+  for (let i = 0; i < 20; i++) nested = { nested };
+  const entries: SessionEntry[] = Array.from({ length: 30 }, (_, i) => ({
+    type: "message",
+    id: `result-${i}`,
+    timestamp: new Date(range.from + i).toISOString(),
+    message: { role: "toolResult", toolCallId: `call-${i}`, content: [{ type: "custom", nested }] },
+  }));
+  assert.equal(selectSessionHistory(entries, [], range).entries.length, 30);
+  const { state } = historyStore(entries);
+  await state.loadHistory(range);
+  assert.ok(state.items.length < 30);
+  assert.equal(state.history?.nextBefore, state.items[0].entryId);
+  const seen = new Set<string>();
+  let pages = 0;
+  for (;;) {
+    assert.ok(++pages <= 4);
+    assert.ok(Buffer.byteLength(JSON.stringify(state.items)) <= 512 * 1024);
+    assert.equal(state.history?.returned, state.items.length);
+    assert.equal(state.history?.truncatedEntries, state.items.length);
+    for (const item of state.items) {
+      assert.ok(item.entryId);
+      assert.ok(!seen.has(item.entryId));
+      seen.add(item.entryId);
+    }
+    if (!state.history?.nextBefore) break;
+    await state.loadHistory(range, state.history.nextBefore);
+  }
+  assert.equal(seen.size, 30);
+});
+
+test("a partial single entry keeps its existing older cursor and cannot stall pagination", async () => {
+  // Compact tool calls fit the server entry budget but expand beyond 200 UI rows.
+  const entries = toolEntries(1, 220).map((entry) => ({
+    ...entry,
+    message: { role: "assistant", content: Array.from({ length: 220 }, (_, i) => ({ type: "toolCall", id: `t${i}` })) },
+  }));
+  const { state, requests } = historyStore(entries);
+  await state.loadHistory(range);
+  assert.equal(state.items.length, 200);
+  assert.equal(state.items[0].historyPreview, true);
+  assert.deepEqual(entryDetailTargets(state.items[0]), ["entry-0"]);
+  assert.equal(state.history?.nextBefore, null);
+  assert.equal(state.history?.returned, 1);
+  assert.equal(state.history?.truncatedEntries, 1);
+  assert.equal(requests.length, 1);
+  const page = selectSessionHistory(entries, [], range);
+  state.applyStateSync(
+    {
+      ...page,
+      sessionId: "s",
+      runtimeId: "r",
+      history: { ...page.history, nextBefore: "older-exact-id", total: 2 },
+    } as StateSyncPayload,
+    { requested: true },
+  );
+  assert.equal(state.history?.nextBefore, "older-exact-id");
+  assert.equal(state.items[0].historyPreview, true);
+});
+
+test("partial invocation keeps omitted result entries inspectable without changing tool associations", async () => {
+  const entries = toolEntries(20, 11).flatMap((entry, i): SessionEntry[] => [
+    { ...entry, timestamp: new Date(range.from + 2 * i).toISOString() },
+    {
+      type: "message",
+      id: `result-${i}`,
+      timestamp: new Date(range.from + 2 * i + 1).toISOString(),
+      message: { role: "toolResult", toolCallId: `call-${i}-0`, content: `output-${i}` },
+    },
+  ]);
+  const original = JSON.stringify(entries);
+  const { state, requests } = historyStore(entries);
+  await state.loadHistory(range);
+  const boundary = state.items[0];
+  assert.equal(boundary.id, "call-1-9");
+  assert.equal(boundary.entryId, "entry-1");
+  assert.deepEqual(boundary.relatedEntryIds, ["entry-1"], "do not associate tool 0's result with tool 9");
+  assert.deepEqual(
+    entryDetailTargets(boundary),
+    ["entry-1", "result-1"],
+    "result-1 is newer than the older-page cursor and needs explicit detail access",
+  );
+  assert.equal(state.history?.nextBefore, "entry-1");
+  assert.equal(state.history?.returned, 38);
+  assert.equal(state.history?.truncatedEntries, 2);
+  const retainedTool = state.items.find((item) => item.id === "call-2-0");
+  assert.ok(retainedTool);
+  assert.deepEqual(retainedTool.relatedEntryIds, ["entry-2", "result-2"]);
+  assert.equal(retainedTool.kind === "tool" && retainedTool.output, "output-2");
+  assert.equal(requests.length, 1);
+  assert.ok(state.history?.nextBefore);
+  await state.loadHistory(range, state.history.nextBefore);
+  assert.equal(state.history?.nextBefore, null);
+  assert.equal(state.items.length, 11);
+  assert.equal(state.items[0].entryId, "entry-0");
+  assert.equal(JSON.stringify(entries), original);
+});
 
 test("every live path enforces count, per-item and aggregate retained-content budgets", () => {
   const state = store();

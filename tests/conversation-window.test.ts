@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { boundConversationWindow, boundedToolOutput } from "../src/web/src/core/conversation-window.ts";
+import { boundConversationWindow, boundHistoryWindow, boundedToolOutput } from "../src/web/src/core/conversation-window.ts";
 import { entryDetailTargets } from "../src/web/src/core/conversation-window.ts";
 import { syncToItems } from "../src/web/src/core/chat-conversion.ts";
 import { createSessionSlice } from "../src/web/src/core/store/session-slice.ts";
@@ -24,6 +24,28 @@ test("window retains newest items and Unicode previews without cloning unchecked
   assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 64 * 1024);
   assert.equal((huge.input as { content: string }).content.length, 100_000);
   assert.equal(boundedToolOutput(huge.input).preview, true);
+});
+
+test("partial-entry marker bytes are rechecked and a newly evicted boundary remains a preview", () => {
+  const rows: ChatItem[] = Array.from({ length: 10 }, (_, i) => {
+    const row: ChatItem = { kind: "tool", id: `t${i}`, entryId: "entry", name: "read", state: "input-available", input: "" };
+    row.input = "x".repeat((i === 9 ? 52425 : 52428) - Buffer.byteLength(JSON.stringify(row)));
+    return row;
+  });
+  assert.equal(Buffer.byteLength(JSON.stringify(rows)), 512 * 1024);
+  const items: ChatItem[] = [{ kind: "tool", id: "old", entryId: "entry", name: "read", state: "input-available", input: "old" }, ...rows];
+  assert.equal(boundConversationWindow(items).items.length, 10);
+  const result = boundHistoryWindow(items, [{ type: "message", id: "entry" }], {
+    from: 1, to: 2, returned: 1, total: 1, nextBefore: null, truncatedEntries: 0, treeLimited: false,
+  });
+  assert.equal(result.items.length, 9);
+  assert.equal(result.items[0].id, "t1");
+  assert.equal(result.items[0].historyPreview, true);
+  assert.deepEqual(entryDetailTargets(result.items[0]), ["entry"]);
+  assert.ok(Buffer.byteLength(JSON.stringify(result.items)) <= 512 * 1024);
+  assert.equal(result.history?.nextBefore, null);
+  assert.equal(result.history?.truncatedEntries, 1);
+  assert.ok(items.every((item) => !item.historyPreview), "never mark the source rows");
 });
 
 test("history conversion exposes message/tool previews and exact detail targets", () => {

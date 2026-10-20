@@ -1,5 +1,5 @@
 import { boundedJson, jsonTextPrefix } from "../../../../extensions/bounded-json";
-import type { ChatItem, WorkspaceArtifact } from "./types";
+import type { ChatItem, HistoryMetadata, SessionEntry, WorkspaceArtifact } from "./types";
 
 const ITEM_BYTES = 64 * 1024;
 const WINDOW_BYTES = 512 * 1024;
@@ -9,7 +9,11 @@ const prefix = (value: unknown, budget = 8192) => (typeof value === "string" ? j
 
 export function entryDetailTargets(item: ChatItem): string[] {
   if (!item.historyPreview) return [];
-  return [...new Set([item.entryId, item.detailEntryId].filter((id): id is string => Boolean(id)))];
+  return [
+    ...new Set(
+      [item.entryId, item.detailEntryId, ...(item.omittedEntryIds ?? [])].filter((id): id is string => Boolean(id)),
+    ),
+  ];
 }
 
 function boundedItem(source: ChatItem) {
@@ -24,6 +28,7 @@ function boundedItem(source: ChatItem) {
       id: source.id,
       entryId: source.entryId,
       detailEntryId: source.detailEntryId,
+      omittedEntryIds: source.omittedEntryIds?.slice(0, 40),
       relatedEntryIds: source.relatedEntryIds?.slice(-4),
       historyPreview: true,
     };
@@ -86,6 +91,94 @@ export function boundConversationWindow(items: readonly ChatItem[]) {
     limited ||= bounded.item !== items[i];
   }
   return { items: retained.reverse(), limited };
+}
+
+/** Browser rows can outnumber persisted entries. Page from the retained boundary,
+ * not the server page boundary, and expose any partially retained entry as detail.
+ * Only identities/counts are collected; no entries or source bodies are cached. */
+export function boundHistoryWindow(
+  items: readonly ChatItem[],
+  entries: readonly SessionEntry[],
+  history: HistoryMetadata | undefined,
+) {
+  let window = boundConversationWindow(items);
+  const counts = (rows: readonly ChatItem[]) => {
+    const result = new Map<string, number>();
+    for (const row of rows) if (row.entryId) result.set(row.entryId, (result.get(row.entryId) ?? 0) + 1);
+    return result;
+  };
+  const originalCounts = counts(items);
+  const identities = (rows: readonly ChatItem[]) => {
+    const ids = new Set<string>();
+    for (const row of rows) {
+      if (row.entryId) ids.add(row.entryId);
+      if (row.detailEntryId) ids.add(row.detailEntryId);
+      for (const id of row.relatedEntryIds ?? []) ids.add(id);
+      for (const id of row.omittedEntryIds ?? []) ids.add(id);
+    }
+    return ids;
+  };
+  const originalIds = identities(items);
+  while (window.items.length < items.length) {
+    const retainedCounts = counts(window.items);
+    const marked = new Set<string>();
+    const rows = window.items.map((row) => {
+      const id = row.entryId;
+      if (!id || marked.has(id) || retainedCounts.get(id) === originalCounts.get(id)) return row;
+      marked.add(id);
+      if (row.historyPreview) return row;
+      return { ...row, historyPreview: true, ...(row.kind === "message" ? { copyable: false } : {}) };
+    });
+    const retainedIds = identities(rows);
+    const first = entries.findIndex((entry) => entry.id && retainedIds.has(entry.id));
+    // A tool result may be newer than its invocation but live on an evicted
+    // tool row. It cannot be reached by paging before the retained invocation.
+    // Keep exact detail targets on the boundary, separate from tool associations.
+    const omitted = entries.flatMap((entry, index) =>
+      index >= first && entry.id && originalIds.has(entry.id) && !retainedIds.has(entry.id) ? [entry.id] : [],
+    );
+    if (rows.length && omitted.length) {
+      rows[0] = {
+        ...rows[0],
+        historyPreview: true,
+        omittedEntryIds: [...(rows[0].omittedEntryIds ?? []), ...omitted],
+        ...(rows[0].kind === "message" ? { copyable: false } : {}),
+      };
+    }
+    // The preview marker itself counts toward both byte budgets. If it evicts
+    // another row, repair that new boundary too; each retry strictly shrinks.
+    const next = boundConversationWindow(rows);
+    const stable = next.items.length === window.items.length;
+    window = { ...next, limited: true };
+    if (stable) break;
+  }
+  if (!history) return { ...window, history };
+
+  const retained = identities(window.items);
+  const previews = new Set<string>();
+  for (const row of window.items) {
+    for (const id of entryDetailTargets(row)) previews.add(id);
+  }
+  const first = entries.findIndex((entry) => entry.id && retained.has(entry.id));
+  const lostOlderEntry = entries.some(
+    (entry, index) => index < first && entry.id && originalIds.has(entry.id) && !retained.has(entry.id),
+  );
+  return {
+    ...window,
+    history: {
+      ...history,
+      // Preserve the original cursor unless browser eviction created a gap.
+      nextBefore: lostOlderEntry ? (entries[first]?.id ?? history.nextBefore) : history.nextBefore,
+      returned: window.limited
+        ? entries.filter((entry) => entry.id && retained.has(entry.id)).length
+        : history.returned,
+      truncatedEntries: entries.filter(
+        (entry) =>
+          (!window.limited || (entry.id && retained.has(entry.id))) &&
+          (entry.historyPreview || (entry.id && previews.has(entry.id))),
+      ).length,
+    },
+  };
 }
 
 /** Format only a bounded tool projection; never stringify the full result first. */

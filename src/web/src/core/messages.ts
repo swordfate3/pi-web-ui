@@ -93,7 +93,7 @@ export const messages = {
   "Showing {returned} of {total} entries": "显示 {total} 条记录中的 {returned} 条",
   "Large entries are bounded previews. Full data remains in the original session.":
     "大记录仅显示有界预览，完整数据保留在原始会话中。",
-  "Partial navigation tree for selected dates (up to 1,000 nodes).": "所选日期的部分导航树（最多 1,000 个节点）。",
+  "Partial navigation tree for selected dates (up to 200 nodes).": "所选日期的部分导航树（最多 200 个节点）。",
   "Live messages are hidden while viewing past dates or an older page.": "查看过去日期或较早一页时，不显示实时消息。",
   "Saved session results are capped. Narrow the date range to find more.":
     "已保存会话结果已达到上限，请缩小日期范围以查找更多。",

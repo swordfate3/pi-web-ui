@@ -66,7 +66,7 @@ export type MessageRevisionPreview = {
   runtimeId: string;
 };
 
-export type ChatItem =
+export type ChatItem = { historyPreview?: boolean; detailEntryId?: string } & (
   | {
       kind: "message";
       id: string;
@@ -103,7 +103,8 @@ export type ChatItem =
       tone?: SystemTone;
       entryId?: string;
       relatedEntryIds?: string[];
-    };
+    }
+);
 
 export type RpcEvent = {
   type: string;
@@ -211,6 +212,14 @@ export type WsError = {
 };
 
 export type HistoryRange = { from: number; to: number };
+export type EntryDetailRequest = { sessionId: string; runtimeId: string; entryId: string; cursor?: string };
+export type EntryDetailResult = {
+  sessionId: string;
+  runtimeId: string;
+  entryId: string;
+  text: string;
+  nextCursor: string | null;
+};
 export type HistoryMetadata = HistoryRange & {
   nextBefore: string | null;
   total: number;
@@ -238,6 +247,7 @@ export type StateSyncPayload = {
 };
 
 export type SessionEntry = {
+  historyPreview?: boolean;
   type: string;
   id?: string;
   parentId?: string | null;

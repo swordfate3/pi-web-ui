@@ -6,6 +6,7 @@ import { t, useLanguage } from "../../core/i18n";
 import type { MessageVersionGroup } from "../../core/message-versions";
 import type { ChatItem } from "../../core/types";
 import { ChatItemView } from "./chat-item-view";
+import { EntryDetailViewer, EntryPreviewControl } from "./entry-detail-view";
 import { FileDownloadBoundary } from "./file-message-response";
 import { UserMessageView } from "./user-message-view";
 
@@ -79,6 +80,7 @@ const ChatRow = memo(function ChatRow({
           onSwitchVersion={onSwitchVersion}
         />
       )}
+      <EntryPreviewControl item={item} />
     </div>
   );
 });
@@ -111,6 +113,7 @@ export const ChatList = memo(function ChatList({ items, highlightedEntryId, vers
           versionGroup={item.entryId ? versions?.get(item.entryId) : undefined}
         />
       ))}
+      <EntryDetailViewer />
     </FileDownloadBoundary>
   );
 });

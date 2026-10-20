@@ -1,5 +1,16 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "Conversation window limited. Older content remains in the original session.":
+    "会话窗口已限制大小，较早内容仍保留在原始会话中。",
+  "Could not load entry detail": "无法加载条目详情",
+  "Load entry detail": "加载条目详情",
+  "Load invocation detail": "加载调用详情",
+  "Load result detail": "加载结果详情",
+  "Entry detail": "条目详情",
+  "Next detail chunk": "下一段详情",
+  "Only one chunk is shown. Loading the next chunk replaces this one.":
+    "一次仅显示一段详情，加载下一段将替换当前内容。",
+  "Live preview. Details become available after this entry is saved.": "实时预览，条目保存后可加载详情。",
   "Restore this queued message to the composer; it will not be sent automatically.":
     "将这条排队消息恢复到输入框？不会自动发送。",
   "This queued message came from another session. Copy it into this draft?":

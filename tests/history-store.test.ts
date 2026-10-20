@@ -33,6 +33,80 @@ function store() {
   return state;
 }
 
+test("every live path enforces count, per-item and aggregate retained-content budgets", () => {
+  const state = store();
+  const check = () => {
+    assert.ok(state.items.length <= 200);
+    assert.ok(Buffer.byteLength(JSON.stringify(state.items)) <= 512 * 1024);
+    for (const item of state.items) assert.ok(Buffer.byteLength(JSON.stringify(item)) <= 64 * 1024);
+  };
+  for (let i = 0; i < 230; i++) {
+    state.addSystemMessage(`system-${i}`);
+    check();
+  }
+  state.applyAgentStart();
+  for (let i = 0; i < 100; i++) {
+    state.applyMessageUpdate({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "😀\u0001".repeat(2000) },
+    });
+    check();
+  }
+  assert.equal(state.items.at(-1)?.historyPreview, true);
+  state.applyMessageEnd({ type: "message_end", message: { role: "assistant", content: "large".repeat(100_000) } });
+  check();
+  for (let i = 0; i < 230; i++) {
+    state.applyToolExecutionStart({
+      type: "tool_execution_start",
+      toolCallId: `tool-${i}`,
+      toolName: "write",
+      args: { content: "x".repeat(100_000) },
+    });
+    state.applyToolExecutionUpdate({
+      type: "tool_execution_update",
+      toolCallId: `tool-${i}`,
+      partialResult: { content: [{ type: "text", text: "y".repeat(100_000) }] },
+    });
+    state.applyToolExecutionEnd({ type: "tool_execution_end", toolCallId: `tool-${i}`, result: "z".repeat(100_000) });
+    check();
+    assert.equal(state.items.at(-1)?.id, `tool-${i}`);
+    assert.equal(state.items.at(-1)?.historyPreview, true);
+  }
+});
+
+test("detail viewer holds one chunk, sends exact scope, and ignores replies after lifecycle changes", async () => {
+  const state = store();
+  const requests: unknown[] = [];
+  state.send = async (method, params) => {
+    requests.push({ method, params });
+    return {
+      sessionId: "s",
+      runtimeId: "r",
+      entryId: "entry",
+      text: requests.length === 1 ? "first" : "second",
+      nextCursor: "opaque",
+    };
+  };
+  await state.loadEntryDetail("entry");
+  await state.loadEntryDetail("entry", "opaque");
+  assert.deepEqual(requests[1], {
+    method: "get_entry_detail",
+    params: { sessionId: "s", runtimeId: "r", entryId: "entry", cursor: "opaque" },
+  });
+  assert.equal(state.entryDetail?.text, "second");
+  let resolve!: (value: unknown) => void;
+  state.send = () =>
+    new Promise((r) => {
+      resolve = r;
+    });
+  const pending = state.loadEntryDetail("entry", "opaque");
+  state.applyStateSync({ sessionId: "new", runtimeId: "new-r", entries: [] });
+  assert.equal(state.entryDetail, null);
+  resolve({ sessionId: "s", runtimeId: "r", entryId: "entry", text: "stale", nextCursor: null });
+  await pending;
+  assert.equal(state.entryDetail, null);
+});
+
 test("transport omission is scoped, deduplicates notices, and only terminal events schedule bounded recovery", () => {
   const state = store();
   const calls: unknown[] = [];

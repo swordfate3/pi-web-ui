@@ -31,7 +31,14 @@ import { projectLiveEvent } from "./live-transport.ts";
 import { matchesRevisionDispatch, resolveMessageRevision, revisionContent } from "./message-revision.ts";
 import { resolveMessageVersions } from "./message-versions.ts";
 import { startRuntimeControl, taintRuntimeInput } from "./runtime-control.ts";
-import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
+import {
+  guardHistoryFrame,
+  historyRange,
+  readEntryDetail,
+  selectSavedSessions,
+  selectSessionHistory,
+  serializeHistoryEnvelope,
+} from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
 import { captureSoftwareMetadata } from "./software-metadata.ts";
@@ -853,6 +860,8 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   function serializeFrame(data: unknown) {
     const projected = projectLiveEvent(data);
+    const history = serializeHistoryEnvelope(projected);
+    if (history !== null) return history;
     return guardHistoryFrame(stringifyForBrowser(projected), projected, {
       sessionId: latestCtx?.sessionManager.getSessionId(),
       runtimeId,
@@ -2337,6 +2346,26 @@ export default function (pi: ExtensionAPI) {
           }
           if (sessionReplacementPending) throw new Error("A session action is already in progress");
           sendTo(ws, success(await exportHtml(ctx, params.outputPath)));
+          break;
+        }
+
+        case "get_entry_detail": {
+          const detailCtx = checkHistoryIdentity(params, true);
+          sendTo(
+            ws,
+            success(
+              readEntryDetail(
+                detailCtx.sessionManager.getBranch(),
+                {
+                  sessionId: detailCtx.sessionManager.getSessionId(),
+                  runtimeId,
+                  leafId: detailCtx.sessionManager.getLeafId(),
+                },
+                params,
+                request.id,
+              ),
+            ),
+          );
           break;
         }
 

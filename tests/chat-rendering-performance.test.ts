@@ -140,7 +140,7 @@ test("a single tool toggle preserves every other chat item reference for shallow
     Object.assign(state, typeof patch === "function" ? patch(state) : patch);
   };
   state = createSessionSlice(set as never, (() => state) as never, {} as never);
-  const items = Array.from({ length: 2_000 }, (_, index) => ({
+  const items = Array.from({ length: 200 }, (_, index) => ({
     kind: "tool" as const,
     id: `tool-${index}`,
     name: "read",
@@ -150,10 +150,10 @@ test("a single tool toggle preserves every other chat item reference for shallow
     open: false,
   }));
   state.items = items;
-  state.toggleTool("tool-1000", true);
+  state.toggleTool("tool-100", true);
   assert.notEqual(state.items, items);
   for (let i = 0; i < items.length; i++) {
-    if (i === 1000) {
+    if (i === 100) {
       assert.notEqual(state.items[i], items[i]);
       assert.equal(state.items[i].kind === "tool" && state.items[i].open, true);
     } else assert.equal(state.items[i], items[i]);

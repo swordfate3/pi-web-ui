@@ -1,0 +1,144 @@
+import { boundedJson, jsonTextPrefix } from "../../../../extensions/bounded-json";
+import type { ChatItem, WorkspaceArtifact } from "./types";
+
+const ITEM_BYTES = 64 * 1024;
+const WINDOW_BYTES = 512 * 1024;
+const NOTICE = "[Preview: large content omitted; full data remains in the original session.]";
+const cache = new WeakMap<ChatItem, { item: ChatItem; bytes: number }>();
+const prefix = (value: unknown, budget = 8192) => (typeof value === "string" ? jsonTextPrefix(value, budget) : "");
+
+export function entryDetailTargets(item: ChatItem): string[] {
+  if (!item.historyPreview) return [];
+  return [...new Set([item.entryId, item.detailEntryId].filter((id): id is string => Boolean(id)))];
+}
+
+function boundedItem(source: ChatItem) {
+  const cached = cache.get(source);
+  if (cached) return cached;
+  const complete = boundedJson(source, ITEM_BYTES);
+  let item: ChatItem;
+  if (complete) item = source;
+  else {
+    // Retain exact identities, not source objects hidden inside preview metadata.
+    const base = {
+      id: source.id,
+      entryId: source.entryId,
+      detailEntryId: source.detailEntryId,
+      relatedEntryIds: source.relatedEntryIds?.slice(-4),
+      historyPreview: true,
+    };
+    if (source.kind === "message")
+      item = {
+        ...base,
+        kind: "message",
+        role: source.role,
+        text: prefix(source.text),
+        reasoning: prefix(source.reasoning),
+        streaming: source.streaming,
+        copyable: false,
+        presentation: source.presentation,
+        cost: source.cost,
+      };
+    else if (source.kind === "tool")
+      item = {
+        ...base,
+        kind: "tool",
+        name: prefix(source.name, 512),
+        input: boundedJson(source.input, 8192)?.value ?? { historyPreview: true, notice: NOTICE },
+        output: prefix(source.output),
+        errorText: prefix(source.errorText),
+        state: source.state,
+        open: source.open,
+        resultOnly: source.resultOnly,
+      };
+    else item = { ...base, kind: "system", text: `${prefix(source.text)} ${NOTICE}`, tone: source.tone };
+  }
+  const checked = complete ?? boundedJson(item, ITEM_BYTES);
+  // Pathological identities are never shortened into different action targets.
+  if (!checked) return null;
+  const result = { item, bytes: checked.bytes };
+  cache.set(source, result);
+  cache.set(item, result);
+  return result;
+}
+
+export function boundConversationWindow(items: readonly ChatItem[]) {
+  const retained: ChatItem[] = [];
+  let bytes = 2;
+  let limited = false;
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (retained.length >= 200) {
+      limited = true;
+      break;
+    }
+    const bounded = boundedItem(items[i]);
+    if (!bounded) {
+      limited = true;
+      continue;
+    }
+    const size = bounded.bytes + (retained.length ? 1 : 0);
+    if (bytes + size > WINDOW_BYTES) {
+      limited = true;
+      break;
+    }
+    bytes += size;
+    retained.push(bounded.item);
+    limited ||= bounded.item !== items[i];
+  }
+  return { items: retained.reverse(), limited };
+}
+
+/** Format only a bounded tool projection; never stringify the full result first. */
+export function boundedToolOutput(source: unknown): { output: string; preview: boolean } {
+  const bounded = boundedJson(source, 24 * 1024);
+  if (!bounded) {
+    const record = source && typeof source === "object" ? (source as { content?: unknown }) : null;
+    const content = record?.content ?? source;
+    const first = Array.isArray(content) ? content[0] : null;
+    return { output: `${prefix(typeof content === "string" ? content : first?.text)} ${NOTICE}`, preview: true };
+  }
+  const render = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    if (!value) return "";
+    if (Array.isArray(value))
+      return value
+        .map((block) => (block?.type === "text" ? block.text || "" : JSON.stringify(block, null, 2)))
+        .join("\n");
+    if (typeof value === "object" && "content" in value && Array.isArray(value.content)) return render(value.content);
+    return JSON.stringify(value, null, 2);
+  };
+  const output = render(bounded.value);
+  const text = jsonTextPrefix(output, 32 * 1024);
+  return { output: text, preview: text.length !== output.length };
+}
+
+// Artifact side cache is derived from retained tool rows, not lifetime traffic.
+export function retainWindowArtifacts(artifacts: WorkspaceArtifact[], items: readonly ChatItem[]) {
+  const paths = new Set<string>();
+  for (const item of items) {
+    if (item.kind !== "tool" || !item.input || typeof item.input !== "object" || item.historyPreview) continue;
+    const input = item.input as Record<string, unknown>;
+    for (const key of ["path", "filePath", "filepath", "file_path", "file", "target", "filename"]) {
+      const value = input[key];
+      if (typeof value === "string" && value.length <= 4096)
+        paths.add(
+          value
+            .trim()
+            .replace(/^file:\/\//, "")
+            .replace(/\\/g, "/")
+            .replace(/\/+/g, "/")
+            .replace(/^\.\//, ""),
+        );
+    }
+  }
+  const retained: WorkspaceArtifact[] = [];
+  let bytes = 2;
+  for (const artifact of artifacts) {
+    if (!paths.has(artifact.path)) continue;
+    const safe = boundedJson(artifact, 8192);
+    if (!safe || bytes + safe.bytes + 1 > 32 * 1024 || retained.length >= 200) continue;
+    retained.push(safe.value);
+    bytes += safe.bytes + 1;
+  }
+  return retained;
+}

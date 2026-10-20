@@ -1,22 +1,17 @@
-import {
-  extractText,
-  extractThinking,
-  extractToolCalls,
-  findLastUsage,
-  formatToolOutput,
-  syncToItems,
-} from "../chat-conversion";
+import { boundedJson } from "../../../../../extensions/bounded-json";
+import { extractText, extractThinking, extractToolCalls, findLastUsage, syncToItems } from "../chat-conversion";
+import { boundConversationWindow, boundedToolOutput, retainWindowArtifacts } from "../conversation-window";
 import { recentHistoryRange } from "../history-dates";
 import { workspaceUploadText } from "../i18n";
 import { parseMessageRevision, revisionDeadline } from "../message-revision";
 import { decodeSessionTreeOrKeep } from "../session-tree-wire";
 import { isToolExpandable } from "../tool-summary";
-import type { ChatItem } from "../types";
+import type { ChatItem, EntryDetailResult } from "../types";
 import { errorUiText, UiError, uiText } from "../ui-text";
 import { parseUsageStats } from "../usage-stats";
 import { artifactsFromEntries } from "../workspace-artifacts";
 import { runSessionAction } from "./session-action";
-import type { SessionSlice, StoreSlice } from "./types";
+import type { PiWebUiStore, SessionSlice, StoreSlice } from "./types";
 
 let itemCounter = 0;
 
@@ -25,7 +20,34 @@ function nextId(prefix: string) {
   return `${prefix}-${Date.now()}-${itemCounter}`;
 }
 
-export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
+export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) => {
+  let detailGeneration = 0;
+  // Single gate for every item-changing action in this slice, including
+  // lifecycle helpers. No update can bypass retention by using a different event.
+  const set = ((patch: Partial<PiWebUiStore> | ((state: PiWebUiStore) => Partial<PiWebUiStore>)) => {
+    rawSet((state) => {
+      const next = typeof patch === "function" ? patch(state) : { ...patch };
+      if (
+        (next.sessionId !== undefined && next.sessionId !== state.sessionId) ||
+        (next.runtimeId !== undefined && next.runtimeId !== state.runtimeId) ||
+        (next.leafId !== undefined && next.leafId !== state.leafId) ||
+        next.sessionActionPending === true
+      ) {
+        detailGeneration++;
+        next.entryDetail = null;
+        next.entryDetailLoading = false;
+        next.entryDetailError = null;
+      }
+      if (next.items) {
+        const window = boundConversationWindow(next.items);
+        next.items = window.items;
+        next.artifacts = retainWindowArtifacts(next.artifacts ?? state.artifacts ?? [], window.items);
+        if (window.limited)
+          next.transportNotice = uiText("Conversation window limited. Older content remains in the original session.");
+      }
+      return next;
+    });
+  }) as typeof rawSet;
   let streamingId: string | null = null;
   let streamingHasToolCall = false;
   let historySelected = false;
@@ -39,6 +61,67 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
   const sameIdentity = (source: ReturnType<typeof identity>) =>
     source.sessionId === get().sessionId && source.runtimeId === get().runtimeId;
   return {
+    entryDetail: null,
+    entryDetailLoading: false,
+    entryDetailError: null,
+    closeEntryDetail: () => {
+      detailGeneration++;
+      set({ entryDetail: null, entryDetailLoading: false, entryDetailError: null });
+    },
+    loadEntryDetail: async (entryId, cursor) => {
+      const source = identity();
+      if (!source.sessionId || !source.runtimeId || get().connection !== "connected" || get().sessionActionPending)
+        return;
+      const generation = ++detailGeneration;
+      const leafId = get().leafId;
+      const current = () =>
+        generation === detailGeneration &&
+        sameIdentity(source) &&
+        get().leafId === leafId &&
+        get().connection === "connected" &&
+        !get().sessionActionPending;
+      // Replace, never append: even while loading only one chunk is retained.
+      set({
+        entryDetail: { sessionId: source.sessionId, runtimeId: source.runtimeId, entryId, text: "", nextCursor: null },
+        entryDetailLoading: true,
+        entryDetailError: null,
+      });
+      try {
+        const result = await get().send("get_entry_detail", {
+          sessionId: source.sessionId,
+          runtimeId: source.runtimeId,
+          entryId,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        if (!current()) return;
+        const safe = boundedJson(result, 64 * 1024)?.value as EntryDetailResult | undefined;
+        if (
+          !safe ||
+          safe.sessionId !== source.sessionId ||
+          safe.runtimeId !== source.runtimeId ||
+          safe.entryId !== entryId ||
+          typeof safe.text !== "string" ||
+          !(
+            safe.nextCursor === null ||
+            (typeof safe.nextCursor === "string" && safe.nextCursor.length > 0 && safe.nextCursor.length <= 1024)
+          )
+        )
+          throw new Error("Invalid entry detail response");
+        set({
+          entryDetail: {
+            sessionId: safe.sessionId,
+            runtimeId: safe.runtimeId,
+            entryId: safe.entryId,
+            text: safe.text,
+            nextCursor: safe.nextCursor,
+          },
+        });
+      } catch (error) {
+        if (current()) set({ entryDetailError: errorUiText(error, uiText("Could not load entry detail")) });
+      } finally {
+        if (current()) set({ entryDetailLoading: false });
+      }
+    },
     getUsageStats: async () => {
       const source = identity();
       if (!source.sessionId || !source.runtimeId || get().connection !== "connected" || get().sessionActionPending)
@@ -63,6 +146,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
       if (!source.sessionId) return;
       const generation = ++historyGeneration;
       historySelected = true;
+      get().closeEntryDetail();
       streamingId = null;
       streamingHasToolCall = false;
       set({
@@ -323,6 +407,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
     },
 
     clearConversationTimers: () => {
+      get().closeEntryDetail();
       historyGeneration++;
       if (conversationSyncTimer) window.clearTimeout(conversationSyncTimer);
       conversationSyncTimer = null;
@@ -582,6 +667,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
       set((state) => ({
         items: state.items.map((item) => {
           if (item.kind !== "message" || item.id !== id) return item;
+          if (item.historyPreview) return item;
           if (messageEvent.type === "thinking_delta") return { ...item, reasoning: `${item.reasoning || ""}${delta}` };
           return { ...item, text: `${item.text}${delta}` };
         }),
@@ -640,10 +726,16 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
     applyToolExecutionUpdate: (event) => {
       if (!get().isHistoryLive()) return;
       if (!event.toolCallId) return;
+      const result = boundedToolOutput(event.partialResult);
       set((state) => ({
         items: state.items.map((item) =>
           item.kind === "tool" && item.id === event.toolCallId
-            ? { ...item, output: formatToolOutput(event.partialResult), state: "input-available" }
+            ? {
+                ...item,
+                output: result.output,
+                historyPreview: item.historyPreview || result.preview,
+                state: "input-available",
+              }
             : item,
         ),
       }));
@@ -654,13 +746,15 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
       get().mergeArtifactsFromToolEvent(event);
       get().requestGitStatusRefresh({ debounce: true });
       if (!event.toolCallId) return;
+      const result = boundedToolOutput(event.result);
       set((state) => ({
         items: state.items.map((item) =>
           item.kind === "tool" && item.id === event.toolCallId
             ? {
                 ...item,
-                errorText: event.isError ? String(formatToolOutput(event.result)) : undefined,
-                output: event.isError ? undefined : formatToolOutput(event.result),
+                errorText: event.isError ? result.output : undefined,
+                output: event.isError ? undefined : result.output,
+                historyPreview: item.historyPreview || result.preview,
                 state: event.isError ? "output-error" : "output-available",
               }
             : item,

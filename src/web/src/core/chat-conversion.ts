@@ -1,9 +1,11 @@
+import { jsonTextPrefix } from "../../../../extensions/bounded-json";
 import { MAX_IMAGE_DIM, VALID_IMAGE_MIME_TYPES } from "./constants";
+import { boundedToolOutput } from "./conversation-window";
 import type { ChatItem, PiMessage, PromptImage, Usage } from "./types";
 import { UiError, uiText } from "./ui-text";
 
 export function syncToItems(
-  entries: Array<{ type: string; id?: string; message?: PiMessage }>,
+  entries: Array<{ type: string; id?: string; message?: PiMessage; historyPreview?: boolean }>,
   nextId: (prefix: string) => string,
 ): ChatItem[] {
   const items: ChatItem[] = [];
@@ -24,6 +26,7 @@ export function syncToItems(
           text,
           images,
           entryId: entry.id,
+          historyPreview: entry.historyPreview,
         });
       }
     } else if (message.role === "assistant") {
@@ -37,10 +40,11 @@ export function syncToItems(
           role: "assistant",
           text,
           reasoning,
-          copyable: toolCalls.length === 0,
+          copyable: !entry.historyPreview && toolCalls.length === 0,
           presentation: toolCalls.length > 0 ? "activity" : "normal",
           cost: message.usage?.cost?.total,
           entryId: entry.id,
+          historyPreview: entry.historyPreview,
         });
       }
 
@@ -52,6 +56,7 @@ export function syncToItems(
           input: call.arguments,
           state: "input-available",
           entryId: entry.id,
+          historyPreview: entry.historyPreview,
           relatedEntryIds: entry.id ? [entry.id] : [],
         };
         tools.set(tool.id, tool);
@@ -76,15 +81,20 @@ export function syncToItems(
         items.push(tool);
       }
       if (tool) {
+        const result = boundedToolOutput(message.content);
+        if (entry.historyPreview || result.preview) {
+          tool.historyPreview = true;
+          tool.detailEntryId = entry.id;
+        }
         if (entry.id && !tool.relatedEntryIds?.includes(entry.id)) {
           tool.relatedEntryIds = [...(tool.relatedEntryIds ?? []), entry.id];
         }
         if (message.isError) {
           tool.state = "output-error";
-          tool.errorText = formatToolOutput(message.content);
+          tool.errorText = result.output;
         } else {
           tool.state = "output-available";
-          tool.output = formatToolOutput(message.content);
+          tool.output = result.output;
         }
       }
     }
@@ -94,24 +104,28 @@ export function syncToItems(
 }
 
 export function extractText(content: PiMessage["content"]): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-
-  return content
-    .filter((block): block is { type: "text"; text?: string } => block.type === "text")
-    .map((block) => block.text || "")
-    .filter(Boolean)
-    .join("\n");
+  return extractSection(content, "text");
 }
 
 export function extractThinking(content: PiMessage["content"]): string {
-  if (!Array.isArray(content)) return "";
+  return extractSection(content, "thinking");
+}
 
-  return content
-    .filter((block): block is { type: "thinking"; thinking?: string } => block.type === "thinking")
-    .map((block) => block.thinking || "")
-    .filter(Boolean)
-    .join("\n");
+function extractSection(content: PiMessage["content"], type: "text" | "thinking") {
+  if (typeof content === "string") return type === "text" ? jsonTextPrefix(content, 64 * 1024) : "";
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  let remaining = 64 * 1024;
+  for (const block of content) {
+    if (block.type !== type) continue;
+    const value = (block as Record<string, unknown>)[type];
+    if (typeof value !== "string" || !value) continue;
+    const text = jsonTextPrefix(value, remaining);
+    parts.push(text);
+    remaining -= new TextEncoder().encode(JSON.stringify(text)).length;
+    if (text.length < value.length || remaining <= 0) break;
+  }
+  return parts.join("\n");
 }
 
 export function extractImages(content: PiMessage["content"]): PromptImage[] {
@@ -231,26 +245,5 @@ function processImageFile(file: File): Promise<PromptImage> {
 }
 
 export function formatToolOutput(result: unknown): string {
-  if (!result) return "";
-
-  if (Array.isArray(result)) {
-    return result.map((block) => (isTextBlock(block) ? block.text || "" : JSON.stringify(block, null, 2))).join("\n");
-  }
-
-  if (
-    typeof result === "object" &&
-    result !== null &&
-    "content" in result &&
-    Array.isArray((result as { content?: unknown }).content)
-  ) {
-    return formatToolOutput((result as { content: unknown[] }).content);
-  }
-
-  return typeof result === "string" ? result : JSON.stringify(result, null, 2);
-}
-
-function isTextBlock(value: unknown): value is { type: "text"; text?: string } {
-  return (
-    typeof value === "object" && value !== null && "type" in value && (value as { type?: unknown }).type === "text"
-  );
+  return boundedToolOutput(result).output;
 }

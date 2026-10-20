@@ -65,7 +65,7 @@ export function ChatItemView({
             title={item.name}
             type={`tool-${item.name}` as `tool-${string}`}
           />
-          {isToolHistoryPreview(item) && (
+          {isToolHistoryPreview(item) && !item.historyPreview && (
             <p className="px-3 pb-2 text-muted-foreground text-xs">
               {t("History preview. Full data remains in the original session.")}
             </p>
@@ -82,10 +82,15 @@ export function ChatItemView({
   }
 
   // item.kind === "message" and role is "assistant" (user messages handled by UserMessageView)
-  const canCopy = item.text.trim().length > 0 && item.copyable !== false && !item.streaming;
+  const canCopy = !item.historyPreview && item.text.trim().length > 0 && item.copyable !== false && !item.streaming;
   const isActivity = item.presentation === "activity";
   const canRegenerate = Boolean(
-    item.role === "assistant" && item.text.trim() && item.entryId && !item.streaming && !isActivity,
+    !item.historyPreview &&
+      item.role === "assistant" &&
+      item.text.trim() &&
+      item.entryId &&
+      !item.streaming &&
+      !isActivity,
   );
 
   const copyMessage = async () => {

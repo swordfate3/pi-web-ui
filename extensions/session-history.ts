@@ -1,4 +1,8 @@
+import { boundedJson } from "./bounded-json.ts";
 import { RECOVERABLE_LIVE_EVENTS } from "./live-transport.ts";
+
+export { readEntryDetail } from "./entry-detail.ts";
+export { serializeHistoryEnvelope } from "./history-envelope.ts";
 
 export type HistoryRange = { from: number; to: number };
 export type HistoryQuery = HistoryRange & { before?: string };
@@ -18,10 +22,10 @@ export type HistoryTreeNode = {
   label?: string;
   labelTimestamp?: string;
 };
-const PAGE_BYTES = 512 * 1024;
-const ENTRY_BYTES = 32 * 1024;
-const TREE_NODES = 1000;
-const TREE_BYTES = 1024 * 1024;
+const PAGE_BYTES = 192 * 1024;
+const ENTRY_BYTES = 16 * 1024;
+const TREE_NODES = 200;
+const TREE_BYTES = 32 * 1024;
 const FRAME_BYTES = 4 * 1024 * 1024;
 
 export function utcRecentRange(now = Date.now()): HistoryRange {
@@ -53,51 +57,7 @@ const short = (value: unknown, length = 160): string | undefined =>
 // Inspect a small bounded clone before serializing. A huge string/array/custom
 // object never needs to be copied or stringified in full to discover its size.
 function boundedEntry(entry: HistoryEntry): HistoryEntry {
-  let budget = ENTRY_BYTES;
-  const seen = new Set<object>();
-  function clone(value: unknown, depth = 0): unknown {
-    if (depth > 12 || budget < 0) throw new Error("preview");
-    if (typeof value === "string") {
-      if (value.length > budget) throw new Error("preview");
-      budget -= Buffer.byteLength(JSON.stringify(value));
-      if (budget < 0) throw new Error("preview");
-      return value;
-    }
-    if (value === null || typeof value === "number" || typeof value === "boolean" || value === undefined) {
-      budget -= 16;
-      return value;
-    }
-    if (typeof value !== "object" || seen.has(value)) throw new Error("preview");
-    seen.add(value);
-    try {
-      if (Array.isArray(value)) {
-        if (value.length > 256) throw new Error("preview");
-        budget -= value.length + 2;
-        return value.map((v) => clone(v, depth + 1));
-      }
-      const result: Record<string, unknown> = {};
-      let count = 0;
-      for (const key in value) {
-        if (!Object.hasOwn(value, key)) continue;
-        if (++count > 128 || key.length > budget) throw new Error("preview");
-        budget -= Buffer.byteLength(JSON.stringify(key)) + 2;
-        Object.defineProperty(result, key, {
-          value: clone((value as Record<string, unknown>)[key], depth + 1),
-          enumerable: true,
-        });
-      }
-      return result;
-    } finally {
-      seen.delete(value);
-    }
-  }
-  try {
-    const result = clone(entry) as HistoryEntry;
-    if (Buffer.byteLength(JSON.stringify(result)) > ENTRY_BYTES) throw new Error("preview");
-    return result;
-  } catch {
-    return { ...lightEntry(entry), historyPreview: true };
-  }
+  return boundedJson(entry, ENTRY_BYTES)?.value ?? lightEntry(entry);
 }
 
 function lightEntry(entry: HistoryEntry): HistoryEntry & { id: string } {
@@ -222,23 +182,41 @@ export function selectSessionHistory(branch: readonly HistoryEntry[], tree: unkn
   const range = historyRange(query);
   if (query.before !== undefined && (typeof query.before !== "string" || !query.before))
     throw new Error("Invalid history cursor");
-  const matching = branch
-    .filter((entry) => {
-      const time = Date.parse(entry.timestamp ?? "");
-      return time >= range.from && time < range.to;
-    })
-    .sort((a, b) => Date.parse(a.timestamp ?? "") - Date.parse(b.timestamp ?? ""));
-  let end = matching.length;
+  let cursorIndex = -1;
+  let cursorTime = Infinity;
   if (query.before !== undefined) {
-    end = matching.findIndex((entry) => entry.id === query.before);
-    if (end < 0) throw new Error("Unknown history cursor for this date range");
+    cursorIndex = branch.findIndex((entry) => entry.id === query.before);
+    cursorTime = Date.parse(branch[cursorIndex]?.timestamp ?? "");
+    if (cursorIndex < 0 || !(cursorTime >= range.from && cursorTime < range.to))
+      throw new Error("Unknown history cursor for this date range");
+  }
+  // Scan SDK-owned history without copying/filtering/sorting the entire branch.
+  // Only forty candidate references are held; ties preserve original branch order.
+  const candidates: Array<{ entry: HistoryEntry; time: number; index: number }> = [];
+  let total = 0;
+  let eligible = 0;
+  for (let index = 0; index < branch.length; index++) {
+    const entry = branch[index];
+    const time = Date.parse(entry.timestamp ?? "");
+    if (!(time >= range.from && time < range.to)) continue;
+    total++;
+    if (query.before !== undefined && (time > cursorTime || (time === cursorTime && index >= cursorIndex))) continue;
+    eligible++;
+    if (
+      candidates.length === 40 &&
+      (time < candidates[0].time || (time === candidates[0].time && index < candidates[0].index))
+    )
+      continue;
+    candidates.push({ entry, time, index });
+    candidates.sort((a, b) => a.time - b.time || a.index - b.index);
+    if (candidates.length > 40) candidates.shift();
   }
   const entries: HistoryEntry[] = [];
   let bytes = 2;
   let truncatedEntries = 0;
-  let index = end - 1;
-  for (; index >= 0 && entries.length < 100; index--) {
-    const entry = boundedEntry(matching[index]);
+  let index = candidates.length - 1;
+  for (; index >= 0 && entries.length < 40; index--) {
+    const entry = boundedEntry(candidates[index].entry);
     const size = Buffer.byteLength(JSON.stringify(entry)) + (entries.length ? 1 : 0);
     if (bytes + size > PAGE_BYTES) break;
     bytes += size;
@@ -252,8 +230,8 @@ export function selectSessionHistory(branch: readonly HistoryEntry[], tree: unkn
     treeNodes,
     history: {
       ...range,
-      nextBefore: index >= 0 ? (entries[0]?.id ?? null) : null,
-      total: matching.length,
+      nextBefore: eligible > entries.length ? (entries[0]?.id ?? null) : null,
+      total,
       returned: entries.length,
       truncatedEntries,
       treeLimited,

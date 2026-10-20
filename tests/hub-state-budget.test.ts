@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -11,11 +12,14 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { initializeHub, issueSession, readGrant, readHubConfig, revokeSession } from "../hub/config.ts";
 import { issueManagementCode, revokeManagement } from "../hub/management.ts";
+import { startHub } from "../hub/server.ts";
 import { storageDiagnostics, withStateWriter } from "../hub/state-budget.ts";
 
 function fixture(t: test.TestContext) {
@@ -27,6 +31,147 @@ function fixture(t: test.TestContext) {
   const credential = issueSession(config, path.join(dir, "first.json"), { label: "live" });
   return { dir, file, config, credential };
 }
+
+function seedActiveGrants(config: { stateDir: string }, total: number) {
+  for (let i = 1; i < total; i++) {
+    const run_id = i.toString(16).padStart(32, "0");
+    writeFileSync(
+      path.join(config.stateDir, "grants", `${run_id}.json`),
+      JSON.stringify({ run_id, token: "a".repeat(64), label: "existing", backendHost: "127.0.0.1" }),
+      { mode: 0o600 },
+    );
+  }
+}
+
+test("pre-existing 513 active grants reject ordinary writes and startup without changing grants", async (t) => {
+  const f = fixture(t);
+  seedActiveGrants(f.config, 513);
+  const grants = path.join(f.config.stateDir, "grants");
+  const before = readdirSync(grants)
+    .sort()
+    .map((name) => [name, readFileSync(path.join(grants, name), "utf8")]);
+  assert.equal(storageDiagnostics(f.config).activeGrants, 513);
+  assert.equal(storageDiagnostics(f.config).overBudget, true);
+  assert.throws(() => issueManagementCode(f.config), /quota/);
+  assert.throws(
+    () =>
+      withStateWriter(f.config, (writer) =>
+        writer.write("registry.json", { schema: 2, boot: "a".repeat(32) }, { security: true }),
+      ),
+    /quota/,
+  );
+  let hub: Awaited<ReturnType<typeof startHub>> | undefined;
+  try {
+    await assert.rejects(async () => {
+      hub = await startHub(f.config, { versions: { source: async () => ({}) } });
+    }, /quota/);
+    assert.deepEqual(
+      readdirSync(grants)
+        .sort()
+        .map((name) => [name, readFileSync(path.join(grants, name), "utf8")]),
+      before,
+    );
+    assert.equal(existsSync(path.join(f.config.stateDir, "registry.json")), false);
+    revokeSession(f.config, f.credential.run_id);
+    assert.equal(storageDiagnostics(f.config).activeGrants, 512);
+    assert.equal(readdirSync(grants).length, 513);
+    hub = await startHub(f.config, { versions: { source: async () => ({}) } });
+    issueManagementCode(f.config);
+  } finally {
+    await hub?.close();
+  }
+});
+
+test("pre-existing overcount allows only exact grant revocation until recovery reaches 512", (t) => {
+  const f = fixture(t);
+  seedActiveGrants(f.config, 514);
+  const grant = readGrant(f.config, f.credential.run_id);
+  assert.throws(
+    () =>
+      withStateWriter(f.config, (writer) =>
+        writer.write(
+          `grants/${grant.run_id}.json`,
+          { ...grant, revoked: true, token: "b".repeat(64) },
+          { security: true },
+        ),
+      ),
+    /quota/,
+  );
+  assert.deepEqual(readGrant(f.config, grant.run_id), grant);
+  revokeSession(f.config, grant.run_id);
+  assert.equal(storageDiagnostics(f.config).activeGrants, 513);
+  assert.throws(() => issueManagementCode(f.config), /quota/);
+  revokeSession(f.config, "1".padStart(32, "0"));
+  assert.equal(storageDiagnostics(f.config).activeGrants, 512);
+  assert.equal(readdirSync(path.join(f.config.stateDir, "grants")).length, 514);
+  issueManagementCode(f.config);
+});
+
+test("pre-existing overcount on a running Hub rejects renewal, fresh registration and bounded issuance", async (t) => {
+  const f = fixture(t);
+  const hub = await startHub(f.config, { versions: { source: async () => ({}) } });
+  let generation = "a".repeat(32);
+  const backend = http.createServer((request, response) =>
+    response.end(
+      JSON.stringify({
+        generation,
+        proof: createHmac("sha256", f.credential.token)
+          .update(`${request.headers["x-pi-web-challenge"]}:${generation}`)
+          .digest("hex"),
+      }),
+    ),
+  );
+  await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+  const port = (backend.address() as net.AddressInfo).port;
+  const exchange = (value: Record<string, unknown>) =>
+    new Promise<{ ok: boolean; code?: string }>((resolve, reject) => {
+      const socket = net.createConnection(f.config.socketPath, () =>
+        socket.write(`${JSON.stringify({ ...f.credential, ...value })}\n`),
+      );
+      let data = "";
+      socket.on("data", (chunk) => {
+        data += chunk;
+        if (data.includes("\n")) {
+          socket.destroy();
+          resolve(JSON.parse(data));
+        }
+      });
+      socket.once("error", reject);
+    });
+  try {
+    assert.equal((await exchange({ action: "register", generation, port })).ok, true);
+    seedActiveGrants(f.config, 513);
+    const before = readGrant(f.config, f.credential.run_id);
+    assert.equal(
+      (await exchange({ action: "register", generation, port })).code,
+      "STATE_QUOTA",
+      "renewal must not bypass admission just because it has no disk write",
+    );
+    generation = "b".repeat(32);
+    assert.equal((await exchange({ action: "register", generation, port })).code, "STATE_QUOTA");
+    const { boot } = JSON.parse(readFileSync(path.join(f.config.stateDir, "registry.json"), "utf8"));
+    assert.equal(
+      (
+        await exchange({
+          action: "bounded_issue",
+          protocol: "bounded-v2",
+          boot,
+          slot: "0".repeat(16),
+          request_id: "c".repeat(32),
+          port,
+        })
+      ).code,
+      "STATE_QUOTA",
+    );
+    assert.deepEqual(readGrant(f.config, f.credential.run_id), before);
+    assert.equal(existsSync(path.join(f.config.stateDir, "generations", `${generation}.json`)), false);
+    assert.equal(readdirSync(path.join(f.config.stateDir, "bounded")).length, 0);
+  } finally {
+    await hub.close();
+    backend.closeAllConnections();
+    await new Promise<void>((resolve) => backend.close(() => resolve()));
+  }
+});
 
 test("quota refuses growth without altering a live grant or publishing an export", (t) => {
   const f = fixture(t);

@@ -470,6 +470,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     if (value.action === "bounded_issue") {
       return withStateWriter(config, (writer) => {
         const grant = authenticate();
+        writer.assertAdmission();
         return issueBounded(
           writer,
           boundedRecord(config, grant.run_id, boot),
@@ -533,8 +534,9 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     const runtime = value.runtime === undefined ? undefined : readRuntimeMetadata(value.runtime);
     const software = value.software === undefined ? undefined : readSoftwareMetadata(value.software);
     const port = Number(value.port);
-    const prepared = withStateWriter(config, () => {
+    const prepared = withStateWriter(config, (writer) => {
       const grant = authenticate();
+      writer.assertAdmission();
       const session = current(generation);
       if (bounded) {
         const record = boundedRecord(config, grant.run_id, boot);
@@ -555,6 +557,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     // The common writer stays held through final validation AND memory publication.
     return withStateWriter(config, (writer) => {
       const latestGrant = authenticate();
+      writer.assertAdmission();
       if (latestGrant.token !== grant.token || latestGrant.backendHost !== grant.backendHost)
         throw new RegistryError("AUTH_FAILED");
       if (session && current(generation) !== session) throw new RegistryError();
@@ -965,6 +968,18 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   let browserAdmissions = 0;
   server.on("upgrade", async (request, socket, head) => {
     let reserved = false;
+    let upgradePending = true;
+    let browserClosed = false;
+    let upstreamSocket: WebSocket | undefined;
+    let upstreamClosed = false;
+    const release = () => {
+      // A closed browser can still own an unfinished proof or upstream
+      // handshake. Keep its credit until all that work has settled.
+      if (reserved && !upgradePending && browserClosed && (!upstreamSocket || upstreamClosed)) {
+        reserved = false;
+        browserAdmissions--;
+      }
+    };
     try {
       if (!allowedBrowser(request, true)) {
         rejectUpgrade(socket, 403);
@@ -978,10 +993,9 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
       browserAdmissions++;
       reserved = true;
       socket.once("close", () => {
-        if (reserved) {
-          reserved = false;
-          browserAdmissions--;
-        }
+        browserClosed = true;
+        upstreamSocket?.terminate();
+        release();
       });
       const route = matchRoute(request);
       const session = route && route[2] === "/ws" ? current(route[1]) : undefined;
@@ -991,9 +1005,12 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         stopped ||
         current(session.generation) !== session
       ) {
-        rejectUpgrade(socket, 410);
+        if (!socket.destroyed) rejectUpgrade(socket, 410);
         return;
       }
+      // The browser may have closed while proof was in flight. A listener
+      // installed after this await cannot observe that earlier cancellation.
+      if (browserClosed || socket.destroyed || !reserved) return;
       const host =
         net.isIP(session.grant.backendHost) === 6 ? `[${session.grant.backendHost}]` : session.grant.backendHost;
       const headers = backendHeaders(request, session);
@@ -1006,13 +1023,17 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         handshakeTimeout: 3000,
         maxPayload: HUB_LIMITS.inFlightBytes,
       });
+      upstreamSocket = upstream;
       webSockets.set(upstream, session.generation);
-      socket.once("close", () => upstream.terminate());
       const handshakeError = () => {
         if (!socket.destroyed) rejectUpgrade(socket, 502);
       };
       upstream.once("error", handshakeError);
-      upstream.once("close", () => webSockets.delete(upstream));
+      upstream.once("close", () => {
+        upstreamClosed = true;
+        webSockets.delete(upstream);
+        release();
+      });
       upstream.once("open", () => {
         upstream.removeListener("error", handshakeError);
         upstream.on("error", () => socket.destroy());
@@ -1102,7 +1123,11 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         });
       });
     } catch {
-      rejectUpgrade(socket, 502);
+      upstreamSocket?.terminate();
+      if (!socket.destroyed) rejectUpgrade(socket, 502);
+    } finally {
+      upgradePending = false;
+      release();
     }
   });
   server.on("clientError", (_error, socket) => socket.destroy());

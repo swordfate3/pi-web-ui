@@ -324,3 +324,191 @@ This SHA recording is the only change in the report-only follow-up commit,
 `docs: record bounded hub Task 2 verification commit`.
 Post-commit inspection: tracked worktree clean; only the original untracked
 node_modules symlink remains. No dist or node_modules entry was staged.
+
+## Task 2 fix round 1 — 2026-10-20
+
+Base: `b74db5909fa709ff341cfe528200b6b9794aaea2`.
+Independent reviewer: Volta `01a15815-1504-7770-afc3-fc9140d40bc3`.
+Scope: the two Important findings only. Implementation and verification complete;
+the separate fix commit is titled
+`fix(hub): fence overquota state and cancelled handshakes`.
+No full source suite, build, browser, deployment, push or subagent was run in
+this fix round, as instructed. Earlier full-suite evidence above belongs to the
+original Task 2 implementation, not this fix round.
+
+### Changes and self-review
+
+- Existing active-grant overcount now rejects ordinary writes and startup boot
+  publication, even when the write uses the existing security-headroom option.
+  Registration checks admission under the common writer both before and after
+  backend proof, including write-free legacy renewals. Bounded issuance also
+  checks admission before any idempotent-return path.
+- The only count-recovery exception is an existing active grant changed exactly
+  to `revoked: true`, with every other field unchanged and active count reduced
+  by one. No general quota-bypass flag was added. Tests cover existing 514 grants
+  → revoke → 513 (ordinary writes still rejected) → revoke → 512 (ordinary
+  admissions recover). A token-changing purported revocation is rejected.
+  Existing 513-grant startup rejection preserves every grant byte; after
+  revocation, startup succeeds with all 513 grant files still present.
+- Browser cancellation is checked after asynchronous proof and before creating
+  the upstream. Pair credit remains reserved until the upgrade handler settles,
+  the browser closes, and any created upstream emits close. Cleanup is
+  idempotent, including abort after construction but before upstream open.
+  The real-network fixture holds signed proof responses, aborts raw TCP browser
+  sockets, and leaves backend upgrade handshakes unfinished. It observes actual
+  Hub continuation completion through a pass-through listener wrapper; no
+  production test interface or fake transport was added.
+- Self-review checked both proof/close orderings, constructor/handshake failure,
+  repeated credit release, grant preservation, the write-free renewal path,
+  startup security-headroom behavior, and scope of the staged diff. Existing
+  successful handshake, cross-origin rejection, 1 MiB preview, compression and
+  five independent Pi-run routing cases remain green.
+
+Files in this fix: `hub/state-budget.ts`, `hub/server.ts`,
+`tests/hub-state-budget.test.ts`, `tests/hub-transfer.test.ts`, and this report.
+No bounded-registry source or test change was needed; its covering suite ran.
+No dependency, extension module or generated dist changes. The Task 3 manifest
+handoff remains unchanged: `extensions/hub-generation.ts` is the sole new
+extension module from the original Task 2 implementation.
+
+### Exact RED/GREEN commands and output excerpts
+
+All commands ran from this isolated worktree. Network/subprocess tests used
+only temporary fixture state and local sockets with sandbox escalation.
+
+Finding 1 RED, before quota production changes:
+
+```sh
+node --import ./tests/register-ts.mjs --test --test-reporter=spec --test-name-pattern='pre-existing' tests/hub-state-budget.test.ts
+```
+
+```text
+tests 3; pass 0; fail 3; exit 1
+First two failures: AssertionError: Missing expected exception.
+Third: renewal must not bypass admission just because it has no disk write
+actual undefined; expected 'STATE_QUOTA'
+```
+
+Same command GREEN after quota changes:
+
+```text
+tests 3; pass 3; fail 0; cancelled 0; skipped 0
+duration_ms 448.067998
+exit 0
+```
+
+Finding 2 RED, before handshake production changes:
+
+```sh
+node --import ./tests/register-ts.mjs --test --test-reporter=spec --test-name-pattern='browser abort' tests/hub-transfer.test.ts
+```
+
+```text
+✖ browser abort during held proof never creates orphan backend handshakes
+ℹ cancelled=9, backend handshakes=9, peak=9, pending=9
+AssertionError: cancelled proof must never construct an upstream
+9 !== 0
+✖ browser abort retains pair credit until held proof settles
+AssertionError: unfinished proofs must retain all eight admission credits
+actual: 'HTTP/1.1 502 Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'
+expected: /^HTTP\/1\.1 503/
+✔ browser abort after upstream construction cleans hanging handshakes before capacity reuse
+tests 3; pass 1; fail 2; cancelled 0; skipped 0
+duration_ms 438.084977
+exit 1
+```
+
+Before this behavioral RED, the test harness was corrected to wait for socket
+close without rejecting the intentional ECONNRESET, and to combine four
+unfinished upstream handshakes with four held proofs (respecting the independent
+four-probe cap). The initial reset error and probe-limit timeout are not counted
+as evidence of the production defect.
+
+Same command GREEN after handshake changes:
+
+```text
+✔ browser abort during held proof never creates orphan backend handshakes
+ℹ cancelled=9, backend handshakes=0, peak=0, pending=0
+✔ browser abort retains pair credit until held proof settles
+✔ browser abort after upstream construction cleans hanging handshakes before capacity reuse
+tests 3; pass 3; fail 0; cancelled 0; skipped 0
+duration_ms 474.785648
+exit 0
+```
+
+Final covering tests, after formatting:
+
+```sh
+node --import ./tests/register-ts.mjs --test --test-reporter=spec tests/hub-state-budget.test.ts tests/hub-transfer.test.ts tests/hub-bounded-registry.test.ts
+```
+
+```text
+ℹ cancelled=9, backend handshakes=0, peak=0, pending=0
+ℹ tests 44
+ℹ suites 0
+ℹ pass 44
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 36233.907309
+exit 0
+```
+
+This includes 2,000 bounded rotations, separate-process grant issuance races,
+revocation during proof, all six new regression cases, draining 1 MiB previews,
+and the eight-browser-pair boundary.
+
+```sh
+node --import ./tests/register-ts.mjs --test --test-reporter=spec --test-name-pattern='five independent Pi|WebSocket routing' tests/session-hub.test.ts
+```
+
+```text
+✔ five independent Pi runs register and route without consuming browser-pair admission
+✔ WebSocket routing injects proof and rejects cross-origin connections
+tests 2; pass 2; fail 0; cancelled 0; skipped 0
+duration_ms 462.070848
+exit 0
+```
+
+```sh
+./node_modules/.bin/tsc --noEmit -p tsconfig.connection.json
+./node_modules/.bin/biome check hub/state-budget.ts hub/server.ts tests/hub-state-budget.test.ts tests/hub-transfer.test.ts
+git diff --check
+```
+
+```text
+TypeScript: no output, exit 0
+Checked 4 files in 27ms. No fixes applied.
+Found 1 warning.
+Found 4 infos.
+Biome: 0 errors, exit 0
+git diff --check: no output, exit 0
+```
+
+The lint notices are pre-existing: one non-null assertion in bounded promotion
+and four template-string suggestions in transfer tests. Node's existing
+MODULE_TYPELESS_PACKAGE_JSON warning remains. Newly added test non-null
+assertions were replaced with runtime assertions before the final checks.
+
+### Compatibility, storage/diagnostics and remaining caveats
+
+The concurrent **BROWSER cap stays eight pairs**, not eight Pi runs or sessions;
+pending proof/handshake/cleanup now also occupies its credit correctly. A
+cancelled proof retains credit until it settles or reaches the existing proof
+timeout. The 264 MiB maximum admitted forwarding-payload calculation is unchanged
+and is not a total-RSS guarantee under the 512 MiB container limit.
+
+Storage diagnostics retain the same aggregate-only interface. An existing
+overcount still reports its actual count and `overBudget: true`; ordinary
+admission and boot now agree with that diagnostic. Recovery revocation still
+must fit the existing byte/staging ceiling; this is not an automatic repair for
+an already byte-oversized or unsafe store. No grants, legacy tombstones or
+receipts are deleted. Preserve-only grant/receipt GC, no offline-grant TTL,
+grant-first export publication and conservative retained export reservations
+are unchanged. Export removal does not free its retained reservation, and quota
+refusal remains possible; there is no promise of unlimited session churn.
+
+No unresolved security/design ruling is needed for these two fixes. Hub-first
+rollout and Task 3 packaged/build/real-Pi/browser validation remain required.
+The original untracked node_modules symlink is preserved and is not staged.

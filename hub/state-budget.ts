@@ -172,6 +172,13 @@ export class StateWriter {
     this.root = root;
   }
 
+  /** Also fence authority-only transitions, such as legacy lease renewal. */
+  assertAdmission() {
+    this.totals ??= scan(this.root);
+    if (this.totals.activeGrants > ACTIVE_GRANT_LIMIT || this.totals.logicalBytes > STATE_LIMIT)
+      throw new StateBudgetError();
+  }
+
   private destination(relative: string) {
     if (
       !/^(?:grants\/[a-f0-9]{32}\.json|generations\/[a-f0-9]{32}\.json|bounded\/[a-f0-9]{32}\.json|restarts\/[a-f0-9]{32}(?:\.started|\.verified)?\.json|management\.json|registry\.json)$/.test(
@@ -214,7 +221,20 @@ export class StateWriter {
     // spends an unaccounted copy, and export reservation precedes publication.
     const peak = totals.logicalBytes + data.length + Math.max(0, newCharge - oldCharge);
     const ceiling = options.security ? STATE_LIMIT : STATE_LIMIT - SECURITY_RESERVE;
-    if (peak > ceiling || (activeDelta > 0 && totals.activeGrants + activeDelta > ACTIVE_GRANT_LIMIT))
+    // An already over-count store may recover one grant at a time. Headroom
+    // alone is not a bypass: only the exact existing grant with revoked=true
+    // can cross this fence, never a boot/registry write or credential change.
+    const revocation =
+      options.security &&
+      isGrant &&
+      activeDelta === -1 &&
+      (value as { revoked?: unknown }).revoked === true &&
+      JSON.stringify(value) === JSON.stringify({ ...old, revoked: true });
+    if (
+      peak > ceiling ||
+      ((totals.activeGrants > ACTIVE_GRANT_LIMIT || totals.activeGrants + activeDelta > ACTIVE_GRANT_LIMIT) &&
+        !revocation)
+    )
       throw new StateBudgetError();
     const temporary = path.join(path.dirname(file), `.write-${randomBytes(16).toString("hex")}`);
     const fd = openSync(

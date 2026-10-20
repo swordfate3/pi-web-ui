@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
-import type net from "node:net";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { Duplex } from "node:stream";
 import test from "node:test";
 import { brotliDecompressSync, gunzipSync, gzipSync } from "node:zlib";
 import { WebSocket, WebSocketServer } from "ws";
@@ -95,6 +96,192 @@ async function fixture(t: test.TestContext, options: { backendCompression?: bool
     },
   };
 }
+
+// Observe the real Hub's async upgrade completion without replacing network
+// transport or adding production-only test hooks. Backend sockets stay real.
+async function handshakeFixture(t: test.TestContext) {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-hub-handshake-"));
+  const configFile = path.join(directory, "config.json");
+  initializeHub(configFile, { port: 0 });
+  const config = readHubConfig(configFile);
+  let hubServer: http.Server | undefined;
+  const original = http.createServer;
+  const capture = t.mock.method(http, "createServer", (...args: Parameters<typeof http.createServer>) => {
+    const server = Reflect.apply(original, http, args) as http.Server;
+    hubServer = server;
+    return server;
+  });
+  const hub = await startHub(config, { versions: { source: async () => ({}) } });
+  capture.mock.restore();
+  assert.ok(hubServer);
+  const upgrades = new Map<number, { socket: net.Socket; done: Promise<unknown> }>();
+  const handler = hubServer.listeners("upgrade")[0];
+  hubServer.removeListener("upgrade", handler);
+  hubServer.on("upgrade", (request, socket, head) => {
+    const raw = socket as net.Socket;
+    const done = Promise.resolve(handler.call(hubServer, request, socket, head));
+    assert.ok(raw.remotePort);
+    upgrades.set(raw.remotePort, { socket: raw, done });
+  });
+  const credentialFile = path.join(directory, "session.json");
+  issueSession(config, credentialFile, { label: "Handshake fixture" });
+  const registration = createSessionRegistration({ socketPath: hub.socketPath, credentialFile });
+  const events = new EventEmitter();
+  const held: Array<() => void> = [];
+  const pending = new Set<Duplex>();
+  let holdProof = false;
+  let peak = 0;
+  let total = 0;
+  const backend = http.createServer((request, response) => {
+    if (holdProof && request.url === "/.pi-web-identity") {
+      held.push(() => {
+        registration.guard(request, response);
+      });
+      events.emit("proof");
+      return;
+    }
+    if (registration.guard(request, response)) response.end("OK");
+  });
+  backend.on("upgrade", (_request, socket) => {
+    pending.add(socket);
+    total++;
+    peak = Math.max(peak, pending.size);
+    socket.on("error", () => socket.destroy());
+    socket.on("end", () => socket.destroy());
+    socket.once("close", () => {
+      pending.delete(socket);
+      events.emit("backend-close");
+    });
+    socket.resume();
+    events.emit("handshake");
+    // Intentionally never send a WebSocket handshake response.
+  });
+  await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+  let url = "";
+  await registration.start((backend.address() as net.AddressInfo).port, (value) => {
+    url = value ?? "";
+  });
+  const clients: net.Socket[] = [];
+  t.after(async () => {
+    holdProof = false;
+    for (const release of held.splice(0)) release();
+    for (const client of clients) client.destroy();
+    for (const socket of pending) socket.destroy();
+    await registration.stop();
+    await hub.close();
+    backend.closeAllConnections();
+    await new Promise<void>((resolve) => backend.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  });
+  return {
+    events,
+    upgrades,
+    url,
+    get pending() {
+      return pending.size;
+    },
+    get peak() {
+      return peak;
+    },
+    get total() {
+      return total;
+    },
+    hold(value: boolean) {
+      holdProof = value;
+    },
+    release() {
+      const release = held.shift();
+      assert.ok(release);
+      release();
+    },
+    async browser() {
+      const address = new URL(url);
+      const socket = net.createConnection({ host: "127.0.0.1", port: Number(address.port) });
+      clients.push(socket);
+      await once(socket, "connect");
+      const localPort = socket.localPort;
+      assert.ok(localPort);
+      socket.write(
+        `GET ${address.pathname}ws HTTP/1.1\r\nHost: ${address.host}\r\nOrigin: ${address.origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`,
+      );
+      return { socket, localPort };
+    },
+  };
+}
+
+test("browser abort during held proof never creates orphan backend handshakes", { timeout: 10000 }, async (t) => {
+  const f = await handshakeFixture(t);
+  f.hold(true);
+  for (let i = 0; i < 9; i++) {
+    const proof = once(f.events, "proof");
+    const browser = await f.browser();
+    await proof;
+    const upgrade = f.upgrades.get(browser.localPort);
+    assert.ok(upgrade);
+    const closed = new Promise<void>((resolve) => upgrade.socket.once("close", () => resolve()));
+    browser.socket.resetAndDestroy();
+    await closed; // Hub has observed the cancellation before proof is released.
+    f.release();
+    await upgrade.done;
+  }
+  f.hold(false);
+  await request(f.url); // real round trip after all nine upgrade continuations
+  t.diagnostic(`cancelled=9, backend handshakes=${f.total}, peak=${f.peak}, pending=${f.pending}`);
+  assert.equal(f.total, 0, "cancelled proof must never construct an upstream");
+  assert.equal(f.pending, 0);
+  assert.ok(f.peak <= 8);
+});
+
+test("browser abort retains pair credit until held proof settles", { timeout: 10000 }, async (t) => {
+  const f = await handshakeFixture(t);
+  // Four live handshakes plus four cancelled proofs fill eight pair credits
+  // without exceeding the independent four-probe cap.
+  for (let i = 0; i < 4; i++) {
+    const handshake = once(f.events, "handshake");
+    await f.browser();
+    await handshake;
+  }
+  f.hold(true);
+  for (let i = 0; i < 4; i++) {
+    const proof = once(f.events, "proof");
+    const browser = await f.browser();
+    await proof;
+    const upgrade = f.upgrades.get(browser.localPort);
+    assert.ok(upgrade);
+    const closed = new Promise<void>((resolve) => upgrade.socket.once("close", () => resolve()));
+    browser.socket.resetAndDestroy();
+    await closed;
+  }
+  const browser = await f.browser();
+  const [reply] = await once(browser.socket, "data");
+  assert.match(reply.toString(), /^HTTP\/1\.1 503/, "unfinished proofs must retain all eight admission credits");
+  assert.equal(f.total, 4);
+});
+
+test("browser abort after upstream construction cleans hanging handshakes before capacity reuse", {
+  timeout: 10000,
+}, async (t) => {
+  const f = await handshakeFixture(t);
+  for (let i = 0; i < 12; i++) {
+    const handshake = once(f.events, "handshake");
+    const browser = await f.browser();
+    await handshake;
+    const closed = once(f.events, "backend-close");
+    browser.socket.resetAndDestroy();
+    await closed;
+    assert.equal(f.pending, 0);
+  }
+  for (let i = 0; i < 8; i++) {
+    const handshake = once(f.events, "handshake");
+    await f.browser();
+    await handshake;
+  }
+  const rejected = await f.browser();
+  const [reply] = await once(rejected.socket, "data");
+  assert.match(reply.toString(), /^HTTP\/1\.1 503/);
+  assert.equal(f.pending, 8);
+  assert.equal(f.peak, 8);
+});
 
 function request(url: string, headers: http.OutgoingHttpHeaders = {}, method = "GET") {
   return new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {

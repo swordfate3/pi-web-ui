@@ -262,3 +262,94 @@ with TS5112; the corrected command above passed. The existing Node
 `MODULE_TYPELESS_PACKAGE_JSON` warning remains in focused tests and the visual
 runner. No warning-free result, production rollout or additional runtime coverage
 is claimed.
+
+### Final review fix: tool view state cannot evict history after a snapshot
+
+The whole-branch review found a valid server page that fit initially but lost its
+oldest browser row when adding the `open` field during tool expansion. The generic
+post-snapshot retention gate could not repair the already-established history
+cursor/counts. The fix reserves the largest serialized tool view state
+(`open: false`) during both item and window accounting, before the history boundary
+is chosen. Actual source objects are not mutated, budgets are not increased, and
+all source-changing paths still pass through the central retention gate. Opening
+or closing tools now uses already-reserved capacity; it cannot cause new eviction
+or a new content projection. Any initial eviction is handled by the existing
+history-aware snapshot boundary and remains reachable through **Older page**.
+
+The regression uses the reviewer's exact 16 orphan-tool-result fixture: 20 nested
+wrappers around `{ rows: [{ value: "x" }, ...], pad: "" }`, with 400 rows in the
+first 15 entries and 163 in the last. It runs the real server history selector,
+snapshot conversion and session store, not pre-populated store rows.
+
+| Boundary / observation | Measured result |
+| --- | --- |
+| Server page entries / serialized entries / largest entry | 16 / 92,935 B / 6,016 B; within 40 / 192 KiB / 16 KiB limits |
+| Converted rows before browser budgeting | 16 / 524,194 B; full snapshot envelope asserted ≤256 KiB |
+| Fixed initial retained page | `e1`–`e15`; returned 15, truncated 14, total 16, exact nextBefore `e1` |
+| After repeated all-tool or individual open/close operations | Same rows, output, detail targets and metadata; closed-window size 491,352 B |
+| Explicit older page | `e0`; returned 1, truncated 1, total 16, nextBefore null; closed-window size 33,051 B |
+| Recovery | All 16 identities visited once; `e0` detail read with exact session/runtime/entry scope; fixture unchanged |
+
+The 200-item / 512-KiB aggregate / 64-KiB item limits remain unchanged and are
+asserted after each toggle cycle. A separate exactly-64-KiB item test covers
+reserving view state before projection. Existing full-window test fixtures now
+include the largest view-state encoding when filling their byte budget exactly.
+
+| Final-fix verification (base `34eea23`) | Result |
+| --- | --- |
+| Exact fixture RED | All-tool and individual-tool regressions both fail by losing `e0` |
+| Mutation check with view-state reservation removed | **3 tests, 0 pass, 3 fail**, including the per-item boundary regression |
+| Focused history-store / conversation-window / chat-performance / session-history / history-dates / tree-wire / visual-gate tests | **100 pass, 0 fail, 0 skip**, 2,293.534 ms |
+| Frontend and connection TypeScript checks; explicit harness/test type check | Exit 0, no diagnostics |
+| `npm run build:web` | Exit 0; browser 5,693 modules; packaged Hub 21 modules / 168.47 kB; tracked assets/manifest rebuilt |
+| `npm run verify:dist` | Exit 0, source/output hashes verified |
+| `npm run check` | Exit 0; 264 files, **0 errors, 33 warnings, 7 infos** |
+| Real Pi + packaged Hub tool-toggle visual cases | **2 pass**, desktop 1440×1000 and mobile 390×844; all five browser-error arrays empty, no exclusions, no page horizontal overflow |
+
+This is scoped final-fix verification, not a rerun of the original full unit or
+backend integration suites. Controller owns the full-unit run, scoped re-review
+and final merge. No production services, credentials or model traffic were used.
+
+New visual evidence is separate from the original Task 3 screenshots:
+[tool-toggle manifest](artifacts/bounded-tool-toggle/evidence.json), run
+`09080483-4dbd-45f8-bd74-af00529b6329`, started `2026-10-20T09:14:52.231Z`.
+It records exact ephemeral URLs and equal before/after JSONL hashes for both
+temporary real Pi sessions. The implementer inspected all 10 actual PNGs:
+`toggle-{1440|390}-{initial|all-open|single-open|older-e0|e0-detail}.png`.
+Counts remain visibly 15 of 16 after expansion; the older page visibly shows 1 of
+16 with its detail control, and the recovered entry's dialog fits both viewports.
+On mobile the expanded date controls leave a small scrollable conversation area;
+long tool content requires scrolling. The existing Whale overlaps ordinary tool
+text, not the recovered-entry detail button or dialog close control. No global
+zero-overlap claim is made, and the previously recorded UI caveats are unchanged.
+
+Initial harness runs exposed an over-broad nested-toggle locator and an incorrect
+expectation that the final Older page button is disabled (it is absent). These
+test expectations were corrected to the existing product behavior. Screenshot
+inspection also caught `content-visibility:auto` placeholders; the harness now
+scrolls the code container itself into view and waits for actual rendering rather
+than accepting text presence. An intermediate mobile paint wait failed because
+only the header had been scrolled into view; its manifest correctly reported
+failure. The final run passed without error exclusions or UI state injection.
+All temporary processes were stopped. Existing Node/Vite warnings and generated
+bundle whitespace remain; no unrelated cleanup was performed.
+The final staged source/docs whitespace check passed; the full staged check exited
+2 for the same four generated trailing-whitespace lines (59, 703, 721, 910), now
+in `dist/assets/index-v5q8elB2.js`. The generated bundle was not hand-edited.
+
+```sh
+node --import ./tests/register-ts.mjs --test --experimental-test-isolation=none --test-reporter=spec tests/history-store.test.ts tests/conversation-window.test.ts tests/chat-rendering-performance.test.ts tests/session-history.test.ts tests/history-dates.test.ts tests/session-tree-wire.test.ts tests/visual-evidence.test.ts
+./node_modules/.bin/tsc --noEmit
+./node_modules/.bin/tsc -p tsconfig.connection.json --noEmit
+./node_modules/.bin/tsc --ignoreConfig --noEmit --module esnext --moduleResolution bundler --target es2022 --allowImportingTsExtensions --skipLibCheck --types node e2e/harness/visual-tool-toggle.ts tests/history-store.test.ts tests/conversation-window.test.ts
+npm run build:web
+npm run verify:dist
+npm run check
+# Supply the approved local Chromium through PI_E2E_BROWSER_EXECUTABLE.
+node --import ./tests/register-ts.mjs e2e/harness/visual-tool-toggle.ts
+```
+
+The complete historical [Task 2 RED/GREEN and storage-boundary report](bounded-hub-state-task-2.md)
+has also been moved out of scratch storage. All 514 original lines of evidence
+are preserved, with only a provenance introduction and repository-relative
+worktree notation added/normalized; the development-log link now points there.

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { toolToggleEntries } from "../e2e/fixtures/bounded-tool-toggle.ts";
 import { readEntryDetail, selectSessionHistory } from "../extensions/session-history.ts";
 import { syncToItems } from "../src/web/src/core/chat-conversion.ts";
 import { entryDetailTargets } from "../src/web/src/core/conversation-window.ts";
@@ -68,6 +69,88 @@ function historyStore(entries: SessionEntry[]) {
     return { ...selectSessionHistory(entries, [], params as typeof range), sessionId: "s", runtimeId: "r" };
   };
   return { state, requests };
+}
+
+for (const toggle of ["all", "individual"] as const) {
+  test(`${toggle} tool toggles preserve snapshot history reachability at the byte boundary`, async (t) => {
+    const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+    const entries = toolToggleEntries();
+    const original = JSON.stringify(entries);
+    const page = selectSessionHistory(entries, [], range);
+    assert.equal(page.entries.length, 16);
+    assert.equal(bytes(page.entries), 92_935);
+    assert.equal(Math.max(...page.entries.map(bytes)), 6_016);
+    assert.ok(bytes(page.entries) <= 192 * 1024);
+    assert.ok(page.entries.every((entry) => bytes(entry) <= 16 * 1024));
+    const sync = { ...page, sessionId: "s", runtimeId: "r" } as StateSyncPayload;
+    assert.ok(bytes({ type: "event", event: "state_sync", payload: sync }) <= 256 * 1024);
+    assert.ok(sync.entries);
+    const converted = syncToItems(sync.entries, (prefix) => prefix);
+    assert.equal(converted.length, 16);
+    assert.equal(bytes(converted), 524_194, "compact server entries expand near the browser byte limit");
+    assert.ok(converted.every((item) => bytes(item) <= 64 * 1024));
+
+    const { state } = historyStore(entries);
+    state.applyStateSync(sync, { requested: true });
+    const seen = new Set<string>();
+    let pages = 0;
+    for (;;) {
+      assert.ok(++pages <= 2, "older-page recovery must progress");
+      const ids = state.items.map((item) => item.entryId);
+      const targets = state.items.flatMap(entryDetailTargets);
+      const history = { ...state.history };
+      const outputs = state.items.map((item) => item.kind === "tool" && item.output);
+      assert.equal(state.history?.returned, new Set(ids).size);
+      assert.equal(state.history?.truncatedEntries, new Set(targets).size);
+      assert.equal(state.history?.total, 16);
+      for (const id of ids) {
+        assert.ok(id);
+        assert.ok(!seen.has(id));
+        seen.add(id);
+      }
+      for (const open of [true, false, true, false]) {
+        if (toggle === "all") state.toggleAllTools(open);
+        else for (const item of [...state.items]) state.toggleTool(item.id, open);
+        assert.deepEqual(
+          state.items.map((item) => item.entryId),
+          ids,
+          "view-only changes must not evict source rows",
+        );
+        assert.deepEqual(state.items.flatMap(entryDetailTargets), targets, "exact detail targets survive");
+        assert.deepEqual(state.history, history, "cursor and retained counts stay aligned");
+        assert.deepEqual(
+          state.items.map((item) => item.kind === "tool" && item.output),
+          outputs,
+        );
+        assert.ok(state.items.every((item) => item.kind === "tool" && item.open === open));
+        assert.ok(state.items.length <= 200);
+        assert.ok(bytes(state.items) <= 512 * 1024);
+        assert.ok(state.items.every((item) => bytes(item) <= 64 * 1024));
+      }
+      t.diagnostic(JSON.stringify({ toggle, page: pages, rows: ids.length, bytes: bytes(state.items), history }));
+      if (!state.history?.nextBefore) break;
+      assert.equal(state.history.nextBefore, state.items[0].entryId);
+      await state.loadHistory(range, state.history.nextBefore);
+    }
+    assert.deepEqual(seen, new Set(entries.map((entry) => entry.id)), "all 16 entries remain represented or pageable");
+    assert.ok(seen.has("e0"));
+    assert.deepEqual(state.items.flatMap(entryDetailTargets), ["e0"]);
+    state.send = async (method, params) => {
+      assert.equal(method, "get_entry_detail");
+      assert.deepEqual(params, { sessionId: "s", runtimeId: "r", entryId: "e0" });
+      return readEntryDetail(
+        entries,
+        { sessionId: "s", runtimeId: "r", leafId: "e15" },
+        params as Record<string, unknown>,
+        "detail",
+      );
+    };
+    await state.loadEntryDetail("e0");
+    assert.equal(state.entryDetailError, null);
+    assert.equal(state.entryDetail?.entryId, "e0");
+    assert.ok(state.entryDetail?.text);
+    assert.equal(JSON.stringify(entries), original);
+  });
 }
 
 test("snapshot row eviction exposes an exact older cursor and recovers every entry without duplicates", async () => {

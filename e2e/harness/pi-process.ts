@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { toolToggleEntries, toolToggleRange } from "../fixtures/bounded-tool-toggle";
 
 export type PiWebUiHarness = {
   pageUrl: string;
@@ -20,6 +21,8 @@ export type PiWebUiHarnessOptions = {
   datedHistory?: boolean;
   /** Real persisted tool rows that exercise browser eviction and system preview controls. */
   boundedVisualHistory?: boolean;
+  /** Compact valid history whose rendered tool rows approach the browser byte limit. */
+  boundedToolToggle?: boolean;
   /** Synthetic multi-model, mixed-priced usage across branches and dates. */
   usageHistory?: boolean;
   /** Optional immutable release root; defaults to the working repository. */
@@ -45,13 +48,15 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   mkdirSync(agentDir, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
   if (options.git !== false) prepareGitWorkspace(workspaceDir);
-  const longSessionFile = options.usageHistory
-    ? writeUsageHistoryFixture(sessionDir, workspaceDir)
-    : options.datedHistory || options.boundedVisualHistory
-      ? writeDatedHistoryFixture(sessionDir, workspaceDir, options.boundedVisualHistory)
-      : options.longSession
-        ? writeLongSessionFixture(sessionDir, workspaceDir)
-        : undefined;
+  const longSessionFile = options.boundedToolToggle
+    ? writeToolToggleFixture(sessionDir, workspaceDir)
+    : options.usageHistory
+      ? writeUsageHistoryFixture(sessionDir, workspaceDir)
+      : options.datedHistory || options.boundedVisualHistory
+        ? writeDatedHistoryFixture(sessionDir, workspaceDir, options.boundedVisualHistory)
+        : options.longSession
+          ? writeLongSessionFixture(sessionDir, workspaceDir)
+          : undefined;
 
   const processOutput: string[] = [];
   const piProcess = spawn(
@@ -231,6 +236,25 @@ function writeUsageHistoryFixture(sessionDir: string, workspaceDir: string): str
       .join("\n")}\n`,
     "utf8",
   );
+  return file;
+}
+
+function writeToolToggleFixture(sessionDir: string, workspaceDir: string): string {
+  const id = "8e91f4c2-3000-4500-8500-000000000004";
+  const file = path.join(sessionDir, `${Date.now()}_${id}.jsonl`);
+  const lines = [
+    JSON.stringify({
+      type: "session",
+      version: 3,
+      id,
+      timestamp: new Date(toolToggleRange.from).toISOString(),
+      cwd: workspaceDir,
+    }),
+  ];
+  for (const [index, entry] of toolToggleEntries().entries()) {
+    lines.push(JSON.stringify({ ...entry, parentId: index ? `e${index - 1}` : null }));
+  }
+  writeFileSync(file, `${lines.join("\n")}\n`);
   return file;
 }
 

@@ -8,6 +8,11 @@ const NOTICE = "[Preview: large content omitted; full data remains in the origin
 const cache = new WeakMap<ChatItem, { item: ChatItem; bytes: number }>();
 const prefix = (value: unknown, budget = 8192) => (typeof value === "string" ? jsonTextPrefix(value, budget) : "");
 
+// Reserve the largest serialized view state before choosing the history boundary.
+// Adding `open` on the first toggle (or changing true to false) must not evict
+// source rows after boundHistoryWindow has established exact cursors/counts.
+const withViewBudget = (item: ChatItem): ChatItem => (item.kind === "tool" ? { ...item, open: false } : item);
+
 export function entryDetailTargets(item: ChatItem): string[] {
   if (!item.historyPreview) return [];
   return [...new Set([item.entryId, item.detailEntryId].filter((id): id is string => Boolean(id)))];
@@ -16,7 +21,7 @@ export function entryDetailTargets(item: ChatItem): string[] {
 function boundedItem(source: ChatItem) {
   const cached = cache.get(source);
   if (cached) return cached;
-  const complete = boundedJson(source, ITEM_BYTES);
+  const complete = boundedJson(withViewBudget(source), ITEM_BYTES);
   let item: ChatItem;
   if (complete) item = source;
   else {
@@ -54,7 +59,7 @@ function boundedItem(source: ChatItem) {
       };
     else item = { ...base, kind: "system", text: `${prefix(source.text)} ${NOTICE}`, tone: source.tone };
   }
-  const checked = complete ?? boundedJson(item, ITEM_BYTES);
+  const checked = complete ?? boundedJson(withViewBudget(item), ITEM_BYTES);
   // Pathological identities are never shortened into different action targets.
   if (!checked) return null;
   const result = { item, bytes: checked.bytes };

@@ -498,4 +498,4 @@
 - 每方向FIFO最多512 KiB等待加一条16 MiB在途消息，发送回调和出站排空共同释放名额；显式1 MiB文件预览、流式HTTP和原有权限/接续语义保留。默认8个并发浏览器配对（不是Pi容器数），双向payload总额264 MiB；512 MiB容器RSS未做压力担保。
 - 不具备完整依赖/Gate幂等保留证明时，grant/回执保守保留且超额拒绝。export外部删除不自动抵扣预留；不承诺无限run churn。锁崩溃恢复需要可信管理员，不自动抢占。升级必须Hub-first并升级所有CLI写入者。管理origin新增仅聚合数值的storage诊断。
 - TDD和自审覆盖2,000次轮换、重放/撤销/跨进程竞争、断开peer排队名额、慢消费者和b2 URL消费者；定向210/210，全源码563项（562通过、1可选skip、0失败），两套tsc、Biome 0 errors（33 warnings/7 infos）及diff检查通过。没有子代理、生产凭据/状态访问或模型流量。
-- Task 3接管dist/打包Pi/浏览器/文档验收；必须把新增 `extensions/hub-generation.ts` 加入固定manifest白名单。未改dist、未推送、未部署/重启，保留未跟踪node_modules符号链接。完整命令/RED-GREEN/边界记录于本任务要求的 `.superpowers/sdd/2026-10-20-bounded-hub-state/task-2-report.md`。
+- Task 3接管dist/打包Pi/浏览器/文档验收；必须把新增 `extensions/hub-generation.ts` 加入固定manifest白名单。未改dist、未推送、未部署/重启，保留未跟踪node_modules符号链接。完整命令/RED-GREEN/边界记录已保存在[Task 2 验证记录](validation/bounded-hub-state-task-2.md)，不依赖临时任务工作区。

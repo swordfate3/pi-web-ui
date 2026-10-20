@@ -26,9 +26,26 @@ test("window retains newest items and Unicode previews without cloning unchecked
   assert.equal(boundedToolOutput(huge.input).preview, true);
 });
 
+test("tool view-state capacity is reserved before the per-item projection is chosen", () => {
+  const item: ChatItem = { kind: "tool", id: "tool", entryId: "entry", name: "write", input: null, state: "output-available", output: "" };
+  item.output = "x".repeat(64 * 1024 - Buffer.byteLength(JSON.stringify(item)));
+  assert.equal(Buffer.byteLength(JSON.stringify(item)), 64 * 1024);
+  const initial = boundConversationWindow([item]).items[0];
+  assert.equal(initial.historyPreview, true, "reserve view state before accepting an exactly-full source item");
+  assert.deepEqual(entryDetailTargets(initial), ["entry"]);
+  for (const open of [true, false]) {
+    assert.equal(initial.kind, "tool");
+    const toggled = { ...initial, open };
+    const result = boundConversationWindow([toggled]);
+    assert.equal(result.items[0], toggled, "a view-only change must not trigger a new content projection");
+    assert.ok(Buffer.byteLength(JSON.stringify(result.items[0])) <= 64 * 1024);
+  }
+});
+
 test("partial-entry marker bytes are rechecked and a newly evicted boundary remains a preview", () => {
+  // Include the largest tool view-state encoding in this exactly-full fixture.
   const rows: ChatItem[] = Array.from({ length: 10 }, (_, i) => {
-    const row: ChatItem = { kind: "tool", id: `t${i}`, entryId: "entry", name: "read", state: "input-available", input: "" };
+    const row: ChatItem = { kind: "tool", id: `t${i}`, entryId: "entry", name: "read", state: "input-available", input: "", open: false };
     row.input = "x".repeat((i === 9 ? 52425 : 52428) - Buffer.byteLength(JSON.stringify(row)));
     return row;
   });
@@ -51,7 +68,7 @@ test("partial-entry marker bytes are rechecked and a newly evicted boundary rema
 test("omitted identities stay reachable when preview rows consume an already full byte window", () => {
   const omittedIds = Array.from({ length: 39 }, (_, i) => `${"\u0001".repeat(500)}${i}`);
   const rows: ChatItem[] = Array.from({ length: 10 }, (_, i) => {
-    const row: ChatItem = { kind: "tool", id: `t${i}`, entryId: "entry", name: "read", state: "input-available", input: "" };
+    const row: ChatItem = { kind: "tool", id: `t${i}`, entryId: "entry", name: "read", state: "input-available", input: "", open: false };
     row.input = "x".repeat((i === 9 ? 52425 : 52428) - Buffer.byteLength(JSON.stringify(row)));
     return row;
   });

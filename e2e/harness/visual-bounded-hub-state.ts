@@ -4,19 +4,20 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium, expect, type Page } from "@playwright/test";
+import { type Browser, type BrowserContext, chromium, expect, type Page } from "@playwright/test";
 import { isBoundedGeneration } from "../../extensions/hub-generation.ts";
 import { startHubCli } from "./hub-cli.ts";
 import { type PiWebUiHarness, startPiWebUi } from "./pi-process.ts";
+import { observeBrowserErrors, startVisualEvidence } from "./visual-evidence.ts";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 const output = "docs/validation/artifacts/bounded-hub-state";
 mkdirSync(output, { recursive: true });
-const browser = await chromium.launch({ executablePath: process.env.PI_E2E_BROWSER_EXECUTABLE });
-const evidence: Record<string, unknown>[] = [];
+const evidence = startVisualEvidence(`${output}/evidence.json`);
+let browser: Browser | undefined;
 const hash = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 async function capture(page: Page, name: string) {
   assert.ok(
@@ -27,6 +28,7 @@ async function capture(page: Page, name: string) {
 }
 
 try {
+  browser = await chromium.launch({ executablePath: process.env.PI_E2E_BROWSER_EXECUTABLE });
   for (const tools of [false, true]) {
     for (const viewport of [
       { width: 1440, height: 1000 },
@@ -34,19 +36,21 @@ try {
     ]) {
       const hub = await startHubCli({ repositoryRoot });
       let agent: PiWebUiHarness | undefined;
-      const context = await browser.newContext({ viewport, locale: "en", timezoneId: "UTC" });
-      const page = await context.newPage();
-      const errors: string[] = [];
+      let context: BrowserContext | undefined;
+      let page: Page | undefined;
+      let gate: ReturnType<typeof observeBrowserErrors> | undefined;
       const requests: { method: string; params: Record<string, unknown> }[] = [];
       const prefix = `${tools ? "tools" : "history"}-${viewport.width}`;
-      page.on("pageerror", (error) => errors.push(error.message));
-      page.on("websocket", (socket) =>
-        socket.on("framesent", (frame) => {
-          const record = JSON.parse(String(frame.payload));
-          if (record.type === "req") requests.push(record);
-        }),
-      );
       try {
+        context = await browser.newContext({ viewport, locale: "en", timezoneId: "UTC" });
+        page = await context.newPage();
+        gate = observeBrowserErrors(page);
+        page.on("websocket", (socket) =>
+          socket.on("framesent", (frame) => {
+            const record = JSON.parse(String(frame.payload));
+            if (record.type === "req") requests.push(record);
+          }),
+        );
         agent = await startPiWebUi("chat-lifecycle", {
           repositoryRoot,
           datedHistory: true,
@@ -134,13 +138,14 @@ try {
         await expect(dialog).toBeHidden();
         await expect(page.getByRole("log")).not.toContainText("DATED_LARGE_START");
         await capture(page, `${prefix}-old-date`);
-        assert.deepEqual(errors, []);
+        gate.assertClean();
         assert.equal(hash(sessionFile), before, "Visual reads and navigation preserve original JSONL");
-        evidence.push({
+        evidence.recordCase({
+          status: "passed",
           url: page.url(),
           viewport,
           fixture: tools ? "tool-eviction" : "20MiB-history",
-          pageErrors: errors,
+          ...gate.errors,
           screenshots: ["preview", "detail-first", "detail-next", "scope-reset", "old-date"].map(
             (s) => `${output}/${prefix}-${s}.png`,
           ),
@@ -151,23 +156,37 @@ try {
           jsonlHashAfter: hash(sessionFile),
         });
       } catch (error) {
-        await page.screenshot({ path: `${output}/${prefix}-failure.png`, fullPage: true });
+        // Failure evidence must survive even when taking a diagnostic screenshot fails.
+        evidence.recordCase({
+          status: "failed",
+          viewport,
+          fixture: tools ? "tool-eviction" : "20MiB-history",
+          ...gate?.errors,
+          failureHash: createHash("sha256").update(String(error)).digest("hex"),
+        });
+        await page?.screenshot({ path: `${output}/${prefix}-failure.png`, fullPage: true });
         throw error;
       } finally {
-        await context.close();
+        gate?.stop();
         try {
-          await agent?.stop();
+          await context?.close();
         } finally {
-          await hub.close();
+          try {
+            await agent?.stop();
+          } finally {
+            await hub.close();
+          }
         }
       }
     }
   }
-  writeFileSync(
-    `${output}/evidence.json`,
-    `${JSON.stringify({ method: "Playwright Chromium fallback; real Pi + packaged Hub", evidence }, null, 2)}\n`,
-  );
-  console.log(JSON.stringify(evidence));
-} finally {
   await browser.close();
+  browser = undefined;
+  evidence.finish("passed");
+  console.log("Visual evidence passed: 4 cases; five browser-error arrays empty per case; no failure exclusions.");
+} catch (error) {
+  evidence.finish("failed");
+  throw error;
+} finally {
+  await browser?.close();
 }

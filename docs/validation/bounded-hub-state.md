@@ -86,7 +86,8 @@ close/next buttons fit, chunks visibly replace, and branch/date changes clear de
 - Exactly two user-requested detail reads per case; next chunk no longer has the
   first-chunk marker. Actual Pi branch navigation while detail is open closes it;
   subsequent date selection displays only the old marker, with no stale dialog.
-- All four cases: zero page errors and no page horizontal overflow. No assertion
+- All four cases: zero uncaught page errors, console errors, failed requests,
+  HTTP responses with status ≥400, and WebSocket errors; no page horizontal overflow. No assertion
   of global zero overlap: existing Whale companion overlaps some bottom-right
   ordinary chat/notice text, especially on mobile, but not detail buttons/modal
   controls. Synthetic system previews repeat the notice in the text row and control
@@ -152,6 +153,9 @@ node --import ./tests/register-ts.mjs e2e/harness/visual-bounded-hub-state.ts
 
 ## Verification results and diagnostic history
 
+The following full-suite results are the original Task 3 verification, not a claim
+that those suites were rerun for the focused review fix described below.
+
 | Verification | Result |
 | --- | --- |
 | Manifest regression (`node --test --test-reporter=spec tests/web-dist.test.mjs`) | 44 pass, 0 fail; missing four-module inventory first reproduced RED |
@@ -196,3 +200,65 @@ and a subsequent complete run passed. The initial safe harness intentionally did
 not expose child stderr, so its cause is unproven. A fixed, whitelisted lock-busy
 diagnostic was added; no blind retries or lock-policy weakening. This remains a
 recorded intermittent setup observation, not a claimed production defect/fix.
+
+### Review fix 1: complete browser-error gate and fresh evidence
+
+On 2026-10-20, based on `c57c24b`, the visual runner's pageerror-only gate was
+replaced with five separately persisted arrays: `pageErrors`, `consoleErrors`,
+`requestFailures`, `httpFailures` and `webSocketErrors`. Listeners attach before
+navigation and remain active through the final screenshot/assertions; they detach
+before intentional context/server teardown. Every recorded error fails the case.
+There are **no expected-failure exclusions**, including for favicon requests,
+localhost or aborted requests. Console warnings, successful/redirect responses
+and normal WebSocket closure are not error events.
+
+Error messages and URLs are persisted only as SHA-256 correlation hashes, with
+allowlisted HTTP methods and numeric status codes where relevant. Raw messages,
+credentials, paths, stack traces, query strings and frame bodies are not recorded
+in these error arrays. The synthetic localhost product URLs remain recorded
+separately as screenshot identifiers.
+
+Before launching Chromium, the runner atomically replaces `evidence.json` with a
+new run ID, start time, `status: "in_progress"` and an empty case list. It publishes
+each case, and changes status to `passed` only after all four cases and cleanup
+succeed; caught failures publish `failed`. An interrupted run remains
+`in_progress`. Only a `passed` manifest with all four passing cases establishes a
+current pass: PNGs left by an older or partial run are not independently passing
+evidence. The manifest records `expectedFailureExclusions: []` explicitly.
+
+| Fix-round verification | Result |
+| --- | --- |
+| Focused gate/manifest RED | 8 tests: 1 pass, **7 fail** against pageerror-only behavior and end-only evidence publication |
+| Focused gate/manifest GREEN, final repeat | **8 pass, 0 fail, 0 skip**; 54.620 ms; five event categories, sanitization, no broad exclusions, teardown, stale-pass invalidation |
+| Real Pi + packaged Hub visual rerun | **4 pass, 0 fail**, 20 PNGs regenerated; each of five error arrays empty in every case; all four JSONL hashes unchanged |
+| Targeted TypeScript check of the two harness files and focused test | Exit 0; no diagnostics |
+| Targeted Biome check of the two harness files | 2 files; no fixes, **0 errors** |
+| `npm run verify:dist` | Exit 0; existing built outputs/source hashes consistent; no rebuild needed for harness/tests/docs-only changes |
+
+Current evidence run ID: `6400afd3-9a5a-474d-9759-bbf3b85628eb`, started
+`2026-10-20T08:27:44.649Z`. Viewports remain 1440×1000 and 390×844 for both history
+and tool-eviction fixtures. The implementer inspected 12 actual regenerated PNGs,
+including both changed old-date captures, desktop/mobile previews, first/next
+mobile details, desktop tool next detail and mobile history scope reset. Controls
+fit, the first marker disappears on chunk replacement, and reset/date screenshots
+have no stale dialog. The duplicate system notice and Whale overlap described
+above remain visible; this fix does not alter product UI. Prior controller image
+inspection predates this focused rerun. Temporary Pi/Hub processes were confirmed
+stopped. No full unit/backend/browser integration suite was rerun in this fix round.
+
+Focused reproduction (same approved `PI_E2E_BROWSER_EXECUTABLE` as above):
+
+```sh
+node --import ./tests/register-ts.mjs --test --experimental-test-isolation=none --test-reporter=spec tests/visual-evidence.test.ts
+./node_modules/.bin/biome check e2e/harness/visual-evidence.ts e2e/harness/visual-bounded-hub-state.ts
+./node_modules/.bin/tsc --ignoreConfig --noEmit --module esnext --moduleResolution bundler --target es2022 --allowImportingTsExtensions --skipLibCheck --types node e2e/harness/visual-evidence.ts e2e/harness/visual-bounded-hub-state.ts tests/visual-evidence.test.ts
+node --import ./tests/register-ts.mjs e2e/harness/visual-bounded-hub-state.ts
+npm run verify:dist
+git diff --check
+```
+
+The initial explicit-file TypeScript command omitted `--ignoreConfig` and exited
+with TS5112; the corrected command above passed. The existing Node
+`MODULE_TYPELESS_PACKAGE_JSON` warning remains in focused tests and the visual
+runner. No warning-free result, production rollout or additional runtime coverage
+is claimed.

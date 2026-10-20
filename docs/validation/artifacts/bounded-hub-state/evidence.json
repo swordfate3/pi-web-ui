@@ -1,0 +1,113 @@
+{
+  "method": "Playwright Chromium fallback; real Pi + packaged Hub",
+  "status": "passed",
+  "runId": "6400afd3-9a5a-474d-9759-bbf3b85628eb",
+  "startedAt": "2026-10-20T08:27:44.649Z",
+  "expectedFailureExclusions": [],
+  "evidence": [
+    {
+      "status": "passed",
+      "url": "http://127.0.0.1:46257/s/b2-7d854704bccaf0356b78eec918a9eee4-0000000000000001-41ff310c33d7fff0aceb8780c8fb9f89/",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fixture": "20MiB-history",
+      "pageErrors": [],
+      "consoleErrors": [],
+      "requestFailures": [],
+      "httpFailures": [],
+      "webSocketErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-hub-state/history-1440-preview.png",
+        "docs/validation/artifacts/bounded-hub-state/history-1440-detail-first.png",
+        "docs/validation/artifacts/bounded-hub-state/history-1440-detail-next.png",
+        "docs/validation/artifacts/bounded-hub-state/history-1440-scope-reset.png",
+        "docs/validation/artifacts/bounded-hub-state/history-1440-old-date.png"
+      ],
+      "detailRequests": 2,
+      "firstTextBytes": 65145,
+      "nextTextBytes": 65145,
+      "jsonlHashBefore": "e001b0155ced68a11ee3bc92b4312bc1f0bbe5fa035dc42fe750d07517e34734",
+      "jsonlHashAfter": "e001b0155ced68a11ee3bc92b4312bc1f0bbe5fa035dc42fe750d07517e34734"
+    },
+    {
+      "status": "passed",
+      "url": "http://127.0.0.1:45059/s/b2-e58ffe792ef55b78608efe82045bad91-0000000000000001-cf92a1515cb4489fbf7624d0e576068b/",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "fixture": "20MiB-history",
+      "pageErrors": [],
+      "consoleErrors": [],
+      "requestFailures": [],
+      "httpFailures": [],
+      "webSocketErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-hub-state/history-390-preview.png",
+        "docs/validation/artifacts/bounded-hub-state/history-390-detail-first.png",
+        "docs/validation/artifacts/bounded-hub-state/history-390-detail-next.png",
+        "docs/validation/artifacts/bounded-hub-state/history-390-scope-reset.png",
+        "docs/validation/artifacts/bounded-hub-state/history-390-old-date.png"
+      ],
+      "detailRequests": 2,
+      "firstTextBytes": 65145,
+      "nextTextBytes": 65145,
+      "jsonlHashBefore": "bf0b526c2ce72a0635a5a68399c442eded903f9cae5efad4ff537ac98dab9080",
+      "jsonlHashAfter": "bf0b526c2ce72a0635a5a68399c442eded903f9cae5efad4ff537ac98dab9080"
+    },
+    {
+      "status": "passed",
+      "url": "http://127.0.0.1:44717/s/b2-cacf4fe0a7a467f7d338154f79e32757-0000000000000001-6c619f3ca49695d62d2e0d29766df6ae/",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fixture": "tool-eviction",
+      "pageErrors": [],
+      "consoleErrors": [],
+      "requestFailures": [],
+      "httpFailures": [],
+      "webSocketErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-preview.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-detail-first.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-detail-next.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-scope-reset.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-old-date.png"
+      ],
+      "detailRequests": 2,
+      "firstTextBytes": 58621,
+      "nextTextBytes": 58619,
+      "jsonlHashBefore": "09607b2153ee082a9c744e8689a4331ce8005befa439dc27b197767bb9e6e093",
+      "jsonlHashAfter": "09607b2153ee082a9c744e8689a4331ce8005befa439dc27b197767bb9e6e093"
+    },
+    {
+      "status": "passed",
+      "url": "http://127.0.0.1:44977/s/b2-9736c6fd19e73ad57189986abf95b879-0000000000000001-c5ee9920346edb2c784dd60d8d72f663/",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "fixture": "tool-eviction",
+      "pageErrors": [],
+      "consoleErrors": [],
+      "requestFailures": [],
+      "httpFailures": [],
+      "webSocketErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-hub-state/tools-390-preview.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-390-detail-first.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-390-detail-next.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-390-scope-reset.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-390-old-date.png"
+      ],
+      "detailRequests": 2,
+      "firstTextBytes": 58621,
+      "nextTextBytes": 58619,
+      "jsonlHashBefore": "03a1cdd4b8e6c611f91a4f648d5d888567c53f3d3ff8866ec17b67b80d9f0455",
+      "jsonlHashAfter": "03a1cdd4b8e6c611f91a4f648d5d888567c53f3d3ff8866ec17b67b80d9f0455"
+    }
+  ]
+}

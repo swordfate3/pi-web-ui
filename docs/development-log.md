@@ -1,5 +1,25 @@
 # Pi Web UI 开发日志
 
+## 2026-10-20 · 有界 Hub 状态：集成、随包构建与视觉证据
+
+- 四个新扩展模块纳入固定 source manifest 和合成 fixture；红→绿验证后重建
+  tracked browser/Hub dist。新客户端通过 packaged Hub 使用 `b2-boot-slot-nonce`，
+  没有放宽旧 Hub fail-closed 边界，run/operation ID 仍严格 32hex。
+- 强化真实 Pi 的完整 UTF-8 历史/详情信封、所有旧页进度、日期替换、错误作用域/
+  游标与实际分支切换断言。20 MiB 临时 JSONL 读取前后哈希一致；代表性最大
+  历史信封41,093 bytes、详情65,523 bytes，均包括信封开销。
+- Playwright Chromium（无可调用内置 Browser 的明确回退）经真实 Pi/packaged Hub
+  捕获1440×1000和390×844截图，包括工具行淘汰后系统预览按钮、下一块替换、
+  分支清理旧详情和旧日期窗口。实现者检查实际图片，主控独立检查12张核心图片。
+  记录系统预览提示重复及既有鲸鱼局部遮挡普通文字的现象，留待最终审查，不宣称全局零遮挡。
+- 保留8 MiB逻辑配额、512 active grants、512 KiB等待加单条16 MiB在途、八个浏览器
+  配对而非Pi进程限制；没有自动删除旧墓碑/grant/回执、没有主机变更或部署。
+  文档同步Hub优先/全写入器升级、保守export计费、可信锁恢复和2 MiB×3日志建议。
+- 集成测试适配Pi SDK安装的Undici dispatcher；只改测试HTTP客户端，不改上传协议
+  或依赖。Hub portal不变卡片测试先等待初次版本检查终态，再检查响应不变、DOM
+  身份和焦点，避免把实际版本状态变化误当“不变轮询”。完整证据及限制见
+  [bounded Hub validation](validation/bounded-hub-state.md)。
+
 ## 2026-10-20 · Hub 隧道前压缩与私有静态缓存
 
 - 实测本机主脚本44ms、远端隧道约30.4s，列表/HTML约38–56ms，定位为资源传输瓶颈；
@@ -471,3 +491,11 @@
 - 可选私有申请凭据与lifecycle凭据分离；无Docker、批准或策略修改能力。保留原任务ID处理未知结果；历史读取适配100任务和跨容器更替累计目标，页面截断明确提示。
 - 修正授权代际、旧200／401、晚到logout cookie及残留忙碌文案，独立复审无剩余可操作问题。新增接口15项、页面17项；最终完整480项（479通过／1可选skip），两套类型、构建、dist一致性、Biome无error（保留30 warnings／1 info）及桌面1440／手机390打包浏览器视觉检查通过。模拟Gate不等于真实Pi全局更新E2E。
 - 没有提交或推送、安装生产包、申请生产更新、迁移旧容器或重启服务。[验证、证据与上线前提](validation/hub-runtime-updates.md)。
+
+## 2026-10-20 · 有界 Hub 状态 Task 2（源码完成，未构建/部署）
+
+- 在 `codex/bounded-hub-state` / `90e5ecc` 上实现跨进程写锁、canonical state 服务锁、8 MiB逻辑预算/512活动grant、安全余量和grant先于export发布；有界登记采用经过认证协商的b2命名空间，保持所有legacy墓碑，不放宽run/operation ID。
+- 每方向FIFO最多512 KiB等待加一条16 MiB在途消息，发送回调和出站排空共同释放名额；显式1 MiB文件预览、流式HTTP和原有权限/接续语义保留。默认8个并发浏览器配对（不是Pi容器数），双向payload总额264 MiB；512 MiB容器RSS未做压力担保。
+- 不具备完整依赖/Gate幂等保留证明时，grant/回执保守保留且超额拒绝。export外部删除不自动抵扣预留；不承诺无限run churn。锁崩溃恢复需要可信管理员，不自动抢占。升级必须Hub-first并升级所有CLI写入者。管理origin新增仅聚合数值的storage诊断。
+- TDD和自审覆盖2,000次轮换、重放/撤销/跨进程竞争、断开peer排队名额、慢消费者和b2 URL消费者；定向210/210，全源码563项（562通过、1可选skip、0失败），两套tsc、Biome 0 errors（33 warnings/7 infos）及diff检查通过。没有子代理、生产凭据/状态访问或模型流量。
+- Task 3接管dist/打包Pi/浏览器/文档验收；必须把新增 `extensions/hub-generation.ts` 加入固定manifest白名单。未改dist、未推送、未部署/重启，保留未跟踪node_modules符号链接。完整命令/RED-GREEN/边界记录已保存在[Task 2 验证记录](validation/bounded-hub-state-task-2.md)，不依赖临时任务工作区。

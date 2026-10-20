@@ -144,7 +144,7 @@ export function HistoryControls() {
             {Boolean(history?.truncatedEntries) && (
               <p>{t("Large entries are bounded previews. Full data remains in the original session.")}</p>
             )}
-            {history?.treeLimited && <p>{t("Partial navigation tree for selected dates (up to 1,000 nodes).")}</p>}
+            {history?.treeLimited && <p>{t("Partial navigation tree for selected dates (up to 200 nodes).")}</p>}
           </div>
         </div>
         <div

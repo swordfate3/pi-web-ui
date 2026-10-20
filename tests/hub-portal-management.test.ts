@@ -217,3 +217,15 @@ test("historical success explains unavailable link and removes a previously retu
   assert.ok(row.children.some((child) => /当前.*链接.*不可用/.test(child.textContent)));
   assert.equal(f.calls.filter((call) => call.options.method === "POST" && call.route.endsWith("restarts")).length, 1);
 });
+
+test("bounded successor links remain usable without broadening operation IDs", async () => {
+  const f = fixture();
+  await settled();
+  await f.unlock();
+  const generation = `b2-${"a".repeat(32)}-0000000000000001-${"b".repeat(32)}`;
+  f.setOperation({ status: "succeeded", stage: "complete", path: `/s/${generation}/` });
+  await f.attach().fire("click");
+  assert.equal(f.get("management-results").children[0].children[1].href, `https://chat.example/s/${generation}/`);
+  const submission = f.calls.find((c) => c.options.method === "POST" && c.route.endsWith("restarts"))!;
+  assert.match(JSON.parse(submission.options.body).idempotencyKey, /^[a-f0-9]{32}$/);
+});

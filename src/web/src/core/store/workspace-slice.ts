@@ -1,3 +1,4 @@
+import { retainWindowArtifacts } from "../conversation-window";
 import type { FileDownloadResult, GitStatusResult } from "../types";
 import { UiError, uiText } from "../ui-text";
 import { artifactsFromToolEvent, mergeArtifacts } from "../workspace-artifacts";
@@ -20,12 +21,12 @@ export const createWorkspaceSlice: StoreSlice<WorkspaceSlice> = (set, get) => ({
     return result as FileDownloadResult;
   },
 
-  setArtifacts: (artifacts) => set({ artifacts }),
+  setArtifacts: (artifacts) => set({ artifacts: retainWindowArtifacts(artifacts, get().items) }),
 
   mergeArtifactsFromToolEvent: (event) => {
     const incoming = artifactsFromToolEvent(event);
     if (incoming.length === 0) return;
-    set((state) => ({ artifacts: mergeArtifacts(state.artifacts, incoming) }));
+    set((state) => ({ artifacts: retainWindowArtifacts(mergeArtifacts(state.artifacts, incoming), state.items) }));
   },
 
   refreshGitStatus: async () => {

@@ -162,6 +162,20 @@ test("portal refreshes on history return, coalesces in-flight returns and preser
 });
 
 function exchange(socketPath: string, value: Record<string, unknown>) {
+  // These lifecycle fixtures now use the new extension. Dedicated raw legacy
+  // and laundering tests remain in hub-bounded-registry.test.ts.
+  if (
+    typeof value.generation === "string" &&
+    value.generation.startsWith("b2-") &&
+    ["register", "unregister"].includes(String(value.action))
+  ) {
+    value = {
+      ...value,
+      action: `bounded_${value.action}`,
+      protocol: "bounded-v2",
+      boot: value.generation.split("-")[1],
+    };
+  }
   return new Promise<{ ok: boolean; error?: string; result?: { url: string } }>((resolve, reject) => {
     const socket = net.createConnection(socketPath, () => socket.write(`${JSON.stringify(value)}\n`));
     let data = "";
@@ -744,6 +758,17 @@ test("two separately authorized sessions route HTTP and remove only the stopped 
   assert.equal((await fetch(b.url)).status, 200);
 });
 
+test("five independent Pi runs register and route without consuming browser-pair admission", async (t) => {
+  const f = await fixture(t);
+  const runs = [];
+  for (let i = 0; i < 5; i++) runs.push(await f.backend(`Pi ${i + 1}`));
+  assert.equal((await (await fetch(`${f.hub.url}api/sessions`)).json()).sessions.length, 5);
+  for (const run of runs) {
+    assert.ok(run.url);
+    assert.equal((await fetch(run.url)).status, 200);
+  }
+});
+
 test("WebSocket routing injects proof and rejects cross-origin connections", async (t) => {
   const f = await fixture(t);
   const a = await f.backend("A");
@@ -891,10 +916,10 @@ test("a renewal whose proof crosses expiry reports an ended generation", async (
 
 test("unregister before enrollment fences that generation permanently", async (t) => {
   const f = await fixture(t);
-  const a = await f.backend("A");
+  const credential = issueSession(f.config, path.join(path.dirname(f.configFile), "legacy.json"), { label: "Legacy" });
   const generation = "d".repeat(32);
-  assert.equal((await exchange(f.hub.socketPath, { action: "unregister", ...a.credential, generation })).ok, true);
-  const result = await exchange(f.hub.socketPath, { action: "register", ...a.credential, generation, port: a.port });
+  assert.equal((await exchange(f.hub.socketPath, { action: "unregister", ...credential, generation })).ok, true);
+  const result = await exchange(f.hub.socketPath, { action: "register", ...credential, generation, port: 12345 });
   assert.equal(result.ok, false);
   assert.equal(result.error, "ended generation");
 });

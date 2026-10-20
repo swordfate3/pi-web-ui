@@ -31,7 +31,14 @@ import { projectLiveEvent } from "./live-transport.ts";
 import { matchesRevisionDispatch, resolveMessageRevision, revisionContent } from "./message-revision.ts";
 import { resolveMessageVersions } from "./message-versions.ts";
 import { startRuntimeControl, taintRuntimeInput } from "./runtime-control.ts";
-import { guardHistoryFrame, historyRange, selectSavedSessions, selectSessionHistory } from "./session-history.ts";
+import {
+  guardHistoryFrame,
+  historyRange,
+  readEntryDetail,
+  selectSavedSessions,
+  selectSessionHistory,
+  serializeHistoryEnvelope,
+} from "./session-history.ts";
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
 import { captureSoftwareMetadata } from "./software-metadata.ts";
@@ -853,6 +860,8 @@ export default function (pi: ExtensionAPI) {
   // ═══════════════════════════════════════
   function serializeFrame(data: unknown) {
     const projected = projectLiveEvent(data);
+    const history = serializeHistoryEnvelope(projected);
+    if (history !== null) return history;
     return guardHistoryFrame(stringifyForBrowser(projected), projected, {
       sessionId: latestCtx?.sessionManager.getSessionId(),
       runtimeId,
@@ -2340,6 +2349,26 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
+        case "get_entry_detail": {
+          const detailCtx = checkHistoryIdentity(params, true);
+          sendTo(
+            ws,
+            success(
+              readEntryDetail(
+                detailCtx.sessionManager.getBranch(),
+                {
+                  sessionId: detailCtx.sessionManager.getSessionId(),
+                  runtimeId,
+                  leafId: detailCtx.sessionManager.getLeafId(),
+                },
+                params,
+                request.id,
+              ),
+            ),
+          );
+          break;
+        }
+
         case "get_history":
         case "get_tree":
         case "sync_request": {
@@ -3218,7 +3247,14 @@ export default function (pi: ExtensionAPI) {
       ws.on("message", (data) => {
         try {
           const request = JSON.parse(data.toString()) as Partial<WsRequest>;
-          if (request.type !== "req" || typeof request.id !== "string" || typeof request.method !== "string") {
+          // Validate before dispatch: both success and catch responses echo this
+          // opaque identity. Never truncate it or construct an oversized error.
+          if (
+            request.type !== "req" ||
+            typeof request.id !== "string" ||
+            request.id.length > 512 ||
+            typeof request.method !== "string"
+          ) {
             sendTo(ws, { type: "error", code: "bad_request", message: "Invalid client request" });
             return;
           }

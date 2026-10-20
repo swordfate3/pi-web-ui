@@ -5,9 +5,18 @@ import net from "node:net";
 import path from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
+import { BOUNDED_PROTOCOL, HUB_GENERATION_SOURCE, isBoundedGeneration } from "../extensions/hub-generation.ts";
 import { type RuntimeMetadata, readRuntimeMetadata } from "../extensions/runtime-metadata.ts";
 import { readSoftwareMetadata, type SoftwareMetadata } from "../extensions/software-metadata.ts";
 import { proxySessionResponse } from "./asset-transfer.ts";
+import {
+  boundedRecord,
+  boundedTuple,
+  hasBoundedRecord,
+  issueBounded,
+  RegistryError,
+  saveBounded,
+} from "./bounded-registry.ts";
 import {
   type Grant,
   type HubConfig,
@@ -16,9 +25,12 @@ import {
   readGrant,
   readPrivateJson,
 } from "./config.ts";
+import { ForwardQueue } from "./forward-queue.ts";
 import { gatewayIdentity } from "./gateway-auth.ts";
+import { HUB_LIMITS } from "./limits.ts";
 import { portalCss, portalJs, portalManagementCss, portalManagementJs, renderPortalHtml } from "./portal.ts";
 import { createRestartApi } from "./restart-api.ts";
+import { acquireStateLock, StateBudgetError, type StateWriter, withStateWriter } from "./state-budget.ts";
 import { createVersionStatus, type VersionStatusOptions } from "./version-status.ts";
 
 type Session = {
@@ -154,31 +166,41 @@ function boundedDeflateOffer(header: string | undefined) {
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 export async function startHub(config: HubConfig, options: { versions?: VersionStatusOptions } = {}) {
   if (config.management) managementConfig(config.management, config.port, config.publicUrl);
-  privateDirectory(config.runtimeDir);
-  // Exclusive acquisition precedes any asynchronous stale-socket recovery.
-  // Fail closed after a crash: a trusted operator must confirm the old process
-  // is gone before removing its lock. Never guess from a reused PID.
-  const lock = path.join(config.runtimeDir, "hub.lock");
-  mkdirSync(lock, { mode: 0o700 });
-  const owner = path.join(lock, "owner.json");
-  const release = () => {
-    if (!existsSync(lock)) return;
-    if (existsSync(owner)) unlinkSync(owner);
-    rmdirSync(lock);
-  };
+  const serving = acquireStateLock(config, ".serving.lock");
+  config = { ...config, stateDir: serving.root };
   try {
-    writeFileSync(owner, JSON.stringify({ pid: process.pid }), { flag: "wx", mode: 0o600 });
-    const hub = await startLockedHub(config, options);
-    let closing: Promise<void> | undefined;
-    return {
-      ...hub,
-      close: () => {
-        closing ??= hub.close().finally(release);
-        return closing;
-      },
+    privateDirectory(config.runtimeDir);
+    // Exclusive acquisition precedes any asynchronous stale-socket recovery.
+    // Fail closed after a crash: a trusted operator must confirm the old process
+    // is gone before removing its lock. Never guess from a reused PID.
+    const lock = path.join(config.runtimeDir, "hub.lock");
+    mkdirSync(lock, { mode: 0o700 });
+    const owner = path.join(lock, "owner.json");
+    const release = () => {
+      if (!existsSync(lock)) return;
+      if (existsSync(owner)) unlinkSync(owner);
+      rmdirSync(lock);
     };
+    try {
+      writeFileSync(owner, JSON.stringify({ pid: process.pid }), { flag: "wx", mode: 0o600 });
+      const hub = await startLockedHub(config, options);
+      let closing: Promise<void> | undefined;
+      return {
+        ...hub,
+        close: () => {
+          closing ??= hub.close().finally(() => {
+            release();
+            serving.release();
+          });
+          return closing;
+        },
+      };
+    } catch (error) {
+      release();
+      throw error;
+    }
   } catch (error) {
-    release();
+    serving.release();
     throw error;
   }
 }
@@ -188,6 +210,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   privateDirectory(config.runtimeDir);
   privateDirectory(path.join(config.stateDir, "grants"));
   privateDirectory(path.join(config.stateDir, "generations"));
+  privateDirectory(path.join(config.stateDir, "bounded"));
   // Do not steal a live socket from another manager. A crashed hub can leave a stale inode.
   if (existsSync(config.socketPath)) {
     const stat = lstatSync(config.socketPath);
@@ -213,10 +236,23 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     unlinkSync(config.socketPath);
   }
   const boot = randomBytes(16).toString("hex");
+  withStateWriter(config, (writer) => writer.write("registry.json", { schema: 2, boot }, { security: true }));
   const sessions = new Map<string, Session>();
   const peers = new Set<net.Socket>();
   const connections = new Set<net.Socket>();
   const webSockets = new Map<WebSocket, string>();
+  const outbound = new Map<WebSocket, ForwardQueue>();
+  const sendControl = (client: WebSocket, value: string) => outbound.get(client)?.enqueue(value);
+  let activeProbes = 0;
+  const proof = async (grant: Grant, generation: string, port: number) => {
+    if (activeProbes >= HUB_LIMITS.backendProbes) throw new RegistryError("HUB_BUSY");
+    activeProbes++;
+    try {
+      return await proveBackend(grant, generation, port);
+    } finally {
+      activeProbes--;
+    }
+  };
   // Browser-only, memory-only capabilities. A disconnected browser gets one
   // short opportunity to follow its exact successor, never an arbitrary Pi.
   const handoffs = new Map<string, Handoff>();
@@ -225,6 +261,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   };
   let stopped = false;
   let pending = Promise.resolve();
+  let admittedRegistrations = 0;
   const versionStatus = createVersionStatus(options.versions);
   let url = "";
   let managementUrl: string | undefined;
@@ -235,10 +272,26 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     restart.deadline ??= Date.now() + 210_000;
     for (const item of handoffs.values()) if (item.restart === restart) item.expires = restart.deadline;
   };
-  const retire = (generation: string) => {
+  const retire = (generation: string, writer?: StateWriter) => {
     activateRestart(generation);
+    const session = sessions.get(generation);
     sessions.delete(generation);
     for (const [ws, id] of webSockets) if (id === generation) ws.terminate();
+    if (session && isBoundedGeneration(generation)) {
+      const clear = (transaction: StateWriter) => {
+        const record = boundedRecord(config, session.grant.run_id, boot);
+        if (record.current?.generation === generation) {
+          delete record.current;
+          saveBounded(transaction, record, true);
+        }
+      };
+      try {
+        if (writer) clear(writer);
+        else withStateWriter(config, clear);
+      } catch {
+        /* Inert without live memory; restart changes boot. Never restore from disk. */
+      }
+    }
   };
   const current = (generation: string) => {
     const session = sessions.get(generation);
@@ -271,7 +324,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     const session = current(generation);
     if (
       !session ||
-      !(await proveBackend(session.grant, generation, session.port)) ||
+      !(await proof(session.grant, generation, session.port)) ||
       stopped ||
       current(generation) !== session
     )
@@ -300,7 +353,8 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         item.restart = undefined;
         item.successor = item.from;
         item.expires = Infinity;
-        item.client.send(
+        sendControl(
+          item.client,
           JSON.stringify({
             type: "event",
             event: "hub_route",
@@ -362,7 +416,8 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         item.expires = Infinity;
         if (!item.client) activateRestart(receipt.generation);
         if (item.client?.readyState === WebSocket.OPEN)
-          item.client.send(
+          sendControl(
+            item.client,
             JSON.stringify({
               type: "event",
               event: "hub_route",
@@ -373,36 +428,101 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     },
   });
   const register = async (value: Record<string, unknown>) => {
-    if (
-      stopped ||
-      typeof value.run_id !== "string" ||
-      typeof value.generation !== "string" ||
-      !/^[0-9a-f]{32}$/.test(value.generation)
-    )
-      throw new Error("Registration rejected");
-    const grant = readGrant(config, value.run_id);
-    if (grant.revoked || !equal(value.token, grant.token)) throw new Error("Registration rejected");
-    const generation = value.generation;
-    const session = current(generation);
-    const ledger = path.join(config.stateDir, "generations", `${generation}.json`);
-    const owner = existsSync(ledger) ? readPrivateJson(ledger) : undefined;
-    if (value.action === "unregister") {
-      if ((session && session.grant.run_id !== grant.run_id) || (owner && owner.run_id !== grant.run_id))
-        throw new Error("Registration rejected");
-      writeFileSync(ledger, JSON.stringify({ boot, run_id: grant.run_id, retired: true }), {
-        flag: owner ? "w" : "wx",
-        mode: 0o600,
+    const authenticate = () => {
+      if (stopped || typeof value.run_id !== "string") throw new RegistryError("AUTH_FAILED");
+      const grant = readGrant(config, value.run_id);
+      if (grant.revoked || !equal(value.token, grant.token)) throw new RegistryError("AUTH_FAILED");
+      return grant;
+    };
+    if (value.action === "registry_negotiate") {
+      return withStateWriter(config, () => {
+        const grant = authenticate();
+        if (
+          typeof value.nonce !== "string" ||
+          !/^[a-f0-9]{32}$/.test(value.nonce) ||
+          typeof value.protocol !== "string" ||
+          !/^[a-z0-9-]{1,64}$/.test(value.protocol)
+        )
+          throw new RegistryError("PROTOCOL_REJECTED");
+        if (value.protocol !== BOUNDED_PROTOCOL) {
+          const legacy = hasBoundedRecord(config, grant.run_id) ? undefined : "legacy-v1";
+          return {
+            unsupported: true,
+            protocol: value.protocol,
+            nonce: value.nonce,
+            ...(legacy ? { legacy } : {}),
+            proof: mac(grant.token, `${value.nonce}:${value.protocol}:UNSUPPORTED_PROTOCOL:${legacy ?? ""}`),
+          };
+        }
+        const record = boundedRecord(config, grant.run_id, boot);
+        return {
+          protocol: BOUNDED_PROTOCOL,
+          nonce: value.nonce,
+          boot,
+          slot: record.slot,
+          proof: mac(grant.token, `${value.nonce}:${BOUNDED_PROTOCOL}:${boot}:${record.slot}`),
+        };
       });
-      retire(generation);
-      return {};
+    }
+    const bounded = ["bounded_issue", "bounded_register", "bounded_unregister"].includes(String(value.action));
+    if (bounded ? value.protocol !== BOUNDED_PROTOCOL || value.boot !== boot : value.protocol !== undefined)
+      throw new RegistryError("PROTOCOL_REJECTED");
+    if (value.action === "bounded_issue") {
+      return withStateWriter(config, (writer) => {
+        const grant = authenticate();
+        writer.assertAdmission();
+        return issueBounded(
+          writer,
+          boundedRecord(config, grant.run_id, boot),
+          value,
+          (generation) => !!current(generation),
+        );
+      });
     }
     if (
-      value.action !== "register" ||
+      typeof value.generation !== "string" ||
+      !(bounded ? isBoundedGeneration(value.generation) : /^[a-f0-9]{32}$/.test(value.generation))
+    )
+      throw new RegistryError("PROTOCOL_REJECTED");
+    const generation = value.generation;
+    const ledger = path.join(config.stateDir, "generations", `${generation}.json`);
+    const readOwner = () => (existsSync(ledger) ? readPrivateJson(ledger) : undefined);
+    if (value.action === "unregister" || value.action === "bounded_unregister") {
+      return withStateWriter(config, (writer) => {
+        const grant = authenticate();
+        const session = current(generation);
+        if (bounded) {
+          const record = boundedRecord(config, grant.run_id, boot);
+          let changed = false;
+          for (const key of ["current", "pending"] as const)
+            if (record[key]?.generation === generation) {
+              delete record[key];
+              changed = true;
+            }
+          if (changed) saveBounded(writer, record, true);
+        } else {
+          if (hasBoundedRecord(config, grant.run_id)) throw new RegistryError("PROTOCOL_REJECTED");
+          const owner = readOwner();
+          if ((session && session.grant.run_id !== grant.run_id) || (owner && owner.run_id !== grant.run_id))
+            throw new RegistryError("AUTH_FAILED");
+          if (!owner || (session && !owner.retired))
+            writer.write(
+              `generations/${generation}.json`,
+              { boot, run_id: grant.run_id, retired: true },
+              { exclusive: !owner, security: !!owner },
+            );
+        }
+        if (session?.grant.run_id === grant.run_id) retire(generation, writer);
+        return {};
+      });
+    }
+    if (
+      (value.action !== "register" && value.action !== "bounded_register") ||
       !Number.isInteger(value.port) ||
       Number(value.port) < 1 ||
       Number(value.port) > 65535
     )
-      throw new Error("Registration rejected");
+      throw new RegistryError("PROTOCOL_REJECTED");
     if (
       value.sessionName !== undefined &&
       value.sessionName !== null &&
@@ -414,46 +534,79 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     const runtime = value.runtime === undefined ? undefined : readRuntimeMetadata(value.runtime);
     const software = value.software === undefined ? undefined : readSoftwareMetadata(value.software);
     const port = Number(value.port);
-    if (owner) {
-      if (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port)
-        throw new Error("ended generation");
-    }
-    if (!(await proveBackend(grant, generation, port)) || stopped) throw new Error("Registration rejected");
-    const latestGrant = readGrant(config, grant.run_id);
-    if (latestGrant.revoked || latestGrant.token !== grant.token || latestGrant.backendHost !== grant.backendHost)
-      throw new Error("Registration rejected");
-    if (session && current(generation) !== session) throw new Error("ended generation");
-    if (!existsSync(ledger))
-      writeFileSync(ledger, JSON.stringify({ boot, run_id: grant.run_id }), { flag: "wx", mode: 0o600 });
-    for (const other of sessions.values())
-      if (other.grant.run_id === grant.run_id && other.generation !== generation) retire(other.generation);
-    if (session) {
-      session.expires = Date.now() + config.leaseMs;
-      session.sessionName = sessionName;
-      session.runtime = runtime;
-      session.software = software;
-    } else
-      sessions.set(generation, {
-        grant,
-        generation,
-        port,
-        expires: Date.now() + config.leaseMs,
-        since: Date.now(),
-        sessionName,
-        runtime,
-        software,
-      });
-    pruneHandoffs();
-    if (!session) {
-      for (const item of handoffs.values()) {
-        if (!item.restart && item.grant.run_id === grant.run_id && item.from !== generation && !item.successor)
-          item.successor = generation;
+    const prepared = withStateWriter(config, (writer) => {
+      const grant = authenticate();
+      writer.assertAdmission();
+      const session = current(generation);
+      if (bounded) {
+        const record = boundedRecord(config, grant.run_id, boot);
+        boundedTuple(record, generation, port, !!session);
+        return { grant, session, revision: record.revision, owner: undefined };
       }
-    }
-    return { url: `${config.publicUrl ?? url}s/${generation}/` };
+      if (hasBoundedRecord(config, grant.run_id)) throw new RegistryError("PROTOCOL_REJECTED");
+      const owner = readOwner();
+      if (
+        owner &&
+        (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port)
+      )
+        throw new RegistryError();
+      return { grant, session, revision: undefined, owner: JSON.stringify(owner) };
+    });
+    const { grant, session } = prepared;
+    if (!(await proof(grant, generation, port)) || stopped) throw new RegistryError("PROOF_FAILED");
+    // The common writer stays held through final validation AND memory publication.
+    return withStateWriter(config, (writer) => {
+      const latestGrant = authenticate();
+      writer.assertAdmission();
+      if (latestGrant.token !== grant.token || latestGrant.backendHost !== grant.backendHost)
+        throw new RegistryError("AUTH_FAILED");
+      if (session && current(generation) !== session) throw new RegistryError();
+      if (bounded) {
+        const record = boundedRecord(config, grant.run_id, boot);
+        if (record.revision !== prepared.revision) throw new RegistryError();
+        const which = boundedTuple(record, generation, port, !!session && current(generation) === session);
+        if (which === "pending") {
+          record.current = record.pending;
+          delete record.pending;
+        }
+        record.current!.expires = Date.now() + config.leaseMs;
+        saveBounded(writer, record);
+      } else {
+        if (hasBoundedRecord(config, grant.run_id) || JSON.stringify(readOwner()) !== prepared.owner)
+          throw new RegistryError();
+        if (!readOwner())
+          writer.write(`generations/${generation}.json`, { boot, run_id: grant.run_id }, { exclusive: true });
+      }
+      for (const other of sessions.values())
+        if (other.grant.run_id === grant.run_id && other.generation !== generation) retire(other.generation, writer);
+      if (session) {
+        session.expires = Date.now() + config.leaseMs;
+        session.sessionName = sessionName;
+        session.runtime = runtime;
+        session.software = software;
+      } else
+        sessions.set(generation, {
+          grant,
+          generation,
+          port,
+          expires: Date.now() + config.leaseMs,
+          since: Date.now(),
+          sessionName,
+          runtime,
+          software,
+        });
+      pruneHandoffs();
+      if (!session) {
+        for (const item of handoffs.values()) {
+          if (!item.restart && item.grant.run_id === grant.run_id && item.from !== generation && !item.successor)
+            item.successor = generation;
+        }
+      }
+      return { url: `${config.publicUrl ?? url}s/${generation}/` };
+    });
   };
   const registry = net.createServer((socket) => {
-    if (peers.size >= 128) {
+    if (peers.size >= HUB_LIMITS.registrationPeers) {
       socket.destroy();
       return;
     }
@@ -466,17 +619,18 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
       clearTimeout(timer);
       peers.delete(socket);
     });
-    const reply = (ok: boolean, result?: unknown, error = "Registration rejected") => {
-      if (!socket.destroyed) socket.end(`${JSON.stringify(ok ? { ok, result } : { ok, error })}\n`);
+    const reply = (ok: boolean, result?: unknown, error = "Registration rejected", code?: string) => {
+      if (!socket.destroyed)
+        socket.end(`${JSON.stringify(ok ? { ok, result } : { ok, error, ...(code ? { code } : {}) })}\n`);
     };
     socket.on("data", (chunk: Buffer) => {
       if (received) return;
-      data = Buffer.concat([data, chunk]);
-      if (data.length > 8192) {
+      if (data.length + chunk.length > 8192) {
         received = true;
         reply(false);
         return;
       }
+      data = Buffer.concat([data, chunk]);
       const end = data.indexOf(10);
       if (end < 0) return;
       received = true;
@@ -488,20 +642,44 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         reply(false);
         return;
       }
-      pending = pending.then(async () => {
-        if (socket.destroyed) return;
-        try {
-          reply(true, await register(value));
-        } catch (error) {
-          reply(
-            false,
-            undefined,
-            error instanceof Error && error.message === "ended generation"
-              ? "ended generation"
-              : "Registration rejected",
-          );
-        }
-      });
+      data = Buffer.alloc(0);
+      // Count admitted operations until their queue slot actually completes,
+      // even when the peer disconnects. Peer count alone does not bound this tail.
+      if (admittedRegistrations >= HUB_LIMITS.registrationOperations) {
+        reply(false, undefined, "Registration rejected", "HUB_BUSY");
+        return;
+      }
+      admittedRegistrations++;
+      pending = pending
+        .then(async () => {
+          if (socket.destroyed) return;
+          try {
+            const result = await register(value);
+            if ("unsupported" in result) {
+              const { unsupported: _unsupported, ...details } = result;
+              if (!socket.destroyed)
+                socket.end(
+                  `${JSON.stringify({ ok: false, error: "Unsupported registration protocol", code: "UNSUPPORTED_PROTOCOL", ...details })}\n`,
+                );
+            } else reply(true, result);
+          } catch (error) {
+            reply(
+              false,
+              undefined,
+              error instanceof Error && error.message === "ended generation"
+                ? "ended generation"
+                : "Registration rejected",
+              error instanceof RegistryError
+                ? error.code
+                : error instanceof StateBudgetError
+                  ? "STATE_QUOTA"
+                  : undefined,
+            );
+          }
+        })
+        .finally(() => {
+          admittedRegistrations--;
+        });
     });
   });
   const allowedBrowser = (request: IncomingMessage, requireOrigin = false, admin = false) => {
@@ -519,7 +697,8 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         : allowed.has(origin) && (!admin || new URL(origin).host === request.headers.host))
     );
   };
-  const matchRoute = (request: IncomingMessage) => /^\/s\/([a-f0-9]{32})(\/.*)?$/.exec(request.url ?? "");
+  const routePattern = new RegExp(`^/s/(${HUB_GENERATION_SOURCE})(/.*)?$`);
+  const matchRoute = (request: IncomingMessage) => routePattern.exec(request.url ?? "");
   const fail = (response: ServerResponse, code: number) =>
     response.writeHead(code, { "Cache-Control": "no-store" }).end();
   const handle = async (request: IncomingMessage, response: ServerResponse, admin = false) => {
@@ -596,7 +775,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         }
         const targetGeneration = item.successor ?? item.from;
         const successor = current(targetGeneration);
-        const proved = successor && (await proveBackend(grant, successor.generation, successor.port));
+        const proved = successor && (await proof(grant, successor.generation, successor.port));
         // Proof is asynchronous: revocation and the capability deadline must
         // still win over either kind of retryable registration gap below.
         const latestGrant = readGrant(config, grant.run_id);
@@ -652,7 +831,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
           response.writeHead(308, { Location: `/s/${route[1]}/`, "Cache-Control": "no-store" }).end();
           return;
         }
-        if (!(await proveBackend(session.grant, session.generation, session.port))) {
+        if (!(await proof(session.grant, session.generation, session.port))) {
           retire(session.generation);
           fail(response, 410);
           return;
@@ -736,8 +915,9 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
           "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
         })
         .end(request.method === "HEAD" ? undefined : asset[1]);
-    } catch {
-      if (!response.headersSent) fail(response, 500);
+    } catch (error) {
+      if (!response.headersSent)
+        fail(response, error instanceof RegistryError && error.code === "HUB_BUSY" ? 503 : 500);
       else response.destroy();
     }
   };
@@ -746,6 +926,10 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     ? http.createServer((request, response) => void handle(request, response, true))
     : undefined;
   managementServer?.on("connection", (socket) => {
+    if (connections.size >= HUB_LIMITS.connections) {
+      socket.destroy();
+      return;
+    }
     connections.add(socket);
     socket.on("error", () => socket.destroy());
     socket.once("close", () => connections.delete(socket));
@@ -755,18 +939,22 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   managementServer?.on("connect", (_request, socket) => socket.destroy());
   const wss = new WebSocketServer({
     noServer: true,
-    maxPayload: 16 * 1024 * 1024,
+    maxPayload: HUB_LIMITS.inFlightBytes,
     perMessageDeflate: {
       serverNoContextTakeover: true,
       clientNoContextTakeover: true,
       serverMaxWindowBits: 12,
       clientMaxWindowBits: 12,
-      concurrencyLimit: 4,
+      concurrencyLimit: HUB_LIMITS.websocketCompression,
       threshold: 1024,
       zlibDeflateOptions: { level: 3, memLevel: 7 },
     },
   });
   server.on("connection", (socket) => {
+    if (connections.size >= HUB_LIMITS.connections) {
+      socket.destroy();
+      return;
+    }
     connections.add(socket);
     socket.on("error", () => socket.destroy());
     socket.once("close", () => connections.delete(socket));
@@ -777,23 +965,52 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     socket.once("close", () => clearTimeout(timer));
     socket.end(`HTTP/1.1 ${code} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, () => socket.destroy());
   };
+  let browserAdmissions = 0;
   server.on("upgrade", async (request, socket, head) => {
+    let reserved = false;
+    let upgradePending = true;
+    let browserClosed = false;
+    let upstreamSocket: WebSocket | undefined;
+    let upstreamClosed = false;
+    const release = () => {
+      // A closed browser can still own an unfinished proof or upstream
+      // handshake. Keep its credit until all that work has settled.
+      if (reserved && !upgradePending && browserClosed && (!upstreamSocket || upstreamClosed)) {
+        reserved = false;
+        browserAdmissions--;
+      }
+    };
     try {
       if (!allowedBrowser(request, true)) {
         rejectUpgrade(socket, 403);
         return;
       }
+      // Reserve before proof/handshake, not only once the browser opens.
+      if (browserAdmissions >= HUB_LIMITS.browserPairs) {
+        rejectUpgrade(socket, 503);
+        return;
+      }
+      browserAdmissions++;
+      reserved = true;
+      socket.once("close", () => {
+        browserClosed = true;
+        upstreamSocket?.terminate();
+        release();
+      });
       const route = matchRoute(request);
       const session = route && route[2] === "/ws" ? current(route[1]) : undefined;
       if (
         !session ||
-        !(await proveBackend(session.grant, session.generation, session.port)) ||
+        !(await proof(session.grant, session.generation, session.port)) ||
         stopped ||
         current(session.generation) !== session
       ) {
-        rejectUpgrade(socket, 410);
+        if (!socket.destroyed) rejectUpgrade(socket, 410);
         return;
       }
+      // The browser may have closed while proof was in flight. A listener
+      // installed after this await cannot observe that earlier cancellation.
+      if (browserClosed || socket.destroyed || !reserved) return;
       const host =
         net.isIP(session.grant.backendHost) === 6 ? `[${session.grant.backendHost}]` : session.grant.backendHost;
       const headers = backendHeaders(request, session);
@@ -804,15 +1021,19 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         // hop unchanged and avoid creating a second compression context.
         perMessageDeflate: false,
         handshakeTimeout: 3000,
-        maxPayload: 16 * 1024 * 1024,
+        maxPayload: HUB_LIMITS.inFlightBytes,
       });
+      upstreamSocket = upstream;
       webSockets.set(upstream, session.generation);
-      socket.once("close", () => upstream.terminate());
       const handshakeError = () => {
         if (!socket.destroyed) rejectUpgrade(socket, 502);
       };
       upstream.once("error", handshakeError);
-      upstream.once("close", () => webSockets.delete(upstream));
+      upstream.once("close", () => {
+        upstreamClosed = true;
+        webSockets.delete(upstream);
+        release();
+      });
       upstream.once("open", () => {
         upstream.removeListener("error", handshakeError);
         upstream.on("error", () => socket.destroy());
@@ -826,8 +1047,24 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         }
         wss.handleUpgrade(request, socket, head, (client) => {
           webSockets.set(client, session.generation);
+          let slowClosing = false;
+          const slowPair = () => {
+            if (slowClosing) return;
+            slowClosing = true;
+            for (const peer of [client, upstream]) {
+              if (peer.readyState === WebSocket.OPEN) peer.close(1013, "Slow consumer; reconnect");
+              const timer = setTimeout(() => peer.terminate(), 250);
+              timer.unref();
+              peer.once("close", () => clearTimeout(timer));
+            }
+          };
+          const clientQueue = new ForwardQueue(client, slowPair);
+          const upstreamQueue = new ForwardQueue(upstream, slowPair);
+          outbound.set(client, clientQueue);
           const forward = (from: WebSocket, to: WebSocket) => {
+            const queue = to === client ? clientQueue : upstreamQueue;
             from.on("message", (data, binary) => {
+              if (slowClosing) return;
               if (from === upstream && !binary) {
                 try {
                   const value = JSON.parse(data.toString());
@@ -838,17 +1075,14 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
                   // Non-JSON payloads retain their existing transport behavior.
                 }
               }
-              if (to.readyState !== WebSocket.OPEN) return;
-              if (to.bufferedAmount > 8 * 1024 * 1024) {
-                from.terminate();
-                to.terminate();
-                return;
-              }
-              to.send(data, { binary });
+              if (!queue.enqueue(data, binary)) slowPair();
             });
             from.once("close", () => {
               webSockets.delete(from);
-              to.terminate();
+              outbound.delete(from);
+              clientQueue.dispose();
+              upstreamQueue.dispose();
+              if (!slowClosing) to.terminate();
             });
             from.on("error", () => to.terminate());
           };
@@ -873,7 +1107,8 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
               activateRestart(item.from);
               item.expires = item.restart?.deadline ?? Date.now() + 45_000;
             });
-            client.send(
+            sendControl(
+              client,
               JSON.stringify({
                 type: "event",
                 event: "hub_route",
@@ -888,7 +1123,11 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         });
       });
     } catch {
-      rejectUpgrade(socket, 502);
+      upstreamSocket?.terminate();
+      if (!socket.destroyed) rejectUpgrade(socket, 502);
+    } finally {
+      upgradePending = false;
+      release();
     }
   });
   server.on("clientError", (_error, socket) => socket.destroy());

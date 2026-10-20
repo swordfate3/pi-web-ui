@@ -1,5 +1,16 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "Conversation window limited. Older content remains in the original session.":
+    "会话窗口已限制大小，较早内容仍保留在原始会话中。",
+  "Could not load entry detail": "无法加载条目详情",
+  "Load entry detail": "加载条目详情",
+  "Load invocation detail": "加载调用详情",
+  "Load result detail": "加载结果详情",
+  "Entry detail": "条目详情",
+  "Next detail chunk": "下一段详情",
+  "Only one chunk is shown. Loading the next chunk replaces this one.":
+    "一次仅显示一段详情，加载下一段将替换当前内容。",
+  "Live preview. Details become available after this entry is saved.": "实时预览，条目保存后可加载详情。",
   "Restore this queued message to the composer; it will not be sent automatically.":
     "将这条排队消息恢复到输入框？不会自动发送。",
   "This queued message came from another session. Copy it into this draft?":
@@ -82,7 +93,7 @@ export const messages = {
   "Showing {returned} of {total} entries": "显示 {total} 条记录中的 {returned} 条",
   "Large entries are bounded previews. Full data remains in the original session.":
     "大记录仅显示有界预览，完整数据保留在原始会话中。",
-  "Partial navigation tree for selected dates (up to 1,000 nodes).": "所选日期的部分导航树（最多 1,000 个节点）。",
+  "Partial navigation tree for selected dates (up to 200 nodes).": "所选日期的部分导航树（最多 200 个节点）。",
   "Live messages are hidden while viewing past dates or an older page.": "查看过去日期或较早一页时，不显示实时消息。",
   "Saved session results are capped. Narrow the date range to find more.":
     "已保存会话结果已达到上限，请缩小日期范围以查找更多。",

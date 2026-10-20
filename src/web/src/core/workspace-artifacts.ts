@@ -83,7 +83,7 @@ function extractPath(value: unknown): string | null {
   const record = value as Record<string, unknown>;
   for (const key of ["path", "filePath", "filepath", "file_path", "file", "target", "filename"]) {
     const candidate = record[key];
-    if (typeof candidate === "string" && candidate.trim()) return candidate;
+    if (typeof candidate === "string" && candidate.length <= 4096 && candidate.trim()) return candidate;
   }
   return null;
 }

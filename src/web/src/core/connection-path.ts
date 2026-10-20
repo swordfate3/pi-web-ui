@@ -1,6 +1,10 @@
+import { HUB_GENERATION_SOURCE } from "../../../../extensions/hub-generation";
+
+const hubEntry = new RegExp(`^/s/${HUB_GENERATION_SOURCE}/(?:index\\.html)?$`);
+
 /** Only the package-owned Hub route gets a same-origin home link. */
 export function hubHomePath(pathname: string): string | null {
-  return /^\/s\/[a-f0-9]{32}\/(?:index\.html)?$/.test(pathname) ? "/sessions/" : null;
+  return hubEntry.test(pathname) ? "/sessions/" : null;
 }
 
 /** Routes belong to the current page entry, including a reverse-proxy subpath. */

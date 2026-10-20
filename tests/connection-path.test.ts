@@ -13,6 +13,14 @@ test("Hub home is offered only on an exact same-origin Hub session entry", () =>
     assert.equal(hubHomePath(pathname), null);
 });
 
+test("bounded session entries retain the Hub home link without accepting nested or malformed routes", () => {
+  const generation = `b2-${"a".repeat(32)}-${"0".repeat(15)}1-${"b".repeat(32)}`;
+  assert.equal(hubHomePath(`/s/${generation}/`), "/sessions/");
+  assert.equal(hubHomePath(`/s/${generation}/index.html`), "/sessions/");
+  for (const route of [`/s/${generation}/api`, `/s/${generation.slice(0, -1)}/`, `//evil/s/${generation}/`])
+    assert.equal(hubHomePath(route), null);
+});
+
 test("entry paths retain the current proxy directory, never another session", () => {
   assert.equal(webBasePath("/"), "/");
   assert.equal(webBasePath("/index.html"), "/");

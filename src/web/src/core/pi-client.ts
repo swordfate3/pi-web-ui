@@ -70,8 +70,7 @@ export class PiClient {
             const route = data.payload as Partial<HubRoute> | undefined;
             if (
               route &&
-              typeof route.generation === "string" &&
-              /^[a-f0-9]{32}$/.test(route.generation) &&
+              isHubGeneration(route.generation) &&
               typeof route.token === "string" &&
               /^[a-f0-9]{48}$/.test(route.token) &&
               location.pathname === `/s/${route.generation}/`
@@ -222,7 +221,7 @@ export class PiClient {
           });
           if (response.status === 200) {
             const result = await response.json();
-            if (typeof result.path !== "string" || !/^\/s\/[a-f0-9]{32}\/$/.test(result.path)) break;
+            if (!isHubSessionPath(result.path)) break;
             if (
               controller.signal.aborted ||
               this.handoffController !== controller ||
@@ -272,3 +271,5 @@ export class PiClient {
     }
   }
 }
+
+import { isHubGeneration, isHubSessionPath } from "../../../../extensions/hub-generation";

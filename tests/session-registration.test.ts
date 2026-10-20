@@ -22,9 +22,15 @@ type Request = typeof credential & {
   port?: number;
   sessionName?: string | null;
   software?: { piVersion: string; webUi?: { version: string; build?: string } };
+  nonce?: string;
+  protocol?: string;
 };
 
-async function registry(t: test.TestContext, reply: (request: Request, socket: net.Socket) => void) {
+async function registry(
+  t: test.TestContext,
+  reply: (request: Request, socket: net.Socket) => void,
+  negotiationBackport = true,
+) {
   const dir = mkdtempSync(path.join(tmpdir(), "pi-register-"));
   const socketPath = path.join(dir, "r.sock");
   const credentialFile = path.join(dir, "capability.json");
@@ -39,6 +45,14 @@ async function registry(t: test.TestContext, reply: (request: Request, socket: n
       input += chunk;
       if (!input.includes("\n")) return;
       const request = JSON.parse(input.split("\n")[0]) as Request;
+      // Existing legacy lifecycle tests use a negotiation-backported Hub. Keep
+      // the unmodified-old-dispatch fixture below separate and fail-closed.
+      if (negotiationBackport && request.action === "registry_negotiate") {
+        socket.end(
+          `${JSON.stringify({ ok: false, code: "UNSUPPORTED_PROTOCOL", protocol: request.protocol, nonce: request.nonce, legacy: "legacy-v1", proof: proof(`${request.nonce}:${request.protocol}:UNSUPPORTED_PROTOCOL:legacy-v1`) })}\n`,
+        );
+        return;
+      }
       requests.push(request);
       reply(request, socket);
     });
@@ -51,6 +65,70 @@ async function registry(t: test.TestContext, reply: (request: Request, socket: n
   });
   return { socketPath, credentialFile, requests };
 }
+
+test("unmodified old Hub generic rejection never causes a new client to attempt legacy enrollment", async (t) => {
+  const f = await registry(
+    t,
+    (request, socket) => {
+      // Frozen old dispatch boundary: unknown action/generation is generic failure.
+      socket.end(
+        JSON.stringify(
+          request.action === "register" && /^[a-f0-9]{32}$/.test(request.generation)
+            ? { ok: true, result: { url: `https://gateway.example/s/${request.generation}/` } }
+            : { ok: false, error: "Registration rejected" },
+        ) + "\n",
+      );
+    },
+    false,
+  );
+  const lifecycle = new SessionRegistration(credential, f.socketPath);
+  let url: string | null = null;
+  await lifecycle.start(43210, (value) => {
+    url = value;
+  });
+  await lifecycle.refresh();
+  await lifecycle.stop();
+  assert.equal(url, null);
+  assert.ok(f.requests.length >= 1);
+  assert.ok(f.requests.every((r) => r.action === "registry_negotiate"));
+});
+
+test("only correlated authenticated unsupported negotiation permits legacy fallback", async (t) => {
+  for (const mode of ["valid", "forged", "wrong-nonce", "auth-error", "malformed-success"]) {
+    const f = await registry(
+      t,
+      (request, socket) => {
+        if (request.action !== "registry_negotiate") {
+          socket.end(registeredReply);
+          return;
+        }
+        const nonce = mode === "wrong-nonce" ? "0".repeat(32) : request.nonce;
+        const value =
+          mode === "malformed-success"
+            ? { ok: true, result: {} }
+            : {
+                ok: false,
+                code: mode === "auth-error" ? "AUTH_FAILED" : "UNSUPPORTED_PROTOCOL",
+                protocol: "bounded-v2",
+                nonce,
+                legacy: "legacy-v1",
+                proof: mode === "forged" ? "0".repeat(64) : proof(`${nonce}:bounded-v2:UNSUPPORTED_PROTOCOL:legacy-v1`),
+              };
+        socket.end(JSON.stringify(value) + "\n");
+      },
+      false,
+    );
+    const lifecycle = new SessionRegistration(credential, f.socketPath);
+    await lifecycle.start(43210, () => {});
+    await lifecycle.stop();
+    assert.equal(f.requests[0].action, "registry_negotiate");
+    assert.equal(
+      f.requests.some((r) => r.action === "register"),
+      mode === "valid",
+      mode,
+    );
+  }
+});
 
 test("register and unregister speak the existing capability protocol with the actual port", async (t) => {
   const fixture = await registry(t, (request, socket) =>

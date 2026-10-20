@@ -336,6 +336,55 @@ test("mock mirror revision WS contract and lifecycle/dispatch fences", async (t)
     });
   const state = await request("get_messages");
   const runtimeId = required(state.result).runtimeId;
+  // Exercise the actual mirror parser, dispatch and catch path over its socket.
+  // A detail/helper throw alone cannot prove that the final error stays bounded.
+  for (const [method, length, budget] of [
+    ["get_entry_detail", 70_000, 64 * 1024],
+    ["get_history", 300_000, 256 * 1024],
+    ["sync_request", 300_000, 256 * 1024],
+    ["get_entry_detail", 513, 64 * 1024],
+    ["get_entry_detail", 512, 64 * 1024],
+  ] as const) {
+    await t.test(`request ID boundary: ${method}, ${length} characters`, async (subtest) => {
+      const id = (length === 512 ? "\u0001" : "x").repeat(length);
+      const raw = await new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          ws.off("message", onMessage);
+          reject(new Error("request ID boundary response timeout"));
+        }, 3000);
+        const onMessage = (data: RawData) => {
+          const text = data.toString();
+          const response = JSON.parse(text);
+          if (response.type !== "res" && response.type !== "error") return;
+          clearTimeout(timeout);
+          ws.off("message", onMessage);
+          resolve(text);
+        };
+        ws.on("message", onMessage);
+        ws.send(
+          JSON.stringify({
+            type: "req",
+            id,
+            method,
+            params: { sessionId, runtimeId, entryId: "missing", from: 1, to: 0 },
+          }),
+        );
+      });
+      const bytes = Buffer.byteLength(raw);
+      subtest.diagnostic(`final ${method} error: ${bytes} bytes`);
+      assert.ok(bytes <= budget, `final response exceeds ${budget} bytes: ${bytes}`);
+      const response = JSON.parse(raw);
+      if (length > 512) {
+        assert.equal(response.type, "error");
+        assert.equal(response.code, "bad_request");
+        assert.ok(!Object.hasOwn(response, "id"), "invalid opaque identity must not be echoed or truncated");
+      } else {
+        assert.equal(response.type, "res");
+        assert.equal(response.ok, false);
+        assert.equal(response.id, id, "accepted escape-heavy identity must be preserved exactly");
+      }
+    });
+  }
   const params = () => ({ entryId: "a2", mode: "regenerate", sessionId, runtimeId, sourceLeafId: "a2" });
   const previewParams = async (input = params()) => {
     const preview = await request("get_message_revision", input);

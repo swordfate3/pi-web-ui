@@ -1,0 +1,65 @@
+{
+  "method": "Playwright Chromium fallback; real Pi + packaged Hub",
+  "status": "passed",
+  "runId": "09080483-4dbd-45f8-bd74-af00529b6329",
+  "startedAt": "2026-10-20T09:14:52.231Z",
+  "expectedFailureExclusions": [],
+  "evidence": [
+    {
+      "status": "passed",
+      "fixture": "near-byte-limit-tool-toggle",
+      "url": "http://127.0.0.1:45689/s/b2-cc2098ec6afebd1f6a62d685310be90b-0000000000000001-0768a9d56775eef2cdc33b67dfd0dede/",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "pageErrors": [],
+      "consoleErrors": [],
+      "requestFailures": [],
+      "httpFailures": [],
+      "webSocketErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-1440-initial.png",
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-1440-all-open.png",
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-1440-single-open.png",
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-1440-older-e0.png",
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-1440-e0-detail.png"
+      ],
+      "rowsBeforeAndAfterToggles": 15,
+      "olderPageRows": 1,
+      "detailIds": [
+        "e0"
+      ],
+      "jsonlHashBefore": "c0082024db9fe80158e5d2e89ee335b4143040c1e7ca3ee63c254a9c03a42324",
+      "jsonlHashAfter": "c0082024db9fe80158e5d2e89ee335b4143040c1e7ca3ee63c254a9c03a42324"
+    },
+    {
+      "status": "passed",
+      "fixture": "near-byte-limit-tool-toggle",
+      "url": "http://127.0.0.1:45151/s/b2-c91b2b588cfd8b36d5a59da22c31f23c-0000000000000001-aecaaaaa981450d68b59af3cae171d80/",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "pageErrors": [],
+      "consoleErrors": [],
+      "requestFailures": [],
+      "httpFailures": [],
+      "webSocketErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-390-initial.png",
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-390-all-open.png",
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-390-single-open.png",
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-390-older-e0.png",
+        "docs/validation/artifacts/bounded-tool-toggle/toggle-390-e0-detail.png"
+      ],
+      "rowsBeforeAndAfterToggles": 15,
+      "olderPageRows": 1,
+      "detailIds": [
+        "e0"
+      ],
+      "jsonlHashBefore": "802f4f8b64a4d493573038eedc50cfe9940af3a58ec945a3eacda9b89d6f6e1a",
+      "jsonlHashAfter": "802f4f8b64a4d493573038eedc50cfe9940af3a58ec945a3eacda9b89d6f6e1a"
+    }
+  ]
+}

@@ -151,6 +151,34 @@ declared as such. `get_saved_sessions` accepts the same date range and returns
 only compact matching session metadata. Raw Pi events retain their source
 meaning; display-window filtering belongs to the browser.
 
+Complete `state_sync`, `get_history` and `sync_request` envelopes are limited to
+262,144 UTF-8 bytes **before compression**, not just their entry arrays. Pages are
+40 entries / 196,608 bytes, each entry 16,384 bytes; tree previews are 200 nodes /
+32,768 bytes. Final serialization includes metadata and preserves exact cursor
+identities/progress. Unrepresentable non-history metadata yields a small explicit
+error. These ceilings do not apply to initial assets or explicit HTTP file transfers.
+
+`get_entry_detail` accepts `{entryId,sessionId,runtimeId,cursor?}` and returns
+`{sessionId,runtimeId,entryId,text,nextCursor}` in the ordinary response envelope,
+at most 65,536 bytes including request ID and framing. `nextCursor:null` marks the
+end. A cursor is authenticated and fenced to current session/runtime/branch leaf,
+entry revision and offset. Unknown/off-branch IDs, cross-scope requests, malformed
+offsets/signatures and stale cursors fail closed. The endpoint is not a filesystem
+reader and omits binary/base64 carriers. The browser never automatically requests
+or concatenates all chunks; it retains one chunk and clears it on scope/date/page
+changes and disconnect. Individual system previews preserve detail access when
+tool-row eviction would otherwise hide a result. Retained browser content is capped
+at 200 items / 524,288 bytes, 65,536 bytes per item, plus that one detail chunk.
+
+Hub generations are either legacy 32 lowercase hex or
+`b2-<boot32hex>-<slot16hex>-<nonce32hex>`. This is URL syntax, not authorization;
+run IDs and operation IDs remain exactly 32 lowercase hex. New registrations use
+authenticated `bounded-v2` negotiation. An old unmodified Hub rejects the new
+extension; only an explicit authenticated unsupported-protocol response permits
+legacy fallback. Upgrade all writers and Hub before Pi clients; keep all legacy
+tombstones. Queue/storage/runtime limits and downgrade boundaries are in
+[Hub operations](../hub.md), not exemptions to history budgets.
+
 The current `mirror_sync` type becomes a standard event:
 
 ```json

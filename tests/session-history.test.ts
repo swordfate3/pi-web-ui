@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as historyApi from "../extensions/session-history.ts";
 import {
   guardHistoryFrame,
   selectSessionHistory,
@@ -19,6 +20,63 @@ const entry = (id: string, timestamp = from) => ({
   message: { role: "user", content: id },
 });
 
+test("approved history byte/count budgets traverse every entry newest-first without mutation", () => {
+  const entries = Array.from({ length: 125 }, (_, i) => ({
+    ...entry(`bounded-${i}`, from + i),
+    message: { role: "user", content: "中\u0001".repeat(1500) },
+  }));
+  const original = JSON.stringify(entries);
+  let before: string | undefined;
+  const ids: string[] = [];
+  do {
+    const page = selectSessionHistory(entries, [], { from, to, before });
+    assert.ok(page.entries.length > 0 && page.entries.length <= 40);
+    assert.ok(Buffer.byteLength(JSON.stringify(page.entries)) <= 192 * 1024);
+    for (const value of page.entries) assert.ok(Buffer.byteLength(JSON.stringify(value)) <= 16 * 1024);
+    ids.unshift(...page.entries.map((value) => value.id!));
+    assert.notEqual(page.history.nextBefore, before);
+    before = page.history.nextBefore ?? undefined;
+  } while (before);
+  assert.deepEqual(ids, entries.map((value) => value.id));
+  assert.equal(JSON.stringify(entries), original);
+});
+
+test("final history envelopes budget metadata and request IDs, reduce pages with progress, and fail closed", () => {
+  const serialize = (envelope: unknown) => historyApi.serializeHistoryEnvelope(envelope);
+  const entries = Array.from({ length: 80 }, (_, i) => ({
+    ...entry(`envelope-${i}`, from + i), message: { role: "user", content: "x".repeat(14_000) },
+  }));
+  const tree = entries.map((value) => ({ entry: value, children: [] }));
+  const page = selectSessionHistory(entries, tree, { from, to });
+  const original = JSON.stringify(page);
+  for (const type of ["event", "res"]) {
+    const field = type === "event" ? "payload" : "result";
+    const envelope = { type, ...(type === "event" ? { event: "state_sync" } : { id: "\u0001".repeat(512), ok: true }),
+      [field]: { ...page, sessionId: "s", runtimeId: "r", model: { id: "m", metadata: "x".repeat(95_000) }, status: "ok" } };
+    const raw = serialize(envelope);
+    assert.ok(raw);
+    assert.ok(Buffer.byteLength(raw) <= 256 * 1024);
+    const result = JSON.parse(raw)[field];
+    assert.equal(result.sessionId, "s");
+    assert.equal(result.runtimeId, "r");
+    assert.ok(result.entries.length > 0);
+    assert.equal(result.entries.at(-1).id, "envelope-79");
+    assert.equal(result.history.nextBefore, result.entries[0].id);
+    assert.equal(result.history.returned, result.entries.length);
+    const older = selectSessionHistory(entries, [], { from, to, before: result.history.nextBefore });
+    assert.equal(older.entries.at(-1)?.id, `envelope-${Number(result.entries[0].id.split("-")[1]) - 1}`);
+  }
+  assert.equal(JSON.stringify(page), original);
+  const rejectedRaw = serialize({ type: "res", id: "request", ok: true,
+    result: { ...page, model: { id: "x".repeat(300_000), toJSON() { throw new Error("must not serialize source"); } } } });
+  assert.ok(rejectedRaw);
+  const rejected = JSON.parse(rejectedRaw);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.id, "request");
+  assert.match(rejected.error, /limit|large|budget/i);
+  assert.equal(serialize({ type: "res", id: "download", ok: true, result: { text: "x".repeat(300_000) } }), null);
+});
+
 test("history uses half-open dates and preserves chronological entries and source data", () => {
   const entries = [entry("old", from - 1), entry("recent-a"), entry("recent-b", to - 1), entry("future", to)];
   const before = JSON.stringify(entries);
@@ -36,12 +94,12 @@ test("history uses half-open dates and preserves chronological entries and sourc
 test("pages select newest entries, return chronological order and use entry ID cursors", () => {
   const entries = Array.from({ length: 205 }, (_, i) => entry(`id-${i}`, from + i));
   const page = selectSessionHistory(entries, [], { from, to });
-  assert.equal(page.entries.length, 100);
-  assert.equal(page.entries[0].id, "id-105");
-  assert.equal(page.history.nextBefore, "id-105");
+  assert.equal(page.entries.length, 40);
+  assert.equal(page.entries[0].id, "id-165");
+  assert.equal(page.history.nextBefore, "id-165");
   const older = selectSessionHistory(entries, [], { from, to, before: page.history.nextBefore! });
-  assert.equal(older.entries[0].id, "id-5");
-  assert.equal(older.entries.at(-1)?.id, "id-104");
+  assert.equal(older.entries[0].id, "id-125");
+  assert.equal(older.entries.at(-1)?.id, "id-164");
   assert.throws(() => selectSessionHistory(entries, [], { from, to, before: "missing" }), /cursor/i);
   assert.throws(() => selectSessionHistory(entries, [], { from: to, to: from }), /date|range/i);
   assert.throws(() => selectSessionHistory(entries, [], { from: "0" as never, to }), /date|range/i);
@@ -61,7 +119,7 @@ test("huge text, tool, image, custom data and metadata become bounded explicit p
   const page = selectSessionHistory(entries, [], { from, to });
   assert.equal(page.history.truncatedEntries, 5);
   assert.ok(page.entries.every((e) => e.historyPreview === true));
-  assert.ok(Buffer.byteLength(JSON.stringify(page.entries)) <= 512 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(page.entries)) <= 192 * 1024);
   assert.ok(!JSON.stringify(page.entries).includes(huge));
   assert.equal(JSON.stringify(entries), original);
 });
@@ -69,13 +127,13 @@ test("huge text, tool, image, custom data and metadata become bounded explicit p
 test("byte paging makes progress even for many medium-sized entries", () => {
   const entries = Array.from({ length: 100 }, (_, i) => ({
     ...entry(`id-${i}`, from + i),
-    metadata: "m".repeat(20_000),
+    metadata: "m".repeat(14_000),
   }));
   let before: string | undefined;
   const ids: string[] = [];
   do {
     const page = selectSessionHistory(entries, [], { from, to, before });
-    assert.ok(Buffer.byteLength(JSON.stringify(page.entries)) <= 512 * 1024);
+    assert.ok(Buffer.byteLength(JSON.stringify(page.entries)) <= 192 * 1024);
     assert.ok(page.entries.length > 0);
     ids.unshift(...page.entries.map((e) => e.id!));
     before = page.history.nextBefore ?? undefined;
@@ -146,7 +204,7 @@ test("oversized tool previews retain invocation/result associations after snapsh
     items.some((item) => item.kind === "tool" && item.id === "small-id" && item.output === "complete small result"),
   );
   assert.equal(page.history.truncatedEntries, 2);
-  assert.ok(page.entries.every((value) => Buffer.byteLength(JSON.stringify(value)) <= 32 * 1024));
+  assert.ok(page.entries.every((value) => Buffer.byteLength(JSON.stringify(value)) <= 16 * 1024));
   assert.equal(JSON.stringify(entries), original);
 });
 
@@ -162,7 +220,7 @@ test("tool preview identities are exact and abnormal identities reject rather th
   const items = syncToItems(page.entries as Parameters<typeof syncToItems>[0], (prefix) => prefix);
   assert.equal(items[0].id, id);
   assert.equal(page.entries[1].message?.toolCallId, id);
-  assert.ok(page.entries.every((value) => Buffer.byteLength(JSON.stringify(value)) <= 32 * 1024));
+  assert.ok(page.entries.every((value) => Buffer.byteLength(JSON.stringify(value)) <= 16 * 1024));
   const invalidCall = {
     ...call,
     message: { ...call.message, content: [{ ...call.message.content[0], id: `${id}x` }] },
@@ -178,7 +236,7 @@ for (const boundary of ["count", "byte", "date"] as const) {
   test(`tool results remain visible when a ${boundary} boundary excludes their invocation`, () => {
     const call = {
       ...entry("call", boundary === "date" ? from - 1 : from),
-      metadata: boundary === "byte" ? "m".repeat(20_000) : "",
+      metadata: boundary === "byte" ? "m".repeat(14_000) : "",
       message: {
         role: "assistant",
         content: [{ type: "toolCall", id: "split-call", name: "read", arguments: { path: "workspace/example.txt" } }],
@@ -191,18 +249,18 @@ for (const boundary of ["count", "byte", "date"] as const) {
         toolCallId: "split-call",
         toolName: "read",
         isError: boundary === "date",
-        content: "result " + (boundary === "byte" ? "r".repeat(20_000) : "complete"),
+        content: "result " + (boundary === "byte" ? "r".repeat(14_000) : "complete"),
       },
     };
-    const users = Array.from({ length: boundary === "count" ? 99 : boundary === "byte" ? 25 : 0 }, (_, i) => ({
+    const users = Array.from({ length: boundary === "count" ? 39 : boundary === "byte" ? 12 : 0 }, (_, i) => ({
       ...entry(`user-${i}`, from + 2 + i),
-      ...(boundary === "byte" ? { metadata: "m".repeat(20_000) } : {}),
+      ...(boundary === "byte" ? { metadata: "m".repeat(14_000) } : {}),
     }));
     const page = selectSessionHistory([call, result, ...users], [], { from, to });
     assert.ok(!page.entries.some((value) => value.id === "call"));
     assert.ok(page.entries.some((value) => value.id === "result"));
-    assert.ok(page.entries.length <= 100);
-    assert.ok(Buffer.byteLength(JSON.stringify(page.entries)) <= 512 * 1024);
+    assert.ok(page.entries.length <= 40);
+    assert.ok(Buffer.byteLength(JSON.stringify(page.entries)) <= 192 * 1024);
     const tool = syncToItems(page.entries as Parameters<typeof syncToItems>[0], (prefix) => prefix).find(
       (item) => item.kind === "tool",
     );
@@ -230,13 +288,33 @@ test("10k-node tree is a bounded lightweight preview with valid structural paren
   }
   const page = selectSessionHistory([], roots, { from, to });
   assert.equal(page.history.treeLimited, true);
-  assert.equal(page.treeNodes.length, 1000);
+  assert.ok(page.treeNodes.length > 0 && page.treeNodes.length <= 200);
+  assert.equal(page.treeNodes.at(-1)?.entry.id, "9999");
+  assert.ok(Buffer.byteLength(JSON.stringify(page.treeNodes)) <= 32 * 1024);
   const ids = new Set(page.treeNodes.map((n) => n.entry.id));
   for (const n of page.treeNodes) {
     assert.ok(n.parentNodeId === null || ids.has(n.parentNodeId));
     assert.ok(!("data" in n.entry));
   }
-  assert.ok(Buffer.byteLength(JSON.stringify(page)) < 4 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(page)) < 256 * 1024);
+});
+
+test("tree byte budget includes final null parents after out-of-range ancestors are removed", (t) => {
+  const children = Array.from({ length: 200 }, (_, i) => ({
+    entry: { id: `c${i}`, type: "custom", timestamp: new Date(from).toISOString(), summary: "x".repeat(30) },
+    children: [],
+  }));
+  const tree = [{ entry: { id: "p", type: "custom", timestamp: new Date(from - 1).toISOString() }, children }];
+  const original = JSON.stringify(tree);
+  const page = selectSessionHistory([], tree, { from, to });
+  const bytes = Buffer.byteLength(JSON.stringify(page.treeNodes));
+  t.diagnostic(`final tree: ${page.treeNodes.length} nodes, ${bytes} bytes`);
+  assert.ok(bytes <= 32 * 1024, `final tree exceeds 32768 bytes: ${bytes}`);
+  assert.ok(page.treeNodes.length > 0 && page.treeNodes.length <= 200);
+  assert.equal(page.treeNodes.at(-1)?.entry.id, "c199");
+  assert.ok(page.treeNodes.every((node) => node.parentNodeId === null));
+  assert.equal(page.history.treeLimited, true);
+  assert.equal(JSON.stringify(tree), original);
 });
 
 test("saved session date filtering happens before capping and reports truncation", () => {
@@ -280,7 +358,7 @@ test("tree also enforces a byte budget for long opaque IDs and escape-heavy labe
   }));
   const page = selectSessionHistory([], roots, { from, to });
   assert.equal(page.history.treeLimited, true);
-  assert.ok(Buffer.byteLength(JSON.stringify(page)) < 4 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(page.treeNodes)) <= 32 * 1024);
   assert.ok(page.treeNodes.length > 0);
   assert.equal(page.treeNodes.at(-1)?.entry.id, `999-${padding}`);
 });

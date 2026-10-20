@@ -5,6 +5,7 @@ import type {
   ChatItem,
   ChatSubmitStatus,
   ConnectionState,
+  EntryDetailResult,
   ExtensionDialog,
   FileContentResult,
   FileDownloadResult,
@@ -44,6 +45,11 @@ export type ConnectionSlice = {
 };
 
 export type SessionSlice = {
+  entryDetail: EntryDetailResult | null;
+  entryDetailLoading: boolean;
+  entryDetailError: UiText | null;
+  loadEntryDetail: (entryId: string, cursor?: string) => Promise<void>;
+  closeEntryDetail: () => void;
   getUsageStats: () => Promise<UsageStatsResult>;
   getMessageRevision: (entryId: string, mode: MessageRevisionMode) => Promise<MessageRevisionPreview>;
   submitMessageRevision: (preview: MessageRevisionPreview, text: string) => Promise<boolean>;

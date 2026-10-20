@@ -140,7 +140,7 @@ test("applyStateSync keeps a valid tree/selection on failure and clears errors o
 test("applyStateSync handles 10k nodes and preserves a deep selection", () => {
   let state: ReturnType<typeof createSessionSlice>;
   state = createSessionSlice(
-    ((patch: object) => Object.assign(state, patch)) as never,
+    ((patch: object | ((value: unknown) => object)) => Object.assign(state, typeof patch === "function" ? patch(state) : patch)) as never,
     (() => state) as never,
     {} as never,
   );

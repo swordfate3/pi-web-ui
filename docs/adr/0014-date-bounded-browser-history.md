@@ -20,12 +20,25 @@ Browser history is a read-only window, not the model's context or the persisted 
 - A single oversized record becomes an explicitly marked browser preview. Persisted originals remain unchanged. No query bypass may send its original unbounded body.
 - Preserve session/runtime fencing and never merge a delayed historical response into a different session. Preserve date bounds across background sync. Do not mix live current-day updates into a historical-only view.
 - Saved-session discovery (`/resume`) returns compact, server-date-filtered metadata. The Hub portal continues to describe currently registered online processes; it is not a searchable archive of all saved sessions.
-- Keep Hub's 16 MiB ceiling. Unexpected oversized outgoing envelopes produce a small explicit error rather than a repeated oversized frame.
+- Every complete UTF-8 `state_sync` / `get_history` / `sync_request` JSON envelope is at most 256 KiB before compression, including metadata and framing. A page has at most 40 entries / 192 KiB, each entry at most 16 KiB, and tree previews at most 200 nodes / 32 KiB. Final-envelope reduction preserves exact identities and older-page progress. Oversized non-history metadata fails closed with a small error, not repeated oversized frames.
+- `get_entry_detail({entryId,sessionId,runtimeId,cursor?})` reads only a persisted entry on the current branch. Each complete response is at most 64 KiB. Authenticated opaque cursors bind session, runtime, current leaf, entry identity/revision and offset; stale/cross-scope requests are rejected. Readable text is returned without inline binary/base64 bodies or arbitrary path access.
+- The browser retains at most 200 items / 512 KiB source-like serialized content, each at most 64 KiB, plus one detail chunk. Explicit next-chunk interaction replaces rather than concatenates. Date/page, branch/session/runtime and disconnect changes invalidate details. Tool invocation/result previews and individually bounded synthetic system preview rows preserve access to omitted source entries.
+- Hub's separate 16 MiB in-flight transport slot preserves explicit file previews; it never enlarges the 256 KiB history budget. Initial JS/CSS, explicit upload/download streams and lifetime traffic are excluded.
 
 ## Consequences
 
 Older messages require a date selection; very large individual records show previews. This intentionally bounds mobile transfer/parse/render work. It does not delete history, compact model context, or alter TUI messages. Date-bounded loading alone did not fix resume-to-new-generation URL handoff; the separate follow-up fix is described in ADR 0013 and ADR 0008.
 
+Pi core memory and getBranch/getTree work may still scale with original history;
+serialized browser retention is not total JS/React memory. No constant RSS, CPU,
+phone latency or Docker volume quota is promised. See [Hub budgets and safe rollout](../hub.md)
+for 8 MiB logical state, preserve-only legacy/grant/receipt policy and Hub-first/all-writers ordering.
+
 ## Verification
 
 Pure behavioral tests exercise dates, page cursors, oversized records, immutable inputs, and stale frontend responses. `e2e/date-history.integration.ts` exercises real Pi and packaged Hub with synthetic large JSONL. `e2e/features/date-history.feature` covers real browser date selection and responsive controls; screenshots are visually inspected separately from DOM assertions.
+
+The [bounded-state validation record](../validation/bounded-hub-state.md) includes
+full-frame byte measurements, unchanged temporary 20 MiB JSONL hashes and actual
+1440px/390px screenshots through real Pi and the rebuilt packaged Hub. The visual
+runner explicitly uses Playwright Chromium fallback, not in-app Browser automation.

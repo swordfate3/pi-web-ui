@@ -1,12 +1,14 @@
-import { closeSync, constants, existsSync, openSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
+import { HUB_GENERATION_SOURCE, isHubGeneration, isHubSessionPath } from "../extensions/hub-generation.ts";
 import type { RuntimeMetadata } from "../extensions/runtime-metadata.ts";
 import { type HubConfig, privateDirectory, readPrivateJson } from "./config.ts";
 import { gatewayIdentity } from "./gateway-auth.ts";
 import { GateLifecycle, type LifecycleJob, type RestartRequest } from "./lifecycle.ts";
 import { HubManagement } from "./management.ts";
 import { GateRuntimeUpdates, RuntimeUpdateError, runtimeVersion } from "./runtime-updates.ts";
+import { storageDiagnostics, withStateWriter } from "./state-budget.ts";
 
 type RouteIdentity = { runId: string; generation: string; runtime?: RuntimeMetadata };
 type Receipt = RestartRequest & { id: string; generation: string; requestedAt: number };
@@ -78,7 +80,7 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
     if (
       value.id !== id ||
       !hex(value.run_id) ||
-      !hex(value.generation) ||
+      !isHubGeneration(value.generation) ||
       value.idempotency_key !== id ||
       !text(value.runtime_id) ||
       !text(value.session_id) ||
@@ -87,20 +89,13 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
       throw new Error();
     return value;
   };
-  const save = (value: Receipt) => {
-    if (readdirSync(receipts).filter((name) => /^[a-f0-9]{32}\.json$/.test(name)).length >= 1000) throw new Error();
-    const destination = file(value.id);
-    const fd = openSync(
-      destination,
-      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
-      0o600,
-    );
-    try {
-      writeFileSync(fd, `${JSON.stringify(value)}\n`);
-    } finally {
-      closeSync(fd);
-    }
-  };
+  const save = (value: Receipt, publish: () => void) =>
+    withStateWriter(config, (writer) => {
+      if (!hooks.granted(value.run_id)) throw new Error();
+      if (readdirSync(receipts).filter((name) => /^[a-f0-9]{32}\.json$/.test(name)).length >= 1000) throw new Error();
+      writer.write(`restarts/${value.id}.json`, value, { exclusive: true });
+      publish();
+    });
   const resolve = async (id: string, submitted?: LifecycleJob): Promise<Record<string, unknown>> => {
     if (!provider) throw new Error();
     const receipt = read(id);
@@ -110,8 +105,12 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
     // Persist the first trusted execution timestamp. Later queries, including
     // after a Hub restart, cannot replace it with a fresh lease.
     const clockFile = path.join(receipts, `${id}.started.json`);
-    if (job.started_at !== undefined && !existsSync(clockFile))
-      writeFileSync(clockFile, JSON.stringify({ started_at: job.started_at }), { flag: "wx", mode: 0o600 });
+    if (job.started_at !== undefined)
+      withStateWriter(config, (writer) => {
+        if (!hooks.granted(receipt.run_id)) throw new Error();
+        if (!existsSync(clockFile))
+          writer.write(`restarts/${id}.started.json`, { started_at: job.started_at }, { exclusive: true });
+      });
     if (existsSync(clockFile) && readPrivateJson(clockFile).started_at !== job.started_at) throw new Error();
     const result: Record<string, unknown> = { id, status: job.status, stage: job.stage };
     const failed = (stage: string) => {
@@ -150,8 +149,7 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
           completed.at > Date.now() ||
           completed.runtimeId !== job.new_runtime_id ||
           completed.version !== job.new_version ||
-          typeof completed.path !== "string" ||
-          !/^\/s\/[a-f0-9]{32}\/$/.test(completed.path))
+          !isHubSessionPath(completed.path))
       )
         throw new Error();
       if (!completed && Date.now() >= deadline) return failed("registration_timeout");
@@ -178,24 +176,28 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
       }
       if (Date.now() >= deadline) return failed("registration_timeout");
       if (route) {
-        if (!existsSync(verifiedFile))
-          writeFileSync(
-            verifiedFile,
-            JSON.stringify({
-              id,
-              run_id: receipt.run_id,
-              generation: receipt.generation,
-              old_runtime_id: receipt.runtime_id,
-              session_id: receipt.session_id,
-              leaf_id: receipt.leaf_id,
-              started_at: job.started_at,
-              at: Date.now(),
-              path: route,
-              runtimeId: job.new_runtime_id,
-              version: job.new_version,
-            }),
-            { flag: "wx", mode: 0o600 },
-          );
+        if (!isHubSessionPath(route)) throw new Error();
+        withStateWriter(config, (writer) => {
+          if (!hooks.granted(receipt.run_id) || Date.now() >= deadline) throw new Error();
+          if (!existsSync(verifiedFile))
+            writer.write(
+              `restarts/${id}.verified.json`,
+              {
+                id,
+                run_id: receipt.run_id,
+                generation: receipt.generation,
+                old_runtime_id: receipt.runtime_id,
+                session_id: receipt.session_id,
+                leaf_id: receipt.leaf_id,
+                started_at: job.started_at,
+                at: Date.now(),
+                path: route,
+                runtimeId: job.new_runtime_id,
+                version: job.new_version,
+              },
+              { exclusive: true },
+            );
+        });
         result.path = route;
       } else {
         result.status = "running";
@@ -220,7 +222,6 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
           .end(JSON.stringify(value));
       };
       let phase = "authorization";
-      let unsubmittedReceipt: string | undefined;
       try {
         if (config.management?.gateway && !gatewayIdentity(config, request)) {
           reply(401, { error: "Verified gateway login required" });
@@ -273,6 +274,10 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
         };
         if (request.method === "POST" && pathname === "/api/management/logout") {
           reply(200, { authorized: false }, management.logout(request));
+          return true;
+        }
+        if (request.method === "GET" && pathname === "/api/management/storage") {
+          reply(200, storageDiagnostics(config));
           return true;
         }
         phase = "provider";
@@ -344,7 +349,7 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
           reply(503, { error: "Managed restart is not configured" });
           return true;
         }
-        const targetMatch = /^\/api\/management\/targets\/([a-f0-9]{32})$/.exec(pathname);
+        const targetMatch = new RegExp(`^/api/management/targets/(${HUB_GENERATION_SOURCE})$`).exec(pathname);
         if (request.method === "GET" && targetMatch) {
           const selected = await hooks.lookup(targetMatch[1]);
           if (!selected) {
@@ -375,7 +380,7 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
           revalidate();
           if (
             Object.keys(value).sort().join(",") !== "generation,idempotencyKey,leafId,runtimeId,sessionId" ||
-            !hex(value.generation) ||
+            !isHubGeneration(value.generation) ||
             !hex(value.idempotencyKey) ||
             !text(value.runtimeId) ||
             !text(value.sessionId) ||
@@ -421,18 +426,17 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
             idempotency_key: id,
           };
           revalidate();
-          save(receipt);
-          unsubmittedReceipt = id;
-          revalidate();
-          hooks.prepareHandoff(selected.runId, {
-            id,
-            generation: value.generation,
-            runtimeId: value.runtimeId,
-            sessionId: value.sessionId,
-            leafId: value.leafId as string | null,
+          save(receipt, () => {
+            revalidate();
+            hooks.prepareHandoff(selected.runId, {
+              id,
+              generation: receipt.generation,
+              runtimeId: receipt.runtime_id,
+              sessionId: receipt.session_id,
+              leafId: receipt.leaf_id,
+            });
           });
           revalidate();
-          unsubmittedReceipt = undefined;
           const job = await provider.restart({
             run_id: receipt.run_id,
             runtime_id: receipt.runtime_id,
@@ -451,10 +455,8 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
         }
         reply(404, { error: "Management route not found" });
       } catch {
-        if (unsubmittedReceipt) {
-          hooks.clearHandoff(unsubmittedReceipt);
-          unlinkSync(file(unsubmittedReceipt));
-        }
+        // Preserve admitted receipts even on uncertain pre-submit failure.
+        // A retry is a query, never permission to replay an old operation.
         reply(phase === "authorization" ? 401 : 409, {
           error:
             phase === "authorization"

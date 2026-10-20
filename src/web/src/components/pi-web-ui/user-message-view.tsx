@@ -33,9 +33,9 @@ export function UserMessageView({
 }) {
   useLanguage();
   const [copied, setCopied] = useState(false);
-  const canCopy = item.text.trim().length > 0 && !item.streaming;
+  const canCopy = !item.historyPreview && item.text.trim().length > 0 && !item.streaming;
   const canBranch = Boolean(onBranch && item.entryId && !item.streaming);
-  const canEdit = Boolean(item.entryId && !item.streaming);
+  const canEdit = Boolean(!item.historyPreview && item.entryId && !item.streaming);
 
   const copyMessage = async () => {
     if (!canCopy) return;

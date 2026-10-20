@@ -1,6 +1,7 @@
 import path from "node:path";
 import { type BrowserContext, expect, type Page } from "@playwright/test";
 import { createBdd } from "playwright-bdd";
+import { isHubSessionPath } from "../../extensions/hub-generation";
 import { type HubCapability, type HubCliHarness, startHubCli } from "../harness/hub-cli";
 import { type PiWebUiHarness, startPiWebUi } from "../harness/pi-process";
 
@@ -114,7 +115,7 @@ When("我搜索并打开第二个 Pi 会话", async () => {
   await expect(page()).toHaveURL(current);
   await expect(page().getByTestId("attachment-item")).toHaveCount(1);
   await page().getByRole("button", { name: "移除附件" }).click();
-  expect(new URL(page().url()).pathname).toMatch(/^\/s\/[a-f0-9]{32}\/$/);
+  expect(isHubSessionPath(new URL(page().url()).pathname)).toBe(true);
 });
 
 Then("总管路由中的 Pi 可以收发真实测试消息", async () => {
@@ -142,10 +143,20 @@ async function inputRenameAndCheckHubName() {
   await expect(p.locator(".card")).toHaveCount(1);
   await expect(p.locator(".session-name")).toHaveText("Hub 命名测试 Beta");
   await expect(p.locator(".card h3")).toHaveText("移动端 Beta");
+  // The first public release lookup can legitimately change versions and redraw
+  // cards. Establish unchanged data before testing unchanged-poll DOM identity.
+  await expect
+    .poll(async () => (await (await p.request.get(`${hub?.url}api/sessions`)).json()).versions.status)
+    .not.toBe("checking");
+  await p.getByRole("button", { name: "刷新", exact: true }).click();
+  await expect(p.getByRole("button", { name: "刷新", exact: true })).toBeEnabled();
   const card = await p.locator(".card").elementHandle();
+  const beforePoll = await (await p.request.get(`${hub?.url}api/sessions`)).json();
   // Polls must not replace unchanged cards and drop keyboard focus.
   await p.getByRole("link", { name: "打开会话" }).focus();
   await p.waitForTimeout(5500);
+  const afterPoll = await (await p.request.get(`${hub?.url}api/sessions`)).json();
+  expect(afterPoll).toEqual(beforePoll);
   expect(await card?.evaluate((node) => node.isConnected)).toBe(true);
   await expect(p.getByRole("link", { name: "打开会话" })).toBeFocused();
   // Exercise the pageshow handler deterministically; actual BFCache is browser-dependent.

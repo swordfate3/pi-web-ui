@@ -4,6 +4,9 @@
   "include": [
     "hub/**/*.ts",
     "tests/session-hub.test.ts",
+    "tests/hub-bounded-registry.test.ts",
+    "tests/hub-state-budget.test.ts",
+    "tests/hub-forward-queue.test.ts",
     "tests/hub-transfer.test.ts",
     "tests/hub-cli.test.ts",
     "extensions/connection-config.ts",
@@ -54,6 +57,8 @@
     "tests/file-download-store.test.ts",
     "tests/file-links.test.ts",
     "tests/session-history.test.ts",
+    "tests/entry-detail.test.ts",
+    "tests/conversation-window.test.ts",
     "tests/session-usage.test.ts",
     "extensions/remote-access/plan.ts",
     "tests/web-connection.test.ts",

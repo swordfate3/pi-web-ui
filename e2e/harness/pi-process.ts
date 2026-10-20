@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { toolToggleEntries, toolToggleRange } from "../fixtures/bounded-tool-toggle";
 
 export type PiWebUiHarness = {
   pageUrl: string;
@@ -18,6 +19,10 @@ export type PiWebUiHarnessOptions = {
   longSession?: boolean;
   /** A saved conversation whose original snapshot exceeds the Hub frame limit. */
   datedHistory?: boolean;
+  /** Real persisted tool rows that exercise browser eviction and system preview controls. */
+  boundedVisualHistory?: boolean;
+  /** Compact valid history whose rendered tool rows approach the browser byte limit. */
+  boundedToolToggle?: boolean;
   /** Synthetic multi-model, mixed-priced usage across branches and dates. */
   usageHistory?: boolean;
   /** Optional immutable release root; defaults to the working repository. */
@@ -43,13 +48,15 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   mkdirSync(agentDir, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
   if (options.git !== false) prepareGitWorkspace(workspaceDir);
-  const longSessionFile = options.usageHistory
-    ? writeUsageHistoryFixture(sessionDir, workspaceDir)
-    : options.datedHistory
-      ? writeDatedHistoryFixture(sessionDir, workspaceDir)
-      : options.longSession
-        ? writeLongSessionFixture(sessionDir, workspaceDir)
-        : undefined;
+  const longSessionFile = options.boundedToolToggle
+    ? writeToolToggleFixture(sessionDir, workspaceDir)
+    : options.usageHistory
+      ? writeUsageHistoryFixture(sessionDir, workspaceDir)
+      : options.datedHistory || options.boundedVisualHistory
+        ? writeDatedHistoryFixture(sessionDir, workspaceDir, options.boundedVisualHistory)
+        : options.longSession
+          ? writeLongSessionFixture(sessionDir, workspaceDir)
+          : undefined;
 
   const processOutput: string[] = [];
   const piProcess = spawn(
@@ -232,7 +239,26 @@ function writeUsageHistoryFixture(sessionDir: string, workspaceDir: string): str
   return file;
 }
 
-function writeDatedHistoryFixture(sessionDir: string, workspaceDir: string): string {
+function writeToolToggleFixture(sessionDir: string, workspaceDir: string): string {
+  const id = "8e91f4c2-3000-4500-8500-000000000004";
+  const file = path.join(sessionDir, `${Date.now()}_${id}.jsonl`);
+  const lines = [
+    JSON.stringify({
+      type: "session",
+      version: 3,
+      id,
+      timestamp: new Date(toolToggleRange.from).toISOString(),
+      cwd: workspaceDir,
+    }),
+  ];
+  for (const [index, entry] of toolToggleEntries().entries()) {
+    lines.push(JSON.stringify({ ...entry, parentId: index ? `e${index - 1}` : null }));
+  }
+  writeFileSync(file, `${lines.join("\n")}\n`);
+  return file;
+}
+
+function writeDatedHistoryFixture(sessionDir: string, workspaceDir: string, visual = false): string {
   const sessionId = "8e91f4c2-3000-4500-8500-000000000003";
   const file = path.join(sessionDir, `${Date.now()}_${sessionId}.jsonl`);
   const now = new Date();
@@ -281,6 +307,60 @@ function writeDatedHistoryFixture(sessionDir: string, workspaceDir: string): str
   );
   parentId = id;
   user("datedend", "DATED_RECENT_END_MARKER", recentTime + 300);
+  if (visual) {
+    const append = (id: string, message: Record<string, unknown>, offset: number) => {
+      lines.push(JSON.stringify({ type: "message", id, parentId, timestamp: iso(recentTime + offset), message }));
+      parentId = id;
+    };
+    append(
+      "visual-tools",
+      {
+        role: "assistant",
+        api: "anthropic-messages",
+        provider: "faux",
+        model: "faux-1",
+        content: Array.from({ length: 205 }, (_, i) => ({
+          type: "toolCall",
+          id: `v${i}`,
+          name: "read",
+          arguments: { path: "x" },
+        })),
+        timestamp: recentTime + 400,
+        stopReason: "toolUse",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+      },
+      400,
+    );
+    append(
+      "visual-omitted-result",
+      {
+        role: "toolResult",
+        toolCallId: "v0",
+        toolName: "read",
+        content: [
+          { type: "text", text: `OMITTED_TOOL_START\n${'long tool output 中😀\\"\n'.repeat(10000)}\nOMITTED_TOOL_END` },
+        ],
+        isError: false,
+        timestamp: recentTime + 401,
+      },
+      401,
+    );
+    append(
+      "visual-long-result",
+      {
+        role: "toolResult",
+        toolCallId: "v204",
+        toolName: "read",
+        content: [
+          { type: "text", text: `VISIBLE_TOOL_START\n${'long tool output 中😀\\"\n'.repeat(10000)}\nVISIBLE_TOOL_END` },
+        ],
+        isError: false,
+        timestamp: recentTime + 402,
+      },
+      402,
+    );
+    user("visual-end", "BOUNDED_VISUAL_END", recentTime + 403);
+  }
   writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
   const savedId = "9e91f4c2-0000-4500-8500-000000000014";
   writeFileSync(

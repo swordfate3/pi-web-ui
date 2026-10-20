@@ -17,7 +17,7 @@
 - History: at most 40 entries, 192 KiB entries, 16 KiB per entry; tree: 200 nodes and 32 KiB.
 - Detail chunks: at most 64 KiB complete envelope, scoped to exact session/runtime/current branch and stable entry revision.
 - Browser window: at most 200 items, 512 KiB retained content, 64 KiB per item; detail viewer retains one chunk only.
-- Hub persistent logical state: 8 MiB; grant count: 512; pending forwarding bytes: 512 KiB per direction.
+- Hub persistent logical state: 8 MiB; grant count: 512; waiting forwarding bytes: 512 KiB per direction plus one <=16 MiB in-flight message, at most 16.5 MiB retained forwarding payload per direction.
 - Existing generation tombstones and credentials must not be unsafely erased, replayed or expired. Fail closed when safe cleanup is unavailable.
 - No production deploy/restart, network credential changes or host configuration mutation. Merge locally to main only after verification.
 - Use latestCtx in delayed extension handlers, no stdout/stderr from extensions, thin transport projections only, and tracked dist rebuilt before merge.
@@ -48,7 +48,7 @@ assert.ok(state.items.length <= 200);
 
 **Files:** Modify `hub/server.ts`, `hub/config.ts`, `hub/restart-api.ts`, `hub/management.ts`, `extensions/session-registration.ts`. Create `hub/state-budget.ts`, bounded-registration/queue helpers as needed. Extend `tests/session-hub.test.ts`, `tests/session-registration.test.ts`, `tests/hub-restart-api.test.ts`; add storage/queue tests.
 
-**Interfaces:** Existing legacy register/unregister remains fail-closed. Add explicit protocol negotiation and Hub-authorized generation issuance: response names unsupported protocol distinctly, never infers unsupported from auth errors. Bounded protocol authorizes exact current generation/boot/run and short pending successor; discarded generations remain invalid without append-only tombstones. Common write helpers atomically reserve/verify logical state before writes; diagnostics return only aggregate bytes/counts/limits. Storage quota cannot remove live grants or security dependencies. Forward queues reserve queued bytes before send and close slow consumers deterministically.
+**Interfaces:** Existing legacy register/unregister remains fail-closed. Add explicit authenticated protocol negotiation and Hub-authorized generation issuance in disjoint `b2-` URL namespace: response names unsupported protocol distinctly, never infers unsupported from auth errors. Unmodified old Hub cannot negotiate and must fail closed with new client; document Hub-first rollout. Bounded protocol authorizes exact current generation/boot/run and short pending successor; discarded generations remain invalid without append-only tombstones. Keep ALL legacy tombstones during mixed-mode operation. Common cross-process locked write helpers atomically reserve/verify logical state before CLI/server writes; diagnostics return only aggregate bytes/counts/limits. Storage quota cannot remove live grants or security dependencies. Forward queues reserve queued bytes before send and close slow consumers deterministically; allow only one <=16 MiB in-flight frame plus <=512 KiB waiting, and preserve 1 MiB file previews on draining connections.
 
 - [ ] Write RED tests for state growth across thousands of rotations, replay after restart/unregister/supersession/compaction, legacy-client compatibility, unsupported-only fallback, quota failure preserving live state, no symlink deletion, and slow-consumer reservation including the incoming frame.
 

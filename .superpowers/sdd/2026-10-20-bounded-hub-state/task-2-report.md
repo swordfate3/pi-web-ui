@@ -6,7 +6,7 @@ Task 3 packaging/integration and the operational limitations below remain explic
 
 Worktree: `/home/fate/gitproject/codex_project_v2/pi-web-ui/.tmp/worktrees/bounded-hub`.
 Branch/base: `codex/bounded-hub-state` / `90e5ecca763918525c10f5d0acea8947ce9f464c`.
-Implementation commit: recorded below after commit creation.
+Implementation commit: `3960ce1954e1b18925d395f17f71dedeac3505f4`.
 
 Read Task 2 brief first, repository AGENTS/ADRs, binding design and registry
 preflight. Used executing-plans, TDD, systematic-debugging and
@@ -318,5 +318,9 @@ or host edit was performed; docs describe the requested 2 MiB × 3 Docker-log bu
 
 ## Commits
 
-Implementation: pending commit creation immediately after this final report.
-The exact implementation SHA will be appended in a report-only follow-up commit.
+Implementation: `3960ce1954e1b18925d395f17f71dedeac3505f4`
+(`feat(hub): bound registry state and slow-consumer queues`).
+This SHA recording is the only change in the report-only follow-up commit,
+`docs: record bounded hub Task 2 verification commit`.
+Post-commit inspection: tracked worktree clean; only the original untracked
+node_modules symlink remains. No dist or node_modules entry was staged.

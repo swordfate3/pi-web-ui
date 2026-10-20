@@ -2,6 +2,10 @@
 
 ## Policies & Mandatory Rules
 
+### Single development directory
+
+Use `/workspace/projects/pi-web-ui` as the single active development directory for this project. Do not create sibling `pi-web-ui-*` project copies or Git worktrees for routine development/review without explicit user approval. Use branches within this repository, preserve existing uncommitted work, and put disposable test fixtures in `/tmp`. Installed Pi packages are runtime installations, not alternative development trees; do not edit or remove them as part of source consolidation.
+
 ### `latestCtx` — Never capture `ctx` in long-lived closures
 
 The Pi extension runner **invalidates** `ExtensionContext` after session replacement, fork, switch, or reload. Any closure that captures a `ctx` parameter and uses it after one of those operations will throw:
@@ -242,6 +246,10 @@ npm run lint
 ### Publishing
 
 For npm releases, read and follow `docs/releasing.md` before changing package release metadata or running publish commands.
+
+### Hub deployment after Web extension updates
+
+When a Web extension update is completed and its intended commit is pushed to the configured release branch, by default submit a Gate update request for the `pi-web-hub` service using that exact commit. Check the Gate service policy and request status, and report the request ID and result. A request is not approval or deployment: do not bypass candidate validation or manual approval, and do not claim the Hub is updated unless Gate reports deployment complete. If the intended commit is not pushed, the Gate service is unavailable, or the candidate validation fails, stop and report the blocker rather than silently skipping checks or retrying a failed request. Updating the Hub does not reload Web extensions in running Pi processes; handle those separately under the user's authorization and runtime safety checks.
 
 ### Documentation placement
 

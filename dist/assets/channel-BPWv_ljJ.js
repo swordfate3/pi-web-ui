@@ -1,0 +1,1 @@
+import{An as e,jn as t}from"./index-ClMEMT3d.js";var n=(n,r)=>t.lang.round(e.parse(n)[r]);export{n as t};

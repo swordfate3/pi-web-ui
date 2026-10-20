@@ -14,10 +14,12 @@ import {
   privateDirectory,
   readGrant,
   readPrivateJson,
+  terminalConfig,
 } from "./config.ts";
 import { gatewayIdentity } from "./gateway-auth.ts";
 import { portalCss, portalJs, portalManagementCss, portalManagementJs, renderPortalHtml } from "./portal.ts";
 import { createRestartApi } from "./restart-api.ts";
+import { startTerminalServer } from "./terminal-server.ts";
 import { createVersionStatus, type VersionStatusOptions } from "./version-status.ts";
 
 type Session = {
@@ -131,6 +133,7 @@ function backendHeaders(request: IncomingMessage, session: Session) {
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 export async function startHub(config: HubConfig, options: { versions?: VersionStatusOptions } = {}) {
   if (config.management) managementConfig(config.management, config.port, config.publicUrl);
+  if (config.terminal) terminalConfig(config.terminal, config.port, config.publicUrl, config.management);
   privateDirectory(config.runtimeDir);
   // Exclusive acquisition precedes any asynchronous stale-socket recovery.
   // Fail closed after a crash: a trusted operator must confirm the old process
@@ -205,6 +208,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   const versionStatus = createVersionStatus(options.versions);
   let url = "";
   let managementUrl: string | undefined;
+  let terminalServer: Awaited<ReturnType<typeof startTerminalServer>> | undefined;
   const restarting = new Map<string, { id: string; runtimeId: string; deadline?: number }>();
   const activateRestart = (generation: string) => {
     const restart = restarting.get(generation);
@@ -882,12 +886,25 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
       )
         throw new Error("Management origin must differ from chat origin");
     }
+    if (config.terminal) {
+      terminalServer = await startTerminalServer(
+        config,
+        [url, config.publicUrl, managementUrl, config.management?.publicUrl].filter(
+          (value): value is string => !!value,
+        ),
+      );
+    }
   } catch (error) {
     stopped = true;
+    versionStatus.close();
+    await terminalServer?.close();
     for (const peer of peers) peer.destroy();
-    registry.close();
-    server.close();
-    managementServer?.close();
+    for (const connection of connections) connection.destroy();
+    await Promise.all([
+      new Promise<void>((resolve) => registry.close(() => resolve())),
+      new Promise<void>((resolve) => server.close(() => resolve())),
+      ...(managementServer ? [new Promise<void>((resolve) => managementServer.close(() => resolve()))] : []),
+    ]);
     throw error;
   }
   const sweep = setInterval(
@@ -904,6 +921,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   return {
     url,
     ...(managementUrl ? { managementUrl } : {}),
+    ...(terminalServer ? { terminalUrl: terminalServer.url } : {}),
     socketPath: config.socketPath,
     close() {
       if (closing) return closing;
@@ -921,6 +939,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         new Promise<void>((resolve) => registry.close(() => resolve())),
         new Promise<void>((resolve) => wss.close(() => resolve())),
         ...(managementServer ? [new Promise<void>((resolve) => managementServer.close(() => resolve()))] : []),
+        ...(terminalServer ? [terminalServer.close()] : []),
         pending,
       ]).then(() => {});
       return closing;

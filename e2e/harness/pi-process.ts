@@ -10,10 +10,13 @@ export type PiWebUiHarness = {
   workspaceDir: string;
   sessionDir: string;
   rpc: (command: Record<string, unknown>) => Promise<unknown>;
+  respondToUI: (id: string, confirmed: boolean) => void;
   stop: () => Promise<void>;
 };
 
 export type PiWebUiHarnessOptions = {
+  extraExtensions?: string[];
+  onRpcEvent?: (event: Record<string, unknown>) => void;
   git?: boolean;
   longSession?: boolean;
   /** A saved conversation whose original snapshot exceeds the Hub frame limit. */
@@ -84,6 +87,7 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
         : []),
       "--extension",
       path.join(runtimeDir, "extensions/mirror-server.ts"),
+      ...(options.extraExtensions ?? []).flatMap((extension) => ["--extension", extension]),
     ],
     {
       cwd: workspaceDir,
@@ -121,6 +125,7 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
       } catch {
         continue;
       }
+      options.onRpcEvent?.(record as Record<string, unknown>);
       if (record.type !== "response" || !record.id) continue;
       const request = pending.get(record.id);
       if (record.success) request?.resolve(record.data);
@@ -140,6 +145,9 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   }
 
   return {
+    respondToUI(id, confirmed) {
+      piProcess.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id, confirmed })}\n`);
+    },
     rpc(command) {
       const id = `harness-${++rpcSequence}`;
       return new Promise((resolve, reject) => {

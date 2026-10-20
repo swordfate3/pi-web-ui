@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "katex/dist/katex.min.css";
 
 @custom-variant dark (&:is(.dark *));
 @source "../../node_modules/streamdown/dist/*.js";
@@ -133,6 +134,26 @@
 .chat-composer > [data-slot="input-group"]:focus-within {
   border-color: var(--ring);
   --tw-ring-shadow: 0 0 #0000;
+}
+
+/* Let long rendered formulas scroll inside the conversation instead of widening it. */
+.katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+}
+
+.katex-display > .katex {
+  max-width: 100%;
+}
+
+.katex:not(.katex-display .katex) {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  vertical-align: middle;
 }
 
 /* Keep the existing context details usable even on narrow phones. */

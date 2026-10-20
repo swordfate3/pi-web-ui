@@ -17,7 +17,8 @@ export const createConnectionSlice: StoreSlice<ConnectionSlice> = (set, get) => 
     return client.send(method, params);
   },
 
-  setConnection: (connection) => set({ connection }),
+  setConnection: (connection) =>
+    set({ connection, ...(connection !== "connected" ? { terminalPrompt: null, dialog: null } : {}) }),
   getWebConnection: async () => (await get().send("get_web_connection")) as WebConnectionInfo,
   setError: (error) => set({ error }),
 

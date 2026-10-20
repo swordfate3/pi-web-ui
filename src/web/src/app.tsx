@@ -23,6 +23,7 @@ import { MessageRevisionDialog } from "./components/pi-web-ui/message-revision-d
 import { RemoteAccessPanel } from "./components/pi-web-ui/remote-access-panel";
 import { ResumeSessionPicker } from "./components/pi-web-ui/resume-session-picker";
 import { SessionDetails, sessionStatsSummary } from "./components/pi-web-ui/session-details";
+import { TerminalPromptBanner } from "./components/pi-web-ui/terminal-prompt-banner";
 import { WhalePet } from "./components/pi-web-ui/whale-pet";
 import { type WhaleMode, WhaleSettings } from "./components/pi-web-ui/whale-settings";
 import { extractText } from "./core/chat-conversion";
@@ -1715,6 +1716,7 @@ export function App() {
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
             <HistoryControls />
+            <TerminalPromptBanner />
             {transportNotice && (
               <div
                 role="status"

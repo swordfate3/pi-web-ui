@@ -161,13 +161,15 @@ async function assertProductionInstall(agentDir, expectedHash) {
   const installed = path.join(agentDir, "git", "github.com", "pi-web-ui-install-test", "pi-web-ui");
   assert.equal(await distHash(installed), expectedHash, "installed dist integrity check");
   const pkg = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
-  assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ["ws"]);
+  assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ["@xterm/addon-serialize", "@xterm/headless", "ws"]);
+  assert.equal(pkg.dependencies["@xterm/addon-serialize"], "0.14.0");
+  assert.equal(pkg.dependencies["@xterm/headless"], "6.0.0");
   const modules = path.join(installed, "node_modules");
-  for (const forbidden of ["vite", "typescript", "react", "pi-coding-agent", "@earendil-works/pi-coding-agent"]) {
+  for (const forbidden of ["vite", "typescript", "react", "pi-coding-agent", "@earendil-works/pi-coding-agent", "@xterm/xterm"]) {
     await assert.rejects(stat(path.join(modules, forbidden)), { code: "ENOENT" });
   }
   const count = await packageCount(modules);
-  assert.equal(count, 1, "Git install must contain only ws");
+  assert.equal(count, 3, "Git install must contain only ws and the fixed headless/serialize runtime pair");
   assert.match(
     checked(process.execPath, [path.join(installed, pkg.bin["pi-web-hub"]), "--help"]).stdout,
     /independent multi-session portal/,
@@ -297,9 +299,9 @@ try {
     "Tarball must include a working hub CLI",
   );
   assert.equal(packedManifest.outputs.sha256, initialHash);
-  assert.deepEqual(Object.keys(packedPkg.dependencies ?? {}).sort(), ["ws"]);
+  assert.deepEqual(Object.keys(packedPkg.dependencies ?? {}).sort(), ["@xterm/addon-serialize", "@xterm/headless", "ws"]);
   const count = await packageCount(path.join(consumer, "node_modules"));
-  assert.equal(count, 2, "Tarball consumer must contain only the root package and ws");
+  assert.equal(count, 4, "Tarball consumer must contain only the root package, ws and headless/serialize");
   const lockChanged =
     sha(await readFile(path.join(second.installed, "package-lock.json"))) !==
     sha(await readFile(path.join(fixture, "package-lock.json")));

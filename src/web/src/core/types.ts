@@ -218,7 +218,13 @@ export type HistoryMetadata = HistoryRange & {
   truncatedEntries: number;
   treeLimited: boolean;
 };
+export type TerminalPrompt = {
+  kind: "confirm" | "select" | "input" | "editor" | "custom";
+  title?: string;
+};
+
 export type StateSyncPayload = {
+  terminalPrompt?: TerminalPrompt | null;
   history?: HistoryMetadata;
   entries?: SessionEntry[];
   /** Preferred flat DFS pre-order tree; structural parents are independent of entry.parentId. */

@@ -1,5 +1,27 @@
 # Pi Web UI 开发日志
 
+## 2026-10-19 · 宿主机协作测试分支准备
+
+- 用户授权提交并推送独立测试分支 `experiment/trusted-terminal-host-test`，不更新main、不申请Gate、不部署。分支包含基线1.0.1以来累计数学／终端提示、默认关闭auth／lease及隔离PTY／transport／screen／browser链路，保留中文README／项目规则。
+- 新增[宿主机交接说明](validation/terminal-host-handoff.md)，列出精确commit核对、Linux／依赖要求、隔离命令、已知边界及宿主pirun/supervisor只读源码调查；测试通过不等于生产入口可用。
+- 提交准备时发现Git安装回归脚本仍断言仅ws，更新为精确ws/headless/serialize生产边界并继续拒绝browser xterm／编译器／React／SDK。没有因此安装新依赖或运行有网络安装副作用的回归；完整安装脚本留宿主另行授权执行。
+
+## 2026-10-19 · 独立隔离终端网页与受控输入
+
+- 增加仅测试的独立loopback网页／WS桥接，复用真实HubTerminalAuth／临时run grant与精确四元组scope，输入／实时完整画面实际经过Browser→WS→Unix→worker→同一Pi PTY。浏览器不持Unix凭据／PID／路径，不逐个改扩展，不接生产Hub。
+- 默认只读，显式连接／单writer申请，30秒固定lease不续期、单在途动作、read不能输入；textarea草稿不自动Enter，组合事件禁发送，不forward xterm onData／自动响应。撤权重核每次动作／输出和100ms主动timer；unknown在主动release／hidden／timeout后仍锁存，written仅字节交付。
+- Pi1.1/1.3真实浏览器集成各10/10：原生确认拒绝/custom、resize／重连、桌面手机、read、多标签／30秒到期、sink在途撤权／release／hidden／timeout、最大转义输入／畸形和overlap、真实跨origin SW／iframe／opener。截图已实际查看，手机控件换行无整页横向溢出，终端原列宽单独滚动／emoji缺字仍明确。
+- 独立复核发现WS16KiB预算容不下8KiB合法文本JSON转义；分离encoded64KiB／decoded8KiB，真实8192-byte反斜杠及控制字符ACK、8193byte拒绝与服务存活回归，限定复审无遗留mustfix。另修复deliberate close清unknown、send前pending、陈旧restore搁置新帧及握手期限等。
+- 默认raw回归8/8，完整562单元（561pass／1skip），双TypeScript、Biome273文件0error／30warnings／1info、diff／dist通过。本轮无新增依赖、无版本／dist变动、无提交／push／Gate／重启／部署。产品terminal listener仍backend unavailable；生产前仍需runtime源码／provider／本机relay／adapter屏障／真实hostname与单独迁移许可。见[完整记录](validation/terminal-browser.md)。
+
+## 2026-10-19 · 隔离终端 framebuffer、重连和只读浏览器验证
+
+- 经继续开发确认固定安装 `@xterm/headless@6.0.0`、`@xterm/addon-serialize@0.14.0`、`@xterm/xterm@6.0.0`，产物在持久卷，禁安装脚本、既有非根 lock entries 不变。新增持续 headless parser，有界 write／操作／scrollback／snapshot，串行等待解析回调，超限／dispose永久拒绝；OSC／自动response不接PTY。
+- 测试私有 transport 增加显式 screen 模式、startup prefix完整性和 barrier、同管道 geometry、首次 attach串行快照。只发全帧，不与原始delta混接；浏览器每帧新实例恢复，避免 pending decoder／CSI 状态不在snapshot里的衔接错误。
+- Pi1.1/1.3 screen各3/3，worker各7/7；Pi1.1默认raw8/8、原PTY7/7。完整562单元（561 pass／1 optional skip），双TypeScript、Biome269文件0error／30warnings／1info、build/dist通过。初次误用不存在npm test、ES2022 findLast、格式及旧dist身份失败均修复后重验，不放宽断言。
+- 独立复核发现并修复测试socket逐chunk UTF-8解码损坏；StringDecoder加所有字节边界／逐字节深比较，限定复审无遗留must-fix。桌面1440×1000／手机390×844真实只读fixture截图已查看；手机横向滚动、emoji缺字、serialize缩窄折行cursor可能偏一列等仍明确保留。
+- 未接生产Hub/当前Pi，无真实网页授权或输入、无重启／提交／推送／Gate／部署；版本仍1.0.1。完整范围与证据见[验证报告](validation/terminal-screen.md)。
+
 ## Web / Hub 1.0.1 版本标记
 
 - 将 `99aa20f` / `772d0cfe…` 对应发布内容从 1.0.0 提升为 1.0.1，仅调整 package / lock 根版本并重建随包 dist，不修改功能实现。版本参与源码身份计算，新指纹为 `5c43f219cb950c64346efead6be8e185d7b019a915283480217183a1515dddee`；旧运行进程仍如实上报旧版。
@@ -456,3 +478,65 @@
 - 可选私有申请凭据与lifecycle凭据分离；无Docker、批准或策略修改能力。保留原任务ID处理未知结果；历史读取适配100任务和跨容器更替累计目标，页面截断明确提示。
 - 修正授权代际、旧200／401、晚到logout cookie及残留忙碌文案，独立复审无剩余可操作问题。新增接口15项、页面17项；最终完整480项（479通过／1可选skip），两套类型、构建、dist一致性、Biome无error（保留30 warnings／1 info）及桌面1440／手机390打包浏览器视觉检查通过。模拟Gate不等于真实Pi全局更新E2E。
 - 没有提交或推送、安装生产包、申请生产更新、迁移旧容器或重启服务。[验证、证据与上线前提](validation/hub-runtime-updates.md)。
+
+## 原生终端确认可见提示（安全限定的缓解）
+
+- 转发公开 `ui_prompt_start/end` 的 kind/title 元数据，网页显示持久终端等待提示，支持 confirm/select/input/editor/custom；按 session/runtime 限定，断线清理，重连从 snapshot 恢复仍在等待的状态。
+- 旧 Web `extension_ui_response` 的虚假成功 ACK 改为明确 unsupported 错误，前端显示失败。scoped-memory 源码、原生授权和 commit 路径不变；普通聊天 origin 仍不能提供可信 Web Yes/No。
+- Pi 1.1／1.3 各 3/3 真实 `ctx.ui.confirm` 集成通过，覆盖伪造 Web 批准遭拒、可信 RPC 拒绝、timeout、abort、end 和重连；桌面／手机 Browser 截图已实际查看。
+- 本轮未提交、推送、安装或部署。[行为与限制](terminal-prompts.md)、[统一验证记录](validation/math-terminal-prompts.md)。
+
+## 2026-10-19 · 通用扩展可信终端设计与 M1 契约（未接入产品）
+
+- 新增 [ADR0018](adr/0018-trusted-terminal-extension-compatibility.md)：以同一 Pi 的真实 TUI 覆盖标准/自定义扩展交互，保留聊天，第三独立 terminal origin；新 opt-in PTY profile 不继承原 inherited TTY 的重启资格，不清 stdin guard taint，不复用 lifecycle 权限，也不在已有 management listener 开终端流。
+- 先实现 `hub/terminal-contract.ts`／`terminal-lease.ts` 的严格schema和同步单writer模型；绑定 run/runtime/session/terminalEpoch、authorization/connection、随机lease和严格连续sequence，拒绝replay／旧连接，local交还／收回，30秒非滑动lease，freeze不可恢复。模块尚无产品调用；consume只消耗序列，不等于写PTY、授权或执行ACK。
+- 定向12/12；完整单元521项（520 pass／1条件skip）；两套TypeScript、build/dist、Biome258文件0error（既有30 warnings／1 info）、diff whitespace通过。独立只读架构与代码复核已完成其限定范围，非真实运行验收。未新增UI，因此本切片没有Browser视觉/真实终端E2E证据。
+- 后续真实PTY/provider开发缺pi-docker/Gate可编辑源码、终端依赖版本审核/安装许可和新权限确认；不修改已安装 `/usr/local`。无安装、提交、推送、Gate申请、reload或部署，版本仍1.0.1。
+
+## 2026-10-19 · WebUI Hub 可选终端授权与第三 listener（后端未接）
+
+- 在原WebUI包／Hub进程中接入默认关闭的 `terminal` 配置与独立loopback listener，精确隔离chat/admin的local/public origin；仅开放状态、配对兑换、退出，所有状态仍明确后端不可用。没有新项目、另一个Pi、PTY、终端页面或按键通道。
+- 新增terminal独立state/cookie/session/CSRF/epoch和精确run/runtime/session/terminalEpoch/read|write scope；CLI新增init标志、pair-terminal／revoke-terminal。现有management认证不混用，不给Hub Docker或执行权限，不能用合成scope推断生产child可用。
+- 独立复核发现并修复跨进程撤销旧epoch回写和64个已撤销session占位两项P2：共享跨进程锁保护完整读改写、容量检查前清理无效session；竞争fail closed、不自动重试/抢锁。新增受控独立进程交错及两类64session回归，复审未发现修复范围内新缺陷。
+- 新增25项auth/真实HTTP/构建CLI/启动失败清理测试，连同原lease共37/37；完整546项（545 pass／1条件skip），两套types、build/dist、Biome262文件0error（30warnings／1info）、diff whitespace通过。没有浏览器UI改动，不将HTTP测试当Browser跨origin或真实终端验收。
+- 无依赖安装、提交、推送、Gate申请、生产配置变更、reload或重启；版本仍1.0.1。真正PTY接入仍缺外部runtime/Gate源码及依赖审核。[设计与测试边界](adr/0018-trusted-terminal-extension-compatibility.md)、[当前入口限制](hub.md#开发中独立终端授权入口不等于终端可用)。
+
+## 聊天 TeX 数学公式
+
+- 用原生 micromark/remark 语法兼容 `\(...\)` 行内和 `\[...\]` 独立公式，替换未通过审查的原文转换方案；CommonMark 继续管理代码、转义、引用和列表，不改已有 dollar math 策略，KaTeX 保留默认不信任设置。
+- 包内补齐 KaTeX CSS/字体，手机公式局部横向滚动；失败后缀按 tokenizer 实例缓存，避免未闭合起始符造成重复全尾扫描。
+- 6 项 AST／Streamdown SSR 数学测试、真实 Pi 浏览器数学场景及桌面/手机截图通过；完整单元 509 项（508 pass／1 skip）、两套 types、build/dist、Biome 0 error。完整浏览器 69/72；3 项失败在精确 1.0.1 基线也复现，未放宽断言，详见[统一验证与限制](validation/math-terminal-prompts.md)。本地源码未提交／推送／安装／部署，版本未提升。
+
+
+## 2026-10-19 · 开发目录统一归并
+
+- 按用户要求将原 `pi-web-ui-math-confirm` 工作树的数学、终端提示、终端契约及Hub独立授权代码归并回 `/workspace/projects/pi-web-ui`；本地main从39176c9快进到已有发布提交53bb63f，没有创建产品提交、推送或发布。
+- 逐文件三方对照确认原主目录pager等代码为已发布修复的旧版本；较新产品源码／测试／dist逐字节保留，另保留原主目录中文README、AGENTS中的Hub Gate约定及README教程更新记录，未用整树覆盖丢弃差异。
+- 校验归档后移除 `pi-web-ui-math-confirm`、干净且已被main包含的 `pi-web-ui-portable-review`、临时math baseline工作树及旧tmp math副本，并清除不存在工作树的登记。`git worktree list`只剩主目录；复制已有ws类型到主目录，依赖不再指向已退役目录，未下载依赖。
+- 源码恢复归档集中在 `/workspace/downloads/pi-web-ui-consolidation/20261019T055428Z/`：包含原主目录／两个工作树源码快照、临时math副本、Git bundle及原主目录recovery stash引用；portable-review归档不含可再生node_modules。原主目录未提交内容也保存在本地 `stash`，不要未经确认apply以免把旧版本重新盖回；这是恢复点，不是待重新合入的功能分支。
+- 主目录类型与Biome262文件通过（0error／30既有warnings／1info），源码/dist核验通过；首次完整546项有一项临时WebSocket403，未改断言，专项3/3及移除旧目录后的全套545pass／1条件skip／0fail。日志 `/tmp/pi-web-ui-consolidation/`。未改变UI行为，复用上轮视觉证据，不将本轮迁移校验声称为新的Browser E2E。
+- 今后仅主目录开发，未经用户明确同意不再创建同名前缀兄弟目录/worktree。已安装包、生产Hub、当前Pi/会话均未修改或重启。
+
+## README 使用教程更新
+
+- 将入口教程整理为中文，按本仓库 main 的 1.0.0 系列说明安装、单会话使用、消息编辑/重答/翻页、文件、鲸鱼娘、Hub 本地接入、版本解读、可选运行管理及常见问题。
+- 区分 Pi 本体、Web 扩展和独立 Hub 的安装/加载/部署；补充本项目 Gate 申请约定、凭据/管理 origin 边界及 pending/unknown 禁止自动重放。纯文档修改不触发部署，不改变运行控制。
+- 核对当前安装包 `99aa20f` 的命令入口和指南；15 个本地链接有效，8 个代码块配对，文档差异空白检查通过。未执行文档中的安装/管理命令，未构建、重载、提交、推送或部署；其他既有工作区修改保留。
+
+## 2026-10-19 · 隔离真实 Pi PTY 最小链路（M2a）
+
+- 仅在主目录新增Python标准库PTY launcher、合成TUI fixture与7项验收；forkpty启动唯一测试Pi，不热附当前Pi，不接生产Hub/Gate或改runtime/SDK。独立临时HOME/agent/cwd、环境白名单，只显式加载本地faux及合成扩展，无新依赖或listener。
+- 真实原生confirm预览与中文/emoji字节可观察，No/timeout/abort不写文件，合成Yes仅写临时marker；custom面板方向键/确认/取消和64×24尺寸更新通过。事件PID、TTY、session/前台进程组核对同一Pi；进程内测试句柄失效不重放，重复sequence不写PTY。
+- 独立复核发现退出后裸PGID复用风险，改为waitid(WNOWAIT)保留leader身份至组清理完成，重复close不再发信号；补真实fork grandchild忽略TERM回归。复审发现测试helper异常路径的reap后发信号和超时残留风险，清理身份先清除、增加pipe生命线/10秒上限与pidfd退出观察，覆盖错误退出状态及helper被杀绕过finally。
+- Pi1.1 regular、1.3 regular/fullscreen最终均7/7，现有单元546项545pass/1条件skip；两套types、Biome263文件0error/既有30warnings/1info、diff whitespace、dist核验通过。仅测试/文档及测试类型入口变化，不重建产品dist、不改版本。详情与证据边界见[隔离PTY验证](validation/isolated-pty.md)。
+- ADR0018纠正不必要的Gate前置：本地M2a无需Gate/runtime源码；接入现有受管启动时再获取runtime可编辑源，Gate只在另选修改集成时需要。现有terminal listener仍报告backend unavailable。
+- 尚无产品WS/授权/lease/sink、本机relay、screen snapshot、Browser或手机验收；未确认真实memory/MCP，合成测试按键不是用户授权。没有提交/push、安装、Gate申请、reload、生产重启或部署。
+
+## 2026-10-19 · 真实私有终端 transport 试验（M2a 后续）
+
+- 新增测试专用Node Unix socket broker与Python流式worker：0700临时目录/0600 socket、独立read/write测试凭据、复用现有TerminalLeaseState，再经私有JSONL pipes直达唯一隔离Pi PTY。无新增包、无TCP/HTTP/WS listener、无生产Hub/当前Pi接入；原Hub terminal listener仍backend unavailable。
+- 真实8项集成验证权限/单writer、完整合成confirm预览与拒绝/批准、custom面板/resize、socket断线/重复输入/错epoch、30秒固定期限及关闭清理；Pi1.1/1.3各8/8。直接worker6项（sink、EOF、TERM、非法/超限/partial frame）两版各6/6；旧PTY套件7/7，现有单元545pass/1条件skip，两套types、Biome265文件0error/既有30warnings/1info、dist核验和whitespace通过。
+- 独立复核指出FIFO revoke不能取消已排队input、暂停worker会使close无限等待。补私有lease marker作为独立sink准入检查；测试暂停在检查前、断开真实socket再释放，确认无批准副作用。通过检查后单次write仍inflight/unknown，不自动重放、不声称可撤回。close加EOF后TERM+CONT与明确期限，真实SIGSTOP故障注入通过；超限报cleanup incomplete而非假成功。
+- 测试不再睡150ms猜撤权完成，改看明确sink完成状态/事件；首次直接worker partial测试因communicate关闭stdin变EOF，修正测试保留stdin到deadline，不放宽实现。首次静态检查修复两处assignment-in-expression，未改项目lint策略。原始输出用base64保持字节，attach明确screenAvailable:false，无尾部重放/ANSI→HTML/自动terminal reply。
+- 详情见[真实连接验证](validation/pty-transport.md)。没有完整screen snapshot、本机TTY relay、产品adapter屏障、浏览器跨origin/手机验证或真实授权。未提交/push、安装依赖、申请Gate、reload、部署或重启当前Pi。
+- 修复后限定范围独立复审确认两项P2根因消除、无新增必须修复项（只读未执行）；最终Pi1.1/1.3各8/8复跑通过。仍保留异常cleanup抛错/文件系统unlink故障等未验证限制，不将worker退出当作这些路径已回收Pi的证明。正常close与SIGSTOP测试另外核对Pi进程消失。

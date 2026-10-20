@@ -10,6 +10,7 @@ import { recentHistoryRange } from "../history-dates";
 import { workspaceUploadText } from "../i18n";
 import { parseMessageRevision, revisionDeadline } from "../message-revision";
 import { decodeSessionTreeOrKeep } from "../session-tree-wire";
+import { parseTerminalPrompt } from "../terminal-prompt";
 import { isToolExpandable } from "../tool-summary";
 import type { ChatItem } from "../types";
 import { errorUiText, UiError, uiText } from "../ui-text";
@@ -248,6 +249,10 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (set, get, api) => {
         lastUsage: findLastUsage(entries),
         leafId: decodedTree.ok ? (sync.leafId ?? null) : get().leafId,
         sessionId: sync.sessionId ?? previousSessionId,
+        ...(sessionChanged || runtimeChanged ? { terminalPrompt: null, dialog: null } : {}),
+        ...(sync.sessionId && sync.runtimeId && Object.hasOwn(sync, "terminalPrompt")
+          ? { terminalPrompt: parseTerminalPrompt(sync.terminalPrompt) }
+          : {}),
         // A runtime identity only counts when this snapshot explicitly identifies
         // its session too (reload must not complete on a partial snapshot).
         runtimeId: sync.sessionId ? (sync.runtimeId ?? (sessionChanged ? null : get().runtimeId)) : get().runtimeId,

@@ -48,6 +48,7 @@
       "tests/service-worker-scope.test.ts",
       "tests/remote-access.test.ts",
       "tests/session-hub.test.ts",
+      "tests/hub-transfer.test.ts",
       "tests/hub-cli.test.ts",
       "tests/hub-management.test.ts",
       "tests/hub-gateway-login.test.ts",

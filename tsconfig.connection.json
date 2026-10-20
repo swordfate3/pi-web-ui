@@ -4,6 +4,7 @@
   "include": [
     "hub/**/*.ts",
     "tests/session-hub.test.ts",
+    "tests/hub-transfer.test.ts",
     "tests/hub-cli.test.ts",
     "extensions/connection-config.ts",
     "extensions/connection-listener.ts",

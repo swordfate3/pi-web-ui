@@ -7,6 +7,7 @@ import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { type RuntimeMetadata, readRuntimeMetadata } from "../extensions/runtime-metadata.ts";
 import { readSoftwareMetadata, type SoftwareMetadata } from "../extensions/software-metadata.ts";
+import { proxySessionResponse } from "./asset-transfer.ts";
 import {
   type Grant,
   type HubConfig,
@@ -126,6 +127,28 @@ function backendHeaders(request: IncomingMessage, session: Session) {
   headers["x-pi-web-generation"] = session.generation;
   headers["x-pi-web-proof"] = mac(session.grant.token, session.generation);
   return headers;
+}
+
+// This is a conservative allowlist, not a general extension parser. Offers we
+// cannot safely satisfy keep the pre-compression, unextended WebSocket path.
+function boundedDeflateOffer(header: string | undefined) {
+  if (!header) return false;
+  const [extension, ...parameters] = header.split(";").map((value) => value.trim());
+  if (extension !== "permessage-deflate") return false;
+  const seen = new Set<string>();
+  for (const parameter of parameters) {
+    const [name, value, ...extra] = parameter.split("=");
+    if (seen.has(name) || extra.length) return false;
+    seen.add(name);
+    if (name === "client_no_context_takeover" || name === "server_no_context_takeover") {
+      if (value !== undefined) return false;
+    } else if (name === "client_max_window_bits") {
+      if (value !== undefined && !/^1[2-5]$/.test(value)) return false;
+    } else if (name === "server_max_window_bits") {
+      if (value === undefined || !/^1[2-5]$/.test(value)) return false;
+    } else return false;
+  }
+  return seen.has("client_max_window_bits");
 }
 
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
@@ -648,13 +671,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
             agent: false,
           },
           (result) => {
-            const headers = { ...result.headers };
-            delete headers["set-cookie"];
-            delete headers.connection;
-            for (const key of Object.keys(headers)) if (key.startsWith("x-pi-hub-")) delete headers[key];
-            response.writeHead(result.statusCode ?? 502, { ...headers, "Cache-Control": "no-store" });
-            result.on("error", () => response.destroy());
-            result.pipe(response);
+            proxySessionResponse(request, response, result, route[2]);
           },
         );
         upstream.setTimeout(30000, () => upstream.destroy());
@@ -736,7 +753,19 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   managementServer?.on("clientError", (_error, socket) => socket.destroy());
   managementServer?.on("upgrade", (_request, socket) => socket.destroy());
   managementServer?.on("connect", (_request, socket) => socket.destroy());
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: 16 * 1024 * 1024,
+    perMessageDeflate: {
+      serverNoContextTakeover: true,
+      clientNoContextTakeover: true,
+      serverMaxWindowBits: 12,
+      clientMaxWindowBits: 12,
+      concurrencyLimit: 4,
+      threshold: 1024,
+      zlibDeflateOptions: { level: 3, memLevel: 7 },
+    },
+  });
   server.on("connection", (socket) => {
     connections.add(socket);
     socket.on("error", () => socket.destroy());
@@ -767,8 +796,13 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
       }
       const host =
         net.isIP(session.grant.backendHost) === 6 ? `[${session.grant.backendHost}]` : session.grant.backendHost;
+      const headers = backendHeaders(request, session);
+      delete headers["sec-websocket-extensions"];
       const upstream = new WebSocket(`ws://${host}:${session.port}/ws`, {
-        headers: backendHeaders(request, session),
+        headers,
+        // Only the slow browser/tunnel leg needs compression. Keep Pi's local
+        // hop unchanged and avoid creating a second compression context.
+        perMessageDeflate: false,
         handshakeTimeout: 3000,
         maxPayload: 16 * 1024 * 1024,
       });
@@ -786,6 +820,9 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
           upstream.terminate();
           socket.destroy();
           return;
+        }
+        if (!boundedDeflateOffer(request.headers["sec-websocket-extensions"])) {
+          delete request.headers["sec-websocket-extensions"];
         }
         wss.handleUpgrade(request, socket, head, (client) => {
           webSockets.set(client, session.generation);

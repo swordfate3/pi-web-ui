@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "source": {
-    "count": 158,
-    "sha256": "5c43f219cb950c64346efead6be8e185d7b019a915283480217183a1515dddee",
+    "count": 159,
+    "sha256": "afadabdfb54714ee4cea8397f03d4599c245da9295655c60c7f383e172e1b64f",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -77,6 +77,10 @@
         "sha256": "0710f3bd6968466a0088d57a677282e94334e891e75252469e03905b933343c1"
       },
       {
+        "path": "hub/asset-transfer.ts",
+        "sha256": "5df0eb51e8a6fc0320d568a9567e352d223b239c20ed5cf9811ed17517edfec4"
+      },
+      {
         "path": "hub/config.ts",
         "sha256": "c01f1b491328234f9eca41887ced37996ee6c0ca05a2f8c95b14586364086248"
       },
@@ -114,7 +118,7 @@
       },
       {
         "path": "hub/server.ts",
-        "sha256": "a83ebca1ec7d7d171275358492c624f98d9ac13f5039dca65f42e71b64bae6f8"
+        "sha256": "438a0cd5cf269552b6238facbd19f63123519261c1c4bb27495387b85b909f42"
       },
       {
         "path": "hub/version-status.ts",
@@ -640,7 +644,7 @@
   },
   "outputs": {
     "count": 673,
-    "sha256": "73526843842d82ead8f2096e5a0317680b08713a641b0968441e5529c87cc845",
+    "sha256": "49adcebfa7f91e93a711d5355d4c0d86828ed2cb42322bd06b929b2baf2ef2fd",
     "files": [
       {
         "path": "assets/abap-BF8NL95m.js",
@@ -3308,7 +3312,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "ddbc428ccda5d4f37345dfcf46aca401d53840765701d7b92f6beed8e627092c"
+        "sha256": "848616ad36f95041b6efd29059f71ed3419a197380aa96d1fe488b1966431010"
       },
       {
         "path": "icons/pi-web-ui-192.png",

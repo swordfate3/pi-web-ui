@@ -7,6 +7,8 @@ import net, { isIP } from "node:net";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { fileURLToPath } from "node:url";
+import { pipeline } from "node:stream";
+import { constants as constants$1, createBrotliCompress, createGzip } from "node:zlib";
 //#region \0rolldown/runtime.js
 var __defProp = Object.defineProperty;
 var __esmMin = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
@@ -621,6 +623,58 @@ function readSoftwareMetadata(value) {
 			...webUi.build === void 0 ? {} : { build: webUi.build }
 		})
 	});
+}
+//#endregion
+//#region hub/asset-transfer.ts
+function encoding(accept) {
+	if (!accept) return;
+	const qualities = /* @__PURE__ */ new Map();
+	for (const part of accept.split(",")) {
+		const [name, ...parameters] = part.trim().toLowerCase().split(";");
+		const weight = parameters.find((value) => value.trim().startsWith("q="));
+		const quality = weight === void 0 ? 1 : Number(weight.trim().slice(2));
+		qualities.set(name, Number.isFinite(quality) && quality >= 0 && quality <= 1 ? quality : 0);
+	}
+	const quality = (name) => qualities.get(name) ?? qualities.get("*") ?? 0;
+	if (quality("br") > 0 && quality("br") >= quality("gzip")) return "br";
+	if (quality("gzip") > 0) return "gzip";
+}
+/** Compress only public build assets, never reflected session/API/download data. */
+function proxySessionResponse(request, response, upstream, resource) {
+	const headers = { ...upstream.headers };
+	delete headers["set-cookie"];
+	delete headers.connection;
+	for (const key of Object.keys(headers)) if (key.startsWith("x-pi-hub-")) delete headers[key];
+	headers["cache-control"] = "no-store";
+	const asset = /^\/assets\/[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8,}\.(js|css)$/.exec(resource);
+	const mime = upstream.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase();
+	const staticAsset = asset && (request.method === "GET" || request.method === "HEAD") && upstream.statusCode === 200 && !request.headers.range && !upstream.headers["cache-control"] && !upstream.headers["content-range"] && !upstream.headers["content-disposition"] && !upstream.headers["content-encoding"] && !upstream.headers["set-cookie"] && (asset[1] === "css" ? mime === "text/css" : mime === "application/javascript" || mime === "text/javascript");
+	let coding;
+	if (staticAsset) {
+		headers["cache-control"] = "private, max-age=86400, immutable";
+		const vary = (headers.vary ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+		if (!vary.some((value) => value === "*" || value.toLowerCase() === "accept-encoding")) vary.push("Accept-Encoding");
+		headers.vary = vary.join(", ");
+		coding = encoding(request.headers["accept-encoding"]);
+		if (coding) {
+			headers["content-encoding"] = coding;
+			for (const name of [
+				"content-length",
+				"etag",
+				"content-md5",
+				"digest"
+			]) delete headers[name];
+		}
+	}
+	upstream.once("error", () => response.destroy());
+	response.writeHead(upstream.statusCode ?? 502, headers);
+	if (request.method === "HEAD") {
+		upstream.resume();
+		response.end();
+	} else if (coding) pipeline(upstream, coding === "br" ? createBrotliCompress({ params: { [constants$1.BROTLI_PARAM_QUALITY]: 4 } }) : createGzip({ level: 6 }), response, (error) => {
+		if (error) response.destroy();
+	});
+	else upstream.pipe(response);
 }
 //#endregion
 //#region hub/runtime-portal.ts
@@ -1885,7 +1939,7 @@ function captureHubMetadata(moduleUrl = import.meta.url) {
 	{
 		const embedded = {
 			"version": "1.0.1",
-			"build": "5c43f219cb950c64346efead6be8e185d7b019a915283480217183a1515dddee"
+			"build": "afadabdfb54714ee4cea8397f03d4599c245da9295655c60c7f383e172e1b64f"
 		};
 		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
 			version: embedded.version,
@@ -2107,6 +2161,25 @@ function backendHeaders(request, session) {
 	headers["x-pi-web-generation"] = session.generation;
 	headers["x-pi-web-proof"] = mac(session.grant.token, session.generation);
 	return headers;
+}
+function boundedDeflateOffer(header) {
+	if (!header) return false;
+	const [extension, ...parameters] = header.split(";").map((value) => value.trim());
+	if (extension !== "permessage-deflate") return false;
+	const seen = /* @__PURE__ */ new Set();
+	for (const parameter of parameters) {
+		const [name, value, ...extra] = parameter.split("=");
+		if (seen.has(name) || extra.length) return false;
+		seen.add(name);
+		if (name === "client_no_context_takeover" || name === "server_no_context_takeover") {
+			if (value !== void 0) return false;
+		} else if (name === "client_max_window_bits") {
+			if (value !== void 0 && !/^1[2-5]$/.test(value)) return false;
+		} else if (name === "server_max_window_bits") {
+			if (value === void 0 || !/^1[2-5]$/.test(value)) return false;
+		} else return false;
+	}
+	return seen.has("client_max_window_bits");
 }
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 async function startHub(config, options = {}) {
@@ -2553,16 +2626,7 @@ async function startLockedHub(config, options) {
 					headers: backendHeaders(request, session),
 					agent: false
 				}, (result) => {
-					const headers = { ...result.headers };
-					delete headers["set-cookie"];
-					delete headers.connection;
-					for (const key of Object.keys(headers)) if (key.startsWith("x-pi-hub-")) delete headers[key];
-					response.writeHead(result.statusCode ?? 502, {
-						...headers,
-						"Cache-Control": "no-store"
-					});
-					result.on("error", () => response.destroy());
-					result.pipe(response);
+					proxySessionResponse(request, response, result, route[2]);
 				});
 				upstream.setTimeout(3e4, () => upstream.destroy());
 				upstream.on("error", () => {
@@ -2636,7 +2700,19 @@ async function startLockedHub(config, options) {
 	managementServer?.on("connect", (_request, socket) => socket.destroy());
 	const wss = new WebSocketServer({
 		noServer: true,
-		maxPayload: 16 * 1024 * 1024
+		maxPayload: 16 * 1024 * 1024,
+		perMessageDeflate: {
+			serverNoContextTakeover: true,
+			clientNoContextTakeover: true,
+			serverMaxWindowBits: 12,
+			clientMaxWindowBits: 12,
+			concurrencyLimit: 4,
+			threshold: 1024,
+			zlibDeflateOptions: {
+				level: 3,
+				memLevel: 7
+			}
+		}
 	});
 	server.on("connection", (socket) => {
 		connections.add(socket);
@@ -2661,8 +2737,12 @@ async function startLockedHub(config, options) {
 				rejectUpgrade(socket, 410);
 				return;
 			}
-			const upstream = new WebSocket(`ws://${net.isIP(session.grant.backendHost) === 6 ? `[${session.grant.backendHost}]` : session.grant.backendHost}:${session.port}/ws`, {
-				headers: backendHeaders(request, session),
+			const host = net.isIP(session.grant.backendHost) === 6 ? `[${session.grant.backendHost}]` : session.grant.backendHost;
+			const headers = backendHeaders(request, session);
+			delete headers["sec-websocket-extensions"];
+			const upstream = new WebSocket(`ws://${host}:${session.port}/ws`, {
+				headers,
+				perMessageDeflate: false,
 				handshakeTimeout: 3e3,
 				maxPayload: 16 * 1024 * 1024
 			});
@@ -2681,6 +2761,7 @@ async function startLockedHub(config, options) {
 					socket.destroy();
 					return;
 				}
+				if (!boundedDeflateOffer(request.headers["sec-websocket-extensions"])) delete request.headers["sec-websocket-extensions"];
 				wss.handleUpgrade(request, socket, head, (client) => {
 					webSockets.set(client, session.generation);
 					const forward = (from, to) => {

@@ -3247,7 +3247,14 @@ export default function (pi: ExtensionAPI) {
       ws.on("message", (data) => {
         try {
           const request = JSON.parse(data.toString()) as Partial<WsRequest>;
-          if (request.type !== "req" || typeof request.id !== "string" || typeof request.method !== "string") {
+          // Validate before dispatch: both success and catch responses echo this
+          // opaque identity. Never truncate it or construct an oversized error.
+          if (
+            request.type !== "req" ||
+            typeof request.id !== "string" ||
+            request.id.length > 512 ||
+            typeof request.method !== "string"
+          ) {
             sendTo(ws, { type: "error", code: "bad_request", message: "Invalid client request" });
             return;
           }

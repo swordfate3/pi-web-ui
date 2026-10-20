@@ -299,6 +299,24 @@ test("10k-node tree is a bounded lightweight preview with valid structural paren
   assert.ok(Buffer.byteLength(JSON.stringify(page)) < 256 * 1024);
 });
 
+test("tree byte budget includes final null parents after out-of-range ancestors are removed", (t) => {
+  const children = Array.from({ length: 200 }, (_, i) => ({
+    entry: { id: `c${i}`, type: "custom", timestamp: new Date(from).toISOString(), summary: "x".repeat(30) },
+    children: [],
+  }));
+  const tree = [{ entry: { id: "p", type: "custom", timestamp: new Date(from - 1).toISOString() }, children }];
+  const original = JSON.stringify(tree);
+  const page = selectSessionHistory([], tree, { from, to });
+  const bytes = Buffer.byteLength(JSON.stringify(page.treeNodes));
+  t.diagnostic(`final tree: ${page.treeNodes.length} nodes, ${bytes} bytes`);
+  assert.ok(bytes <= 32 * 1024, `final tree exceeds 32768 bytes: ${bytes}`);
+  assert.ok(page.treeNodes.length > 0 && page.treeNodes.length <= 200);
+  assert.equal(page.treeNodes.at(-1)?.entry.id, "c199");
+  assert.ok(page.treeNodes.every((node) => node.parentNodeId === null));
+  assert.equal(page.history.treeLimited, true);
+  assert.equal(JSON.stringify(tree), original);
+});
+
 test("saved session date filtering happens before capping and reports truncation", () => {
   const sessions = [
     { id: "old", modified: new Date(from - 1) },

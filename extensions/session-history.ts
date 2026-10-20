@@ -171,9 +171,15 @@ function treePreview(tree: unknown, range: HistoryRange) {
     ordered.push(candidates[i]);
   }
   ordered.reverse();
-  const included = new Set(ordered.map((n) => n.entry.id));
-  for (const node of ordered) {
-    if (node.parentNodeId && !included.has(node.parentNodeId)) node.parentNodeId = null;
+  for (;;) {
+    const included = new Set(ordered.map((n) => n.entry.id));
+    for (const node of ordered) {
+      if (node.parentNodeId && !included.has(node.parentNodeId)) node.parentNodeId = null;
+    }
+    // null can cost more than a short quoted parent ID. Budget the final wire
+    // representation and repair topology again if dropping an ancestor is needed.
+    if (Buffer.byteLength(JSON.stringify(ordered)) <= TREE_BYTES) break;
+    ordered.shift();
   }
   return { treeNodes: ordered, treeLimited: excluded || count > ordered.length };
 }

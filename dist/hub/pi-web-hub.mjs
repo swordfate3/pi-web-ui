@@ -2,7 +2,7 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import net, { isIP } from "node:net";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
@@ -103,10 +103,10 @@ function lifecycleConfig(value) {
 		credentialFile: v.credentialFile
 	};
 }
-var hex$3, text$1, GateLifecycle;
+var hex$4, text$1, GateLifecycle;
 var init_lifecycle = __esmMin((() => {
 	init_config();
-	hex$3 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+	hex$4 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
 	text$1 = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
 	GateLifecycle = class {
 		config;
@@ -162,7 +162,7 @@ var init_lifecycle = __esmMin((() => {
 			});
 		}
 		async target(runId) {
-			if (!hex$3(runId)) throw new Error("Invalid lifecycle identity");
+			if (!hex$4(runId)) throw new Error("Invalid lifecycle identity");
 			const value = await this.request("GET", `/v1/pi-lifecycle/runs/${runId}`);
 			if (value.managed === false) return { managed: false };
 			if (value.managed !== true || value.run_id !== runId || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id) || !text$1(value.version) || typeof value.idle !== "boolean" || typeof value.pending !== "boolean" || typeof value.busy !== "boolean" || ![
@@ -184,7 +184,7 @@ var init_lifecycle = __esmMin((() => {
 			};
 		}
 		job(value) {
-			if (!hex$3(value.id) || !hex$3(value.run_id) || typeof value.status !== "string" || ![
+			if (!hex$4(value.id) || !hex$4(value.run_id) || typeof value.status !== "string" || ![
 				"pending",
 				"queued",
 				"running",
@@ -223,18 +223,246 @@ var init_lifecycle = __esmMin((() => {
 			return result;
 		}
 		async restart(value) {
-			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$3(value.run_id) || !hex$3(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
+			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$4(value.run_id) || !hex$4(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
 			const result = this.job(await this.request("POST", "/v1/pi-lifecycle/restarts", value));
 			if (result.run_id !== value.run_id) throw new Error("Lifecycle target changed");
 			return result;
 		}
 		async operation(id) {
-			if (!hex$3(id)) throw new Error("Invalid lifecycle identity");
+			if (!hex$4(id)) throw new Error("Invalid lifecycle identity");
 			const job = this.job(await this.request("GET", `/v1/pi-lifecycle/restarts/${id}`));
 			if (job.id !== id) throw new Error("Lifecycle operation changed");
 			return job;
 		}
 	};
+}));
+//#endregion
+//#region hub/state-budget.ts
+function privateStat(stat) {
+	if (process.platform !== "win32" && ((Number(stat.mode) & 63) !== 0 || stat.uid !== process.getuid?.())) throw new Error("Unsafe private Hub state");
+}
+function privateStateDirectory(directory) {
+	const created = mkdirSync(directory, {
+		recursive: true,
+		mode: 448
+	});
+	const stat = lstatSync(directory);
+	privateStat(stat);
+	if (!stat.isDirectory()) throw new Error("Unsafe private Hub directory");
+	if (created) {
+		const parent = path.dirname(path.resolve(created));
+		for (let current = path.resolve(directory);; current = path.dirname(current)) {
+			syncDirectory(current);
+			if (current === parent) break;
+		}
+	}
+}
+function readStateJson(file) {
+	const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	try {
+		const stat = fstatSync(fd);
+		privateStat(stat);
+		if (!stat.isFile() || stat.nlink !== 1 || stat.size > 8192) throw new Error("Invalid private Hub file");
+		return JSON.parse(readFileSync(fd, "utf8"));
+	} finally {
+		closeSync(fd);
+	}
+}
+function syncDirectory(directory) {
+	const fd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+	try {
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+}
+/** Empty directory locks are never stolen, even after a crash. No PID guessing. */
+function acquireStateLock(config, name) {
+	privateStateDirectory(config.stateDir);
+	const root = realpathSync(config.stateDir);
+	const lock = path.join(root, name);
+	try {
+		mkdirSync(lock, { mode: 448 });
+	} catch {
+		throw new Error("Hub state lock busy; trusted recovery may be required");
+	}
+	const identity = lstatSync(lock);
+	let released = false;
+	return {
+		root,
+		release() {
+			if (released) return;
+			try {
+				const current = lstatSync(lock);
+				if (current.ino !== identity.ino || current.dev !== identity.dev) throw new Error("Hub lock ownership changed");
+				rmdirSync(lock);
+			} catch (error) {
+				if (error.code !== "ENOENT") throw error;
+			}
+			released = true;
+		}
+	};
+}
+function exportCharge(value) {
+	const bytes = value?.exportBytes ?? 0;
+	if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > 8192) throw new Error("Invalid export reservation");
+	return bytes;
+}
+function scan(root) {
+	const totals = {
+		logicalBytes: 0,
+		files: 0,
+		activeGrants: 0,
+		revokedGrants: 0,
+		generationFiles: 0,
+		receiptFiles: 0,
+		exportReservedBytes: 0
+	};
+	let entries = 0;
+	const visit = (directory, depth) => {
+		if (depth > 4) throw new StateBudgetError();
+		const dir = opendirSync(directory);
+		try {
+			for (let item = dir.readSync(); item; item = dir.readSync()) {
+				if (++entries > SCAN_ENTRIES) throw new StateBudgetError();
+				const file = path.join(directory, item.name);
+				const stat = lstatSync(file);
+				privateStat(stat);
+				if (stat.isDirectory()) {
+					visit(file, depth + 1);
+					continue;
+				}
+				if (!stat.isFile() || stat.nlink !== 1) throw new Error("Unsafe private Hub state");
+				totals.files++;
+				totals.logicalBytes += stat.size;
+				const relative = path.relative(root, file);
+				if (/^grants\/[a-f0-9]{32}\.json$/.test(relative)) {
+					const grant = readStateJson(file);
+					if (grant.revoked !== void 0 && typeof grant.revoked !== "boolean") throw new Error("Invalid grant state");
+					if (grant.revoked) totals.revokedGrants++;
+					else totals.activeGrants++;
+					const charge = exportCharge(grant);
+					totals.exportReservedBytes += charge;
+					totals.logicalBytes += charge;
+				}
+				if (/^(generations|bounded)\//.test(relative)) totals.generationFiles++;
+				if (relative.startsWith("restarts/")) totals.receiptFiles++;
+			}
+		} finally {
+			dir.closeSync();
+		}
+	};
+	visit(root, 0);
+	return totals;
+}
+function withStateWriter(config, operation) {
+	const lock = acquireStateLock(config, ".writer.lock");
+	try {
+		const result = operation(new StateWriter(lock.root));
+		if (result && typeof result.then === "function") throw new Error("Hub writer cannot cross an await");
+		return result;
+	} finally {
+		lock.release();
+	}
+}
+/** Grant must already be durable and charged before publishing an export. */
+function publishCredential(file, credential) {
+	const fd = openSync(file, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 384);
+	try {
+		writeFileSync(fd, `${JSON.stringify(credential)}\n`);
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	syncDirectory(path.dirname(file));
+}
+var STATE_LIMIT, SECURITY_RESERVE, SCAN_ENTRIES, StateBudgetError, StateWriter, storageDiagnostics;
+var init_state_budget = __esmMin((() => {
+	STATE_LIMIT = 8 * 1024 * 1024;
+	SECURITY_RESERVE = 64 * 1024;
+	SCAN_ENTRIES = 32768;
+	StateBudgetError = class extends Error {
+		constructor() {
+			super("Hub state quota exceeded");
+		}
+	};
+	StateWriter = class {
+		totals;
+		root;
+		constructor(root) {
+			this.root = root;
+		}
+		/** Also fence authority-only transitions, such as legacy lease renewal. */
+		assertAdmission() {
+			this.totals ??= scan(this.root);
+			if (this.totals.activeGrants > 512 || this.totals.logicalBytes > 8388608) throw new StateBudgetError();
+		}
+		destination(relative) {
+			if (!/^(?:grants\/[a-f0-9]{32}\.json|generations\/[a-f0-9]{32}\.json|bounded\/[a-f0-9]{32}\.json|restarts\/[a-f0-9]{32}(?:\.started|\.verified)?\.json|management\.json|registry\.json)$/.test(relative)) throw new Error("Invalid Hub state destination");
+			const file = path.join(this.root, relative);
+			privateStateDirectory(path.dirname(file));
+			return file;
+		}
+		write(relative, value, options = {}) {
+			const file = this.destination(relative);
+			const data = Buffer.from(`${JSON.stringify(value)}\n`);
+			if (data.length > 8192) throw new StateBudgetError();
+			let oldBytes = 0;
+			let old;
+			let exists = false;
+			try {
+				const stat = lstatSync(file);
+				privateStat(stat);
+				if (!stat.isFile() || stat.nlink !== 1) throw new Error("Unsafe private Hub file");
+				exists = true;
+				oldBytes = stat.size;
+				old = readStateJson(file);
+			} catch (error) {
+				if (error.code !== "ENOENT") throw error;
+			}
+			if (options.exclusive && exists) throw new Error("Hub state already exists");
+			this.totals ??= scan(this.root);
+			const totals = this.totals;
+			const isGrant = relative.startsWith("grants/");
+			const oldCharge = isGrant && exists ? exportCharge(old) : 0;
+			const newCharge = isGrant ? exportCharge(value) : 0;
+			const activeDelta = isGrant ? Number(!value.revoked) - Number(exists && !old?.revoked) : 0;
+			const peak = totals.logicalBytes + data.length + Math.max(0, newCharge - oldCharge);
+			const ceiling = options.security ? STATE_LIMIT : STATE_LIMIT - SECURITY_RESERVE;
+			const revocation = options.security && isGrant && activeDelta === -1 && value.revoked === true && JSON.stringify(value) === JSON.stringify({
+				...old,
+				revoked: true
+			});
+			if (peak > ceiling || (totals.activeGrants > 512 || totals.activeGrants + activeDelta > 512) && !revocation) throw new StateBudgetError();
+			const temporary = path.join(path.dirname(file), `.write-${randomBytes(16).toString("hex")}`);
+			const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 384);
+			try {
+				writeFileSync(fd, data);
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+			}
+			if (options.exclusive) {
+				linkSync(temporary, file);
+				unlinkSync(temporary);
+			} else renameSync(temporary, file);
+			syncDirectory(path.dirname(file));
+			totals.logicalBytes += data.length - oldBytes + newCharge - oldCharge;
+			totals.activeGrants += activeDelta;
+			this.totals = void 0;
+		}
+		diagnostics() {
+			const totals = scan(this.root);
+			return {
+				...totals,
+				limitBytes: STATE_LIMIT,
+				activeGrantLimit: 512,
+				securityReserveBytes: SECURITY_RESERVE,
+				overBudget: totals.logicalBytes > 8388608 || totals.activeGrants > 512
+			};
+		}
+	};
+	storageDiagnostics = (config) => withStateWriter(config, (writer) => writer.diagnostics());
 }));
 //#endregion
 //#region hub/config.ts
@@ -249,17 +477,10 @@ var config_exports = /* @__PURE__ */ __exportAll({
 	revokeSession: () => revokeSession
 });
 function privateDirectory(directory) {
-	mkdirSync(directory, {
-		recursive: true,
-		mode: 448
-	});
-	const stat = lstatSync(directory);
-	if (!stat.isDirectory() || process.platform !== "win32" && ((stat.mode & 63) !== 0 || stat.uid !== process.getuid?.())) throw new Error("Hub state directory must be private and owned by the current user");
+	privateStateDirectory(directory);
 }
 function readPrivateJson(file) {
-	const stat = lstatSync(file);
-	if (!stat.isFile() || stat.size > 8192 || process.platform !== "win32" && ((stat.mode & 63) !== 0 || stat.uid !== process.getuid?.())) throw new Error("Invalid private hub file");
-	return JSON.parse(readFileSync(file, "utf8"));
+	return readStateJson(file);
 }
 function initializeHub(file, options = {}) {
 	mkdirSync(path.dirname(path.resolve(file)), {
@@ -339,7 +560,7 @@ function hasControls(value) {
 function readGrant(config, runId) {
 	if (!/^[0-9a-f]{32}$/.test(runId)) throw new Error("Invalid session capability");
 	const grant = readPrivateJson(path.join(config.stateDir, "grants", `${runId}.json`));
-	if (grant.run_id !== runId || !/^[0-9a-f]{64}$/.test(grant.token) || typeof grant.label !== "string" || grant.label.length > 120 || hasControls(grant.label) || typeof grant.backendHost !== "string" || !validHost(grant.backendHost)) throw new Error("Invalid session capability");
+	if (grant.run_id !== runId || !/^[0-9a-f]{64}$/.test(grant.token) || typeof grant.label !== "string" || grant.label.length > 120 || hasControls(grant.label) || typeof grant.backendHost !== "string" || !validHost(grant.backendHost) || grant.revoked !== void 0 && typeof grant.revoked !== "boolean") throw new Error("Invalid session capability");
 	return grant;
 }
 function issueSession(config, output, options) {
@@ -354,30 +575,38 @@ function issueSession(config, output, options) {
 	const grant = {
 		...credential,
 		label: options.label,
-		backendHost
+		backendHost,
+		revoked: false,
+		exportBytes: Buffer.byteLength(`${JSON.stringify(credential)}\n`)
 	};
-	const resolvedOutput = path.resolve(output);
-	if (resolvedOutput === config.socketPath || resolvedOutput.startsWith(`${config.stateDir}${path.sep}`)) throw new Error("Session credential must be outside the administrator state directory");
-	writeFileSync(resolvedOutput, `${JSON.stringify(credential)}\n`, {
-		flag: "wx",
-		mode: 384
-	});
-	writeFileSync(path.join(config.stateDir, "grants", `${credential.run_id}.json`), `${JSON.stringify(grant)}\n`, {
-		flag: "wx",
-		mode: 384
+	const resolvedOutput = path.join(realpathSync(path.dirname(path.resolve(output))), path.basename(output));
+	const stateRoot = realpathSync(config.stateDir);
+	if (resolvedOutput === config.socketPath || resolvedOutput === stateRoot || resolvedOutput.startsWith(`${stateRoot}${path.sep}`)) throw new Error("Session credential must be outside the administrator state directory");
+	withStateWriter(config, (writer) => {
+		try {
+			lstatSync(resolvedOutput);
+			throw new Error("Credential output already exists");
+		} catch (error) {
+			if (error.code !== "ENOENT") throw error;
+		}
+		writer.write(`grants/${credential.run_id}.json`, grant, { exclusive: true });
+		publishCredential(resolvedOutput, credential);
 	});
 	return credential;
 }
 function revokeSession(config, runId) {
-	const grant = readGrant(config, runId);
-	writeFileSync(path.join(config.stateDir, "grants", `${runId}.json`), `${JSON.stringify({
-		...grant,
-		revoked: true
-	})}\n`, { mode: 384 });
+	withStateWriter(config, (writer) => {
+		const grant = readGrant(config, runId);
+		if (!grant.revoked) writer.write(`grants/${runId}.json`, {
+			...grant,
+			revoked: true
+		}, { security: true });
+	});
 }
 var init_config = __esmMin((() => {
 	init_connection_config();
 	init_lifecycle();
+	init_state_budget();
 }));
 //#endregion
 //#region hub/gateway-auth.ts
@@ -399,56 +628,47 @@ function gatewayIdentity(config, request) {
 //#endregion
 //#region hub/management.ts
 init_config();
+init_state_budget();
 var digest = (value) => createHash("sha256").update(value).digest("hex");
-var hex$2 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var hex$3 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
 var equal$1 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 var stateFile = (config) => path.join(config.stateDir, "management.json");
 function readState(config) {
 	const file = stateFile(config);
 	if (!existsSync(file)) return void 0;
 	const value = readPrivateJson(file);
-	if (!hex$2(value.epoch, 64) || value.pairHash !== null && !hex$2(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
+	if (!hex$3(value.epoch, 64) || value.pairHash !== null && !hex$3(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
 	return value;
 }
-function saveState(config, value) {
-	privateDirectory(config.stateDir);
-	const temporary = path.join(config.stateDir, `.management-${randomBytes(12).toString("hex")}`);
-	const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 384);
-	try {
-		writeFileSync(fd, `${JSON.stringify(value)}\n`);
-	} finally {
-		closeSync(fd);
-	}
-	try {
-		renameSync(temporary, stateFile(config));
-	} finally {
-		if (existsSync(temporary)) unlinkSync(temporary);
-	}
+function saveState(writer, value, security = false) {
+	writer.write("management.json", value, { security });
 }
 /** Trusted CLI only: return a short-lived code to its administrator's terminal. */
 function issueManagementCode(config, now = Date.now()) {
 	if (config.management?.gateway) throw new Error("Management uses the configured gateway login, not pairing codes");
-	const code = randomBytes(16).toString("hex");
-	const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
-	const expires = now + 6e5;
-	saveState(config, {
-		epoch,
-		pairHash: digest(code),
-		expires,
-		failures: 0
+	return withStateWriter(config, (writer) => {
+		const code = randomBytes(16).toString("hex");
+		const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
+		const expires = now + 6e5;
+		saveState(writer, {
+			epoch,
+			pairHash: digest(code),
+			expires,
+			failures: 0
+		});
+		return {
+			code,
+			expiresAt: expires
+		};
 	});
-	return {
-		code,
-		expiresAt: expires
-	};
 }
 function revokeManagement(config) {
-	saveState(config, {
+	withStateWriter(config, (writer) => saveState(writer, {
 		epoch: randomBytes(32).toString("hex"),
 		pairHash: null,
 		expires: 0,
 		failures: 0
-	});
+	}, true));
 }
 /** Additional management privilege, deliberately separate from gateway/list access. */
 var HubManagement = class {
@@ -467,7 +687,7 @@ var HubManagement = class {
 		const values = (request.headers.cookie ?? "").split(";").map((item) => item.trim()).filter((item) => item.startsWith(`${this.cookieName}=`));
 		if (values.length !== 1) return void 0;
 		const token = values[0].slice(this.cookieName.length + 1);
-		if (!hex$2(token, 64)) return void 0;
+		if (!hex$3(token, 64)) return void 0;
 		const key = digest(token);
 		const session = this.sessions.get(key);
 		let state;
@@ -496,7 +716,7 @@ var HubManagement = class {
 	authorize(request, write = false) {
 		const session = this.session(request);
 		const csrf = request.headers["x-pi-hub-csrf"];
-		if (!session || write && (typeof csrf !== "string" || !hex$2(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Management authorization required");
+		if (!session || write && (typeof csrf !== "string" || !hex$3(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Management authorization required");
 		return session;
 	}
 	revalidate(request, expected, write = false) {
@@ -505,36 +725,40 @@ var HubManagement = class {
 	}
 	unlock(code) {
 		if (this.config.management?.gateway) throw new Error("Gateway login required");
-		const state = readState(this.config);
-		if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10) throw new Error("Management unlock rejected");
-		if (!hex$2(code, 32) || !equal$1(digest(code), state.pairHash)) {
-			saveState(this.config, {
+		return withStateWriter(this.config, (writer) => {
+			const state = readState(this.config);
+			if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10) throw new Error("Management unlock rejected");
+			if (!hex$3(code, 32) || !equal$1(digest(code), state.pairHash)) {
+				saveState(writer, {
+					...state,
+					failures: state.failures + 1
+				}, true);
+				throw new Error("Management unlock rejected");
+			}
+			saveState(writer, {
 				...state,
-				failures: state.failures + 1
-			});
-			throw new Error("Management unlock rejected");
-		}
-		saveState(this.config, {
-			...state,
-			pairHash: null,
-			expires: 0
+				pairHash: null,
+				expires: 0
+			}, true);
+			return this.createSession(state);
 		});
-		return this.createSession(state);
 	}
 	unlockGateway(request) {
 		const identity = gatewayIdentity(this.config, request);
 		if (!identity) throw new Error("Verified gateway login required");
-		let state = readState(this.config);
-		if (!state) {
-			state = {
-				epoch: randomBytes(32).toString("hex"),
-				pairHash: null,
-				expires: 0,
-				failures: 0
-			};
-			saveState(this.config, state);
-		}
-		return this.createSession(state, identity);
+		return withStateWriter(this.config, (writer) => {
+			let state = readState(this.config);
+			if (!state) {
+				state = {
+					epoch: randomBytes(32).toString("hex"),
+					pairHash: null,
+					expires: 0,
+					failures: 0
+				};
+				saveState(writer, state);
+			}
+			return this.createSession(state, identity);
+		});
 	}
 	createSession(state, gateway) {
 		for (const [key, value] of this.sessions) if (value.expires <= this.now()) this.sessions.delete(key);
@@ -563,6 +787,17 @@ var HubManagement = class {
 		return `${this.cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${this.secure ? "; Secure" : ""}`;
 	}
 };
+//#endregion
+//#region extensions/hub-generation.ts
+var BOUNDED_PROTOCOL = "bounded-v2";
+var BOUNDED_GENERATION_SOURCE = "b2-[a-f0-9]{32}-[a-f0-9]{16}-[a-f0-9]{32}";
+var HUB_GENERATION_SOURCE = `(?:[a-f0-9]{32}|${BOUNDED_GENERATION_SOURCE})`;
+var bounded = new RegExp(`^${BOUNDED_GENERATION_SOURCE}$`);
+var generation = new RegExp(`^${HUB_GENERATION_SOURCE}$`);
+var sessionPath = new RegExp(`^/s/${HUB_GENERATION_SOURCE}/$`);
+var isBoundedGeneration = (value) => typeof value === "string" && bounded.test(value);
+var isHubGeneration = (value) => typeof value === "string" && generation.test(value);
+var isHubSessionPath = (value) => typeof value === "string" && sessionPath.test(value);
 //#endregion
 //#region extensions/runtime-metadata.ts
 /** Display/identity metadata, never proof that a container is authorized for control. */
@@ -625,7 +860,22 @@ function readSoftwareMetadata(value) {
 	});
 }
 //#endregion
+//#region hub/limits.ts
+var HUB_LIMITS = Object.freeze({
+	browserPairs: 8,
+	connections: 128,
+	registrationPeers: 64,
+	registrationOperations: 32,
+	backendProbes: 4,
+	websocketCompression: 2,
+	httpCompression: 2,
+	inFlightBytes: 16 * 1024 * 1024,
+	waitingBytes: 512 * 1024,
+	waitingMessages: 512
+});
+//#endregion
 //#region hub/asset-transfer.ts
+var activeCompressors = 0;
 function encoding(accept) {
 	if (!accept) return;
 	const qualities = /* @__PURE__ */ new Map();
@@ -656,6 +906,7 @@ function proxySessionResponse(request, response, upstream, resource) {
 		if (!vary.some((value) => value === "*" || value.toLowerCase() === "accept-encoding")) vary.push("Accept-Encoding");
 		headers.vary = vary.join(", ");
 		coding = encoding(request.headers["accept-encoding"]);
+		if (request.method !== "HEAD" && activeCompressors >= HUB_LIMITS.httpCompression) coding = void 0;
 		if (coding) {
 			headers["content-encoding"] = coding;
 			for (const name of [
@@ -671,11 +922,204 @@ function proxySessionResponse(request, response, upstream, resource) {
 	if (request.method === "HEAD") {
 		upstream.resume();
 		response.end();
-	} else if (coding) pipeline(upstream, coding === "br" ? createBrotliCompress({ params: { [constants$1.BROTLI_PARAM_QUALITY]: 4 } }) : createGzip({ level: 6 }), response, (error) => {
-		if (error) response.destroy();
-	});
-	else upstream.pipe(response);
+	} else if (coding) {
+		activeCompressors++;
+		pipeline(upstream, coding === "br" ? createBrotliCompress({ params: { [constants$1.BROTLI_PARAM_QUALITY]: 4 } }) : createGzip({ level: 6 }), response, (error) => {
+			activeCompressors--;
+			if (error) response.destroy();
+		});
+	} else upstream.pipe(response);
 }
+//#endregion
+//#region hub/bounded-registry.ts
+init_config();
+var ZERO = "0000000000000000";
+var hex$2 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var RegistryError = class extends Error {
+	code;
+	constructor(code = "ENDED_GENERATION") {
+		super(code === "ENDED_GENERATION" ? "ended generation" : "Registration rejected");
+		this.code = code;
+	}
+};
+var relative = (runId) => {
+	if (!hex$2(runId, 32)) throw new RegistryError("AUTH_FAILED");
+	return `bounded/${runId}.json`;
+};
+var hasBoundedRecord = (config, runId) => existsSync(path.join(config.stateDir, relative(runId)));
+function boundedRecord(config, runId, boot) {
+	const file = path.join(config.stateDir, relative(runId));
+	if (!existsSync(file)) return {
+		schema: 2,
+		run_id: runId,
+		boot,
+		slot: ZERO,
+		revision: 0
+	};
+	const value = readPrivateJson(file);
+	if (value.schema !== 2 || value.run_id !== runId || !hex$2(value.boot, 32) || !hex$2(value.slot, 16) || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new RegistryError("STATE_UNAVAILABLE");
+	for (const tuple of [value.current, value.pending]) {
+		if (tuple === void 0) continue;
+		if (!isBoundedGeneration(tuple.generation) || !tuple.generation.startsWith(`b2-${value.boot}-`) || tuple.generation.split("-")[2] > value.slot || !hex$2(tuple.request_id, 32) || !Number.isInteger(tuple.port) || tuple.port < 1 || tuple.port > 65535 || !Number.isSafeInteger(tuple.expires)) throw new RegistryError("STATE_UNAVAILABLE");
+	}
+	return value.boot === boot ? value : {
+		schema: 2,
+		run_id: runId,
+		boot,
+		slot: ZERO,
+		revision: 0
+	};
+}
+function saveBounded(writer, record, security = false) {
+	if (!Number.isSafeInteger(record.revision + 1)) throw new RegistryError("STATE_UNAVAILABLE");
+	record.revision++;
+	writer.write(relative(record.run_id), record, { security });
+}
+function issueBounded(writer, record, value, live) {
+	if (value.boot !== record.boot || !hex$2(value.slot, 16) || !hex$2(value.request_id, 32) || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new RegistryError("ISSUANCE_STALE");
+	const now = Date.now();
+	const result = (tuple) => ({
+		generation: tuple.generation,
+		boot: record.boot,
+		slot: tuple.generation.split("-")[2],
+		expires: tuple.expires
+	});
+	const pending = record.pending;
+	if (pending?.request_id === value.request_id && pending.port === value.port && pending.expires > now && BigInt(`0x${value.slot}`) + 1n === BigInt(`0x${record.slot}`)) return result(pending);
+	if (value.slot !== record.slot) throw new RegistryError("ISSUANCE_STALE");
+	if (pending && pending.expires > now) throw new RegistryError("REGISTRY_BUSY");
+	if (record.slot === "ffffffffffffffff") throw new RegistryError("STATE_UNAVAILABLE");
+	record.slot = (BigInt(`0x${record.slot}`) + 1n).toString(16).padStart(16, "0");
+	record.pending = {
+		generation: `b2-${record.boot}-${record.slot}-${randomBytes(16).toString("hex")}`,
+		port: Number(value.port),
+		request_id: value.request_id,
+		expires: now + 5e3
+	};
+	if (record.current && !live(record.current.generation)) delete record.current;
+	saveBounded(writer, record);
+	return result(record.pending);
+}
+function boundedTuple(record, generation, port, live) {
+	if (record.pending?.generation === generation && record.pending.port === port && record.pending.expires > Date.now()) return "pending";
+	if (record.current?.generation === generation && record.current.port === port && live) return "current";
+	throw new RegistryError();
+}
+//#endregion
+//#region hub/forward-queue.ts
+var size = (data) => typeof data === "string" ? Buffer.byteLength(data) : Array.isArray(data) ? data.reduce((sum, part) => sum + part.byteLength, 0) : data.byteLength;
+/** One accounted send, plus a bounded unsent FIFO. No pending-send promises. */
+var ForwardQueue = class {
+	waiting = [];
+	waitingBytes = 0;
+	inFlight;
+	closed = false;
+	poll;
+	deadline;
+	socket;
+	onSlow;
+	constructor(socket, onSlow = () => {}) {
+		this.socket = socket;
+		this.onSlow = onSlow;
+		socket.once("close", () => this.dispose());
+		socket.once("error", () => this.dispose());
+	}
+	enqueue(data, binary = false) {
+		if (this.closed || this.socket.readyState !== 1) return false;
+		const bytes = size(data);
+		if (bytes > HUB_LIMITS.inFlightBytes) return this.slow();
+		if (!this.inFlight && !this.waiting.length && this.socket.bufferedAmount === 0) {
+			this.send({
+				data,
+				binary,
+				bytes
+			});
+			return !this.closed;
+		}
+		if (this.waitingBytes + bytes > HUB_LIMITS.waitingBytes || this.waiting.length >= HUB_LIMITS.waitingMessages) return this.slow();
+		this.waitingBytes += bytes;
+		this.waiting.push({
+			data,
+			binary,
+			bytes
+		});
+		this.watch();
+		return true;
+	}
+	snapshot() {
+		return {
+			inFlightBytes: this.inFlight?.bytes ?? 0,
+			waitingBytes: this.waitingBytes,
+			waitingMessages: this.waiting.length
+		};
+	}
+	send(frame) {
+		const flight = {
+			bytes: frame.bytes,
+			complete: false
+		};
+		this.inFlight = flight;
+		this.watch();
+		try {
+			this.socket.send(frame.data, { binary: frame.binary }, (error) => {
+				if (this.closed || this.inFlight !== flight) return;
+				if (error) {
+					this.slow();
+					return;
+				}
+				flight.complete = true;
+				this.drain();
+			});
+		} catch {
+			this.slow();
+		}
+	}
+	watch() {
+		if (!this.poll) {
+			this.poll = setInterval(() => this.drain(), 10);
+			this.poll.unref();
+		}
+		if (!this.deadline) {
+			this.deadline = setTimeout(() => this.slow(), 5e3);
+			this.deadline.unref();
+		}
+	}
+	drain() {
+		if (this.closed || this.socket.bufferedAmount !== 0 || this.inFlight && !this.inFlight.complete) return;
+		this.inFlight = void 0;
+		clearTimeout(this.deadline);
+		this.deadline = void 0;
+		const frame = this.waiting.shift();
+		if (frame) {
+			this.waitingBytes -= frame.bytes;
+			this.send(frame);
+		} else {
+			clearInterval(this.poll);
+			this.poll = void 0;
+		}
+	}
+	slow() {
+		if (!this.closed) {
+			this.dispose();
+			this.socket.close(1013, "Slow consumer; reconnect");
+			this.onSlow();
+			const timer = setTimeout(() => this.socket.terminate(), 250);
+			timer.unref();
+			this.socket.once("close", () => clearTimeout(timer));
+		}
+		return false;
+	}
+	dispose() {
+		this.closed = true;
+		this.waiting = [];
+		this.waitingBytes = 0;
+		this.inFlight = void 0;
+		clearInterval(this.poll);
+		clearTimeout(this.deadline);
+		this.poll = void 0;
+		this.deadline = void 0;
+	}
+};
 //#endregion
 //#region hub/runtime-portal.ts
 /** Browser source injected into the trusted management portal script. */
@@ -1077,7 +1521,7 @@ ${runtimePortalJs}
       const labels = { pending: '等待管理员审批', queued: '已排队', running: '正在重启并核对原会话', succeeded: '已恢复原会话', failed: '失败，请检查后手动处理', recovery_required: '结果不确定，需要管理员检查', rejected: '已拒绝', stale: '身份或授权已变化' };
       text.textContent = op.label + ' · ' + (labels[op.status] || '结果未知，正在查询；不会重复执行') + (op.new_version ? ' · Pi ' + op.new_version : '');
       row.append(text);
-      if (op.status === 'succeeded' && typeof op.path === 'string' && /^\\/s\\/[a-f0-9]{32}\\/$/.test(op.path)) {
+      if (op.status === 'succeeded' && typeof op.path === 'string' && /^\\/s\\/${HUB_GENERATION_SOURCE}\\/$/.test(op.path)) {
         const link = document.createElement('a'); link.href = new URL(op.path, document.querySelector('meta[name="pi-chat-origin"]').content).href; link.className = 'open'; link.textContent = '打开恢复后的会话 ↗'; row.append(link);
       } else if (op.status === 'succeeded') {
         const unavailable = document.createElement('p'); unavailable.textContent = '重启已成功完成；当前恢复链接不可用（会话可能已继续、切换或退出）。请从在线会话列表选择当前会话。'; row.append(unavailable);
@@ -1153,7 +1597,7 @@ ${runtimePortalJs}
   });
   try {
     const saved = JSON.parse(sessionStorage.getItem('pi-hub-restarts') || '[]');
-    if (Array.isArray(saved)) for (const o of saved.slice(0, 64)) if (/^[a-f0-9]{32}$/.test(o.id) && /^[a-f0-9]{32}$/.test(o.generation) && typeof o.label === 'string' && o.label.length <= 256) operations.set(o.id, { id: o.id, generation: o.generation, label: o.label, done: false, status: 'unknown' });
+    if (Array.isArray(saved)) for (const o of saved.slice(0, 64)) if (/^[a-f0-9]{32}$/.test(o.id) && /^${HUB_GENERATION_SOURCE}$/.test(o.generation) && typeof o.label === 'string' && o.label.length <= 256) operations.set(o.id, { id: o.id, generation: o.generation, label: o.label, done: false, status: 'unknown' });
   } catch {}
   void (async () => { try { auth = await api('status'); updateAuth(); if (auth.authMode === 'gateway') await loginWithGateway(); await poll(); await runtimeUpdates.poll(); } catch { notice('无法查询运行管理能力。'); } })();
   setInterval(async () => { await poll(); await runtimeUpdates.poll(); }, 2000);
@@ -1322,6 +1766,7 @@ var GateRuntimeUpdates = class {
 //#region hub/restart-api.ts
 init_config();
 init_lifecycle();
+init_state_budget();
 var hex = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
 var text = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
 async function body(request) {
@@ -1368,18 +1813,15 @@ function createRestartApi(config, hooks) {
 	};
 	const read = (id) => {
 		const value = readPrivateJson(file(id));
-		if (value.id !== id || !hex(value.run_id) || !hex(value.generation) || value.idempotency_key !== id || !text(value.runtime_id) || !text(value.session_id) || value.leaf_id !== null && !text(value.leaf_id)) throw new Error();
+		if (value.id !== id || !hex(value.run_id) || !isHubGeneration(value.generation) || value.idempotency_key !== id || !text(value.runtime_id) || !text(value.session_id) || value.leaf_id !== null && !text(value.leaf_id)) throw new Error();
 		return value;
 	};
-	const save = (value) => {
+	const save = (value, publish) => withStateWriter(config, (writer) => {
+		if (!hooks.granted(value.run_id)) throw new Error();
 		if (readdirSync(receipts).filter((name) => /^[a-f0-9]{32}\.json$/.test(name)).length >= 1e3) throw new Error();
-		const fd = openSync(file(value.id), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 384);
-		try {
-			writeFileSync(fd, `${JSON.stringify(value)}\n`);
-		} finally {
-			closeSync(fd);
-		}
-	};
+		writer.write(`restarts/${value.id}.json`, value, { exclusive: true });
+		publish();
+	});
 	const resolve = async (id, submitted) => {
 		if (!provider) throw new Error();
 		const receipt = read(id);
@@ -1387,9 +1829,9 @@ function createRestartApi(config, hooks) {
 		const job = submitted ?? await provider.operation(id);
 		if (job.run_id !== receipt.run_id || !hooks.granted(receipt.run_id)) throw new Error();
 		const clockFile = path.join(receipts, `${id}.started.json`);
-		if (job.started_at !== void 0 && !existsSync(clockFile)) writeFileSync(clockFile, JSON.stringify({ started_at: job.started_at }), {
-			flag: "wx",
-			mode: 384
+		if (job.started_at !== void 0) withStateWriter(config, (writer) => {
+			if (!hooks.granted(receipt.run_id)) throw new Error();
+			if (!existsSync(clockFile)) writer.write(`restarts/${id}.started.json`, { started_at: job.started_at }, { exclusive: true });
 		});
 		if (existsSync(clockFile) && readPrivateJson(clockFile).started_at !== job.started_at) throw new Error();
 		const result = {
@@ -1422,7 +1864,7 @@ function createRestartApi(config, hooks) {
 			const deadline = job.started_at + 21e4;
 			const verifiedFile = path.join(receipts, `${id}.verified.json`);
 			const completed = existsSync(verifiedFile) ? readPrivateJson(verifiedFile) : void 0;
-			if (completed && (completed.id !== id || completed.run_id !== receipt.run_id || completed.generation !== receipt.generation || completed.old_runtime_id !== receipt.runtime_id || completed.session_id !== receipt.session_id || completed.leaf_id !== receipt.leaf_id || completed.started_at !== job.started_at || !Number.isSafeInteger(completed.at) || completed.at >= deadline || completed.at < job.started_at || completed.at > Date.now() || completed.runtimeId !== job.new_runtime_id || completed.version !== job.new_version || typeof completed.path !== "string" || !/^\/s\/[a-f0-9]{32}\/$/.test(completed.path))) throw new Error();
+			if (completed && (completed.id !== id || completed.run_id !== receipt.run_id || completed.generation !== receipt.generation || completed.old_runtime_id !== receipt.runtime_id || completed.session_id !== receipt.session_id || completed.leaf_id !== receipt.leaf_id || completed.started_at !== job.started_at || !Number.isSafeInteger(completed.at) || completed.at >= deadline || completed.at < job.started_at || completed.at > Date.now() || completed.runtimeId !== job.new_runtime_id || completed.version !== job.new_version || !isHubSessionPath(completed.path))) throw new Error();
 			if (!completed && Date.now() >= deadline) return failed("registration_timeout");
 			let route;
 			try {
@@ -1437,21 +1879,22 @@ function createRestartApi(config, hooks) {
 			}
 			if (Date.now() >= deadline) return failed("registration_timeout");
 			if (route) {
-				if (!existsSync(verifiedFile)) writeFileSync(verifiedFile, JSON.stringify({
-					id,
-					run_id: receipt.run_id,
-					generation: receipt.generation,
-					old_runtime_id: receipt.runtime_id,
-					session_id: receipt.session_id,
-					leaf_id: receipt.leaf_id,
-					started_at: job.started_at,
-					at: Date.now(),
-					path: route,
-					runtimeId: job.new_runtime_id,
-					version: job.new_version
-				}), {
-					flag: "wx",
-					mode: 384
+				if (!isHubSessionPath(route)) throw new Error();
+				withStateWriter(config, (writer) => {
+					if (!hooks.granted(receipt.run_id) || Date.now() >= deadline) throw new Error();
+					if (!existsSync(verifiedFile)) writer.write(`restarts/${id}.verified.json`, {
+						id,
+						run_id: receipt.run_id,
+						generation: receipt.generation,
+						old_runtime_id: receipt.runtime_id,
+						session_id: receipt.session_id,
+						leaf_id: receipt.leaf_id,
+						started_at: job.started_at,
+						at: Date.now(),
+						path: route,
+						runtimeId: job.new_runtime_id,
+						version: job.new_version
+					}, { exclusive: true });
 				});
 				result.path = route;
 			} else {
@@ -1475,7 +1918,6 @@ function createRestartApi(config, hooks) {
 				}).end(JSON.stringify(value));
 			};
 			let phase = "authorization";
-			let unsubmittedReceipt;
 			try {
 				if (config.management?.gateway && !gatewayIdentity(config, request)) {
 					reply(401, { error: "Verified gateway login required" });
@@ -1541,6 +1983,10 @@ function createRestartApi(config, hooks) {
 					reply(200, { authorized: false }, management.logout(request));
 					return true;
 				}
+				if (request.method === "GET" && pathname === "/api/management/storage") {
+					reply(200, storageDiagnostics(config));
+					return true;
+				}
 				phase = "provider";
 				if (pathname === "/api/management/runtime-updates" || /^\/api\/management\/runtime-updates\/[a-f0-9]{32}$/.test(pathname)) {
 					if (!runtimeProvider) {
@@ -1589,7 +2035,7 @@ function createRestartApi(config, hooks) {
 					reply(503, { error: "Managed restart is not configured" });
 					return true;
 				}
-				const targetMatch = /^\/api\/management\/targets\/([a-f0-9]{32})$/.exec(pathname);
+				const targetMatch = new RegExp(`^/api/management/targets/(${HUB_GENERATION_SOURCE})$`).exec(pathname);
 				if (request.method === "GET" && targetMatch) {
 					const selected = await hooks.lookup(targetMatch[1]);
 					if (!selected) {
@@ -1613,7 +2059,7 @@ function createRestartApi(config, hooks) {
 				if (request.method === "POST" && pathname === "/api/management/restarts") {
 					const value = await body(request);
 					revalidate();
-					if (Object.keys(value).sort().join(",") !== "generation,idempotencyKey,leafId,runtimeId,sessionId" || !hex(value.generation) || !hex(value.idempotencyKey) || !text(value.runtimeId) || !text(value.sessionId) || value.leafId !== null && !text(value.leafId)) {
+					if (Object.keys(value).sort().join(",") !== "generation,idempotencyKey,leafId,runtimeId,sessionId" || !isHubGeneration(value.generation) || !hex(value.idempotencyKey) || !text(value.runtimeId) || !text(value.sessionId) || value.leafId !== null && !text(value.leafId)) {
 						reply(400, { error: "Invalid restart request" });
 						return true;
 					}
@@ -1642,18 +2088,17 @@ function createRestartApi(config, hooks) {
 						idempotency_key: id
 					};
 					revalidate();
-					save(receipt);
-					unsubmittedReceipt = id;
-					revalidate();
-					hooks.prepareHandoff(selected.runId, {
-						id,
-						generation: value.generation,
-						runtimeId: value.runtimeId,
-						sessionId: value.sessionId,
-						leafId: value.leafId
+					save(receipt, () => {
+						revalidate();
+						hooks.prepareHandoff(selected.runId, {
+							id,
+							generation: receipt.generation,
+							runtimeId: receipt.runtime_id,
+							sessionId: receipt.session_id,
+							leafId: receipt.leaf_id
+						});
 					});
 					revalidate();
-					unsubmittedReceipt = void 0;
 					const job = await provider.restart({
 						run_id: receipt.run_id,
 						runtime_id: receipt.runtime_id,
@@ -1672,10 +2117,6 @@ function createRestartApi(config, hooks) {
 				}
 				reply(404, { error: "Management route not found" });
 			} catch {
-				if (unsubmittedReceipt) {
-					hooks.clearHandoff(unsubmittedReceipt);
-					unlinkSync(file(unsubmittedReceipt));
-				}
 				reply(phase === "authorization" ? 401 : 409, { error: phase === "authorization" ? "Management authorization required" : "Restart unavailable or outcome unknown; refresh status before retrying" });
 			}
 			return true;
@@ -1939,7 +2380,7 @@ function captureHubMetadata(moduleUrl = import.meta.url) {
 	{
 		const embedded = {
 			"version": "1.0.1",
-			"build": "afadabdfb54714ee4cea8397f03d4599c245da9295655c60c7f383e172e1b64f"
+			"build": "c361b74c0efb558c4c767843be1510199d5563651c06210598513b860972da27"
 		};
 		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
 			version: embedded.version,
@@ -2090,6 +2531,7 @@ function createVersionStatus(options = {}) {
 //#endregion
 //#region hub/server.ts
 init_config();
+init_state_budget();
 var mac = (token, value) => createHmac("sha256", token).update(value).digest("hex");
 function equal(value, expected) {
 	if (typeof value !== "string") return false;
@@ -2184,31 +2626,44 @@ function boundedDeflateOffer(header) {
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 async function startHub(config, options = {}) {
 	if (config.management) managementConfig(config.management, config.port, config.publicUrl);
-	privateDirectory(config.runtimeDir);
-	const lock = path.join(config.runtimeDir, "hub.lock");
-	mkdirSync(lock, { mode: 448 });
-	const owner = path.join(lock, "owner.json");
-	const release = () => {
-		if (!existsSync(lock)) return;
-		if (existsSync(owner)) unlinkSync(owner);
-		rmdirSync(lock);
+	const serving = acquireStateLock(config, ".serving.lock");
+	config = {
+		...config,
+		stateDir: serving.root
 	};
 	try {
-		writeFileSync(owner, JSON.stringify({ pid: process.pid }), {
-			flag: "wx",
-			mode: 384
-		});
-		const hub = await startLockedHub(config, options);
-		let closing;
-		return {
-			...hub,
-			close: () => {
-				closing ??= hub.close().finally(release);
-				return closing;
-			}
+		privateDirectory(config.runtimeDir);
+		const lock = path.join(config.runtimeDir, "hub.lock");
+		mkdirSync(lock, { mode: 448 });
+		const owner = path.join(lock, "owner.json");
+		const release = () => {
+			if (!existsSync(lock)) return;
+			if (existsSync(owner)) unlinkSync(owner);
+			rmdirSync(lock);
 		};
+		try {
+			writeFileSync(owner, JSON.stringify({ pid: process.pid }), {
+				flag: "wx",
+				mode: 384
+			});
+			const hub = await startLockedHub(config, options);
+			let closing;
+			return {
+				...hub,
+				close: () => {
+					closing ??= hub.close().finally(() => {
+						release();
+						serving.release();
+					});
+					return closing;
+				}
+			};
+		} catch (error) {
+			release();
+			throw error;
+		}
 	} catch (error) {
-		release();
+		serving.release();
 		throw error;
 	}
 }
@@ -2217,6 +2672,7 @@ async function startLockedHub(config, options) {
 	privateDirectory(config.runtimeDir);
 	privateDirectory(path.join(config.stateDir, "grants"));
 	privateDirectory(path.join(config.stateDir, "generations"));
+	privateDirectory(path.join(config.stateDir, "bounded"));
 	if (existsSync(config.socketPath)) {
 		const stat = lstatSync(config.socketPath);
 		if (!stat.isSocket() || stat.uid !== process.getuid?.()) throw new Error("Unsafe hub socket path");
@@ -2240,16 +2696,33 @@ async function startLockedHub(config, options) {
 		unlinkSync(config.socketPath);
 	}
 	const boot = randomBytes(16).toString("hex");
+	withStateWriter(config, (writer) => writer.write("registry.json", {
+		schema: 2,
+		boot
+	}, { security: true }));
 	const sessions = /* @__PURE__ */ new Map();
 	const peers = /* @__PURE__ */ new Set();
 	const connections = /* @__PURE__ */ new Set();
 	const webSockets = /* @__PURE__ */ new Map();
+	const outbound = /* @__PURE__ */ new Map();
+	const sendControl = (client, value) => outbound.get(client)?.enqueue(value);
+	let activeProbes = 0;
+	const proof = async (grant, generation, port) => {
+		if (activeProbes >= HUB_LIMITS.backendProbes) throw new RegistryError("HUB_BUSY");
+		activeProbes++;
+		try {
+			return await proveBackend(grant, generation, port);
+		} finally {
+			activeProbes--;
+		}
+	};
 	const handoffs = /* @__PURE__ */ new Map();
 	const pruneHandoffs = () => {
 		for (const [token, item] of handoffs) if (item.expires <= Date.now()) handoffs.delete(token);
 	};
 	let stopped = false;
 	let pending = Promise.resolve();
+	let admittedRegistrations = 0;
 	const versionStatus = createVersionStatus(options.versions);
 	let url = "";
 	let managementUrl;
@@ -2260,10 +2733,24 @@ async function startLockedHub(config, options) {
 		restart.deadline ??= Date.now() + 21e4;
 		for (const item of handoffs.values()) if (item.restart === restart) item.expires = restart.deadline;
 	};
-	const retire = (generation) => {
+	const retire = (generation, writer) => {
 		activateRestart(generation);
+		const session = sessions.get(generation);
 		sessions.delete(generation);
 		for (const [ws, id] of webSockets) if (id === generation) ws.terminate();
+		if (session && isBoundedGeneration(generation)) {
+			const clear = (transaction) => {
+				const record = boundedRecord(config, session.grant.run_id, boot);
+				if (record.current?.generation === generation) {
+					delete record.current;
+					saveBounded(transaction, record, true);
+				}
+			};
+			try {
+				if (writer) clear(writer);
+				else withStateWriter(config, clear);
+			} catch {}
+		}
 	};
 	const current = (generation) => {
 		const session = sessions.get(generation);
@@ -2289,7 +2776,7 @@ async function startLockedHub(config, options) {
 	};
 	const verified = async (generation) => {
 		const session = current(generation);
-		if (!session || !await proveBackend(session.grant, generation, session.port) || stopped || current(generation) !== session) return void 0;
+		if (!session || !await proof(session.grant, generation, session.port) || stopped || current(generation) !== session) return void 0;
 		return session;
 	};
 	const restartApi = createRestartApi(config, {
@@ -2306,7 +2793,7 @@ async function startLockedHub(config, options) {
 				item.restart = void 0;
 				item.successor = item.from;
 				item.expires = Infinity;
-				item.client.send(JSON.stringify({
+				sendControl(item.client, JSON.stringify({
 					type: "event",
 					event: "hub_route",
 					payload: {
@@ -2348,7 +2835,7 @@ async function startLockedHub(config, options) {
 				item.restart = restart;
 				item.expires = Infinity;
 				if (!item.client) activateRestart(receipt.generation);
-				if (item.client?.readyState === WebSocket.OPEN) item.client.send(JSON.stringify({
+				if (item.client?.readyState === WebSocket.OPEN) sendControl(item.client, JSON.stringify({
 					type: "event",
 					event: "hub_route",
 					payload: {
@@ -2364,70 +2851,154 @@ async function startLockedHub(config, options) {
 		}
 	});
 	const register = async (value) => {
-		if (stopped || typeof value.run_id !== "string" || typeof value.generation !== "string" || !/^[0-9a-f]{32}$/.test(value.generation)) throw new Error("Registration rejected");
-		const grant = readGrant(config, value.run_id);
-		if (grant.revoked || !equal(value.token, grant.token)) throw new Error("Registration rejected");
-		const generation = value.generation;
-		const session = current(generation);
-		const ledger = path.join(config.stateDir, "generations", `${generation}.json`);
-		const owner = existsSync(ledger) ? readPrivateJson(ledger) : void 0;
-		if (value.action === "unregister") {
-			if (session && session.grant.run_id !== grant.run_id || owner && owner.run_id !== grant.run_id) throw new Error("Registration rejected");
-			writeFileSync(ledger, JSON.stringify({
+		const authenticate = () => {
+			if (stopped || typeof value.run_id !== "string") throw new RegistryError("AUTH_FAILED");
+			const grant = readGrant(config, value.run_id);
+			if (grant.revoked || !equal(value.token, grant.token)) throw new RegistryError("AUTH_FAILED");
+			return grant;
+		};
+		if (value.action === "registry_negotiate") return withStateWriter(config, () => {
+			const grant = authenticate();
+			if (typeof value.nonce !== "string" || !/^[a-f0-9]{32}$/.test(value.nonce) || typeof value.protocol !== "string" || !/^[a-z0-9-]{1,64}$/.test(value.protocol)) throw new RegistryError("PROTOCOL_REJECTED");
+			if (value.protocol !== "bounded-v2") {
+				const legacy = hasBoundedRecord(config, grant.run_id) ? void 0 : "legacy-v1";
+				return {
+					unsupported: true,
+					protocol: value.protocol,
+					nonce: value.nonce,
+					...legacy ? { legacy } : {},
+					proof: mac(grant.token, `${value.nonce}:${value.protocol}:UNSUPPORTED_PROTOCOL:${legacy ?? ""}`)
+				};
+			}
+			const record = boundedRecord(config, grant.run_id, boot);
+			return {
+				protocol: BOUNDED_PROTOCOL,
+				nonce: value.nonce,
 				boot,
-				run_id: grant.run_id,
-				retired: true
-			}), {
-				flag: owner ? "w" : "wx",
-				mode: 384
-			});
-			retire(generation);
+				slot: record.slot,
+				proof: mac(grant.token, `${value.nonce}:${BOUNDED_PROTOCOL}:${boot}:${record.slot}`)
+			};
+		});
+		const bounded = [
+			"bounded_issue",
+			"bounded_register",
+			"bounded_unregister"
+		].includes(String(value.action));
+		if (bounded ? value.protocol !== "bounded-v2" || value.boot !== boot : value.protocol !== void 0) throw new RegistryError("PROTOCOL_REJECTED");
+		if (value.action === "bounded_issue") return withStateWriter(config, (writer) => {
+			const grant = authenticate();
+			writer.assertAdmission();
+			return issueBounded(writer, boundedRecord(config, grant.run_id, boot), value, (generation) => !!current(generation));
+		});
+		if (typeof value.generation !== "string" || !(bounded ? isBoundedGeneration(value.generation) : /^[a-f0-9]{32}$/.test(value.generation))) throw new RegistryError("PROTOCOL_REJECTED");
+		const generation = value.generation;
+		const ledger = path.join(config.stateDir, "generations", `${generation}.json`);
+		const readOwner = () => existsSync(ledger) ? readPrivateJson(ledger) : void 0;
+		if (value.action === "unregister" || value.action === "bounded_unregister") return withStateWriter(config, (writer) => {
+			const grant = authenticate();
+			const session = current(generation);
+			if (bounded) {
+				const record = boundedRecord(config, grant.run_id, boot);
+				let changed = false;
+				for (const key of ["current", "pending"]) if (record[key]?.generation === generation) {
+					delete record[key];
+					changed = true;
+				}
+				if (changed) saveBounded(writer, record, true);
+			} else {
+				if (hasBoundedRecord(config, grant.run_id)) throw new RegistryError("PROTOCOL_REJECTED");
+				const owner = readOwner();
+				if (session && session.grant.run_id !== grant.run_id || owner && owner.run_id !== grant.run_id) throw new RegistryError("AUTH_FAILED");
+				if (!owner || session && !owner.retired) writer.write(`generations/${generation}.json`, {
+					boot,
+					run_id: grant.run_id,
+					retired: true
+				}, {
+					exclusive: !owner,
+					security: !!owner
+				});
+			}
+			if (session?.grant.run_id === grant.run_id) retire(generation, writer);
 			return {};
-		}
-		if (value.action !== "register" || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new Error("Registration rejected");
+		});
+		if (value.action !== "register" && value.action !== "bounded_register" || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new RegistryError("PROTOCOL_REJECTED");
 		if (value.sessionName !== void 0 && value.sessionName !== null && (typeof value.sessionName !== "string" || value.sessionName.length > 256)) throw new Error("Registration rejected");
 		const sessionName = typeof value.sessionName === "string" ? value.sessionName.replace(/\p{Cc}/gu, " ").trim() || null : null;
 		const runtime = value.runtime === void 0 ? void 0 : readRuntimeMetadata(value.runtime);
 		const software = value.software === void 0 ? void 0 : readSoftwareMetadata(value.software);
 		const port = Number(value.port);
-		if (owner) {
-			if (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port) throw new Error("ended generation");
-		}
-		if (!await proveBackend(grant, generation, port) || stopped) throw new Error("Registration rejected");
-		const latestGrant = readGrant(config, grant.run_id);
-		if (latestGrant.revoked || latestGrant.token !== grant.token || latestGrant.backendHost !== grant.backendHost) throw new Error("Registration rejected");
-		if (session && current(generation) !== session) throw new Error("ended generation");
-		if (!existsSync(ledger)) writeFileSync(ledger, JSON.stringify({
-			boot,
-			run_id: grant.run_id
-		}), {
-			flag: "wx",
-			mode: 384
+		const prepared = withStateWriter(config, (writer) => {
+			const grant = authenticate();
+			writer.assertAdmission();
+			const session = current(generation);
+			if (bounded) {
+				const record = boundedRecord(config, grant.run_id, boot);
+				boundedTuple(record, generation, port, !!session);
+				return {
+					grant,
+					session,
+					revision: record.revision,
+					owner: void 0
+				};
+			}
+			if (hasBoundedRecord(config, grant.run_id)) throw new RegistryError("PROTOCOL_REJECTED");
+			const owner = readOwner();
+			if (owner && (owner.retired || owner.boot !== boot || owner.run_id !== grant.run_id || !session || session.port !== port)) throw new RegistryError();
+			return {
+				grant,
+				session,
+				revision: void 0,
+				owner: JSON.stringify(owner)
+			};
 		});
-		for (const other of sessions.values()) if (other.grant.run_id === grant.run_id && other.generation !== generation) retire(other.generation);
-		if (session) {
-			session.expires = Date.now() + config.leaseMs;
-			session.sessionName = sessionName;
-			session.runtime = runtime;
-			session.software = software;
-		} else sessions.set(generation, {
-			grant,
-			generation,
-			port,
-			expires: Date.now() + config.leaseMs,
-			since: Date.now(),
-			sessionName,
-			runtime,
-			software
+		const { grant, session } = prepared;
+		if (!await proof(grant, generation, port) || stopped) throw new RegistryError("PROOF_FAILED");
+		return withStateWriter(config, (writer) => {
+			const latestGrant = authenticate();
+			writer.assertAdmission();
+			if (latestGrant.token !== grant.token || latestGrant.backendHost !== grant.backendHost) throw new RegistryError("AUTH_FAILED");
+			if (session && current(generation) !== session) throw new RegistryError();
+			if (bounded) {
+				const record = boundedRecord(config, grant.run_id, boot);
+				if (record.revision !== prepared.revision) throw new RegistryError();
+				if (boundedTuple(record, generation, port, !!session && current(generation) === session) === "pending") {
+					record.current = record.pending;
+					delete record.pending;
+				}
+				record.current.expires = Date.now() + config.leaseMs;
+				saveBounded(writer, record);
+			} else {
+				if (hasBoundedRecord(config, grant.run_id) || JSON.stringify(readOwner()) !== prepared.owner) throw new RegistryError();
+				if (!readOwner()) writer.write(`generations/${generation}.json`, {
+					boot,
+					run_id: grant.run_id
+				}, { exclusive: true });
+			}
+			for (const other of sessions.values()) if (other.grant.run_id === grant.run_id && other.generation !== generation) retire(other.generation, writer);
+			if (session) {
+				session.expires = Date.now() + config.leaseMs;
+				session.sessionName = sessionName;
+				session.runtime = runtime;
+				session.software = software;
+			} else sessions.set(generation, {
+				grant,
+				generation,
+				port,
+				expires: Date.now() + config.leaseMs,
+				since: Date.now(),
+				sessionName,
+				runtime,
+				software
+			});
+			pruneHandoffs();
+			if (!session) {
+				for (const item of handoffs.values()) if (!item.restart && item.grant.run_id === grant.run_id && item.from !== generation && !item.successor) item.successor = generation;
+			}
+			return { url: `${config.publicUrl ?? url}s/${generation}/` };
 		});
-		pruneHandoffs();
-		if (!session) {
-			for (const item of handoffs.values()) if (!item.restart && item.grant.run_id === grant.run_id && item.from !== generation && !item.successor) item.successor = generation;
-		}
-		return { url: `${config.publicUrl ?? url}s/${generation}/` };
 	};
 	const registry = net.createServer((socket) => {
-		if (peers.size >= 128) {
+		if (peers.size >= HUB_LIMITS.registrationPeers) {
 			socket.destroy();
 			return;
 		}
@@ -2440,23 +3011,24 @@ async function startLockedHub(config, options) {
 			clearTimeout(timer);
 			peers.delete(socket);
 		});
-		const reply = (ok, result, error = "Registration rejected") => {
+		const reply = (ok, result, error = "Registration rejected", code) => {
 			if (!socket.destroyed) socket.end(`${JSON.stringify(ok ? {
 				ok,
 				result
 			} : {
 				ok,
-				error
+				error,
+				...code ? { code } : {}
 			})}\n`);
 		};
 		socket.on("data", (chunk) => {
 			if (received) return;
-			data = Buffer.concat([data, chunk]);
-			if (data.length > 8192) {
+			if (data.length + chunk.length > 8192) {
 				received = true;
 				reply(false);
 				return;
 			}
+			data = Buffer.concat([data, chunk]);
 			const end = data.indexOf(10);
 			if (end < 0) return;
 			received = true;
@@ -2468,13 +3040,30 @@ async function startLockedHub(config, options) {
 				reply(false);
 				return;
 			}
+			data = Buffer.alloc(0);
+			if (admittedRegistrations >= HUB_LIMITS.registrationOperations) {
+				reply(false, void 0, "Registration rejected", "HUB_BUSY");
+				return;
+			}
+			admittedRegistrations++;
 			pending = pending.then(async () => {
 				if (socket.destroyed) return;
 				try {
-					reply(true, await register(value));
+					const result = await register(value);
+					if ("unsupported" in result) {
+						const { unsupported: _unsupported, ...details } = result;
+						if (!socket.destroyed) socket.end(`${JSON.stringify({
+							ok: false,
+							error: "Unsupported registration protocol",
+							code: "UNSUPPORTED_PROTOCOL",
+							...details
+						})}\n`);
+					} else reply(true, result);
 				} catch (error) {
-					reply(false, void 0, error instanceof Error && error.message === "ended generation" ? "ended generation" : "Registration rejected");
+					reply(false, void 0, error instanceof Error && error.message === "ended generation" ? "ended generation" : "Registration rejected", error instanceof RegistryError ? error.code : error instanceof StateBudgetError ? "STATE_QUOTA" : void 0);
 				}
+			}).finally(() => {
+				admittedRegistrations--;
 			});
 		});
 	});
@@ -2487,7 +3076,8 @@ async function startLockedHub(config, options) {
 		const origin = request.headers.origin;
 		return hosts.has(request.headers.host ?? "") && request.headers["sec-fetch-site"] !== "cross-site" && (origin === void 0 ? !requireOrigin : allowed.has(origin) && (!admin || new URL(origin).host === request.headers.host));
 	};
-	const matchRoute = (request) => /^\/s\/([a-f0-9]{32})(\/.*)?$/.exec(request.url ?? "");
+	const routePattern = new RegExp(`^/s/(${HUB_GENERATION_SOURCE})(/.*)?$`);
+	const matchRoute = (request) => routePattern.exec(request.url ?? "");
 	const fail = (response, code) => response.writeHead(code, { "Cache-Control": "no-store" }).end();
 	const handle = async (request, response, admin = false) => {
 		try {
@@ -2571,7 +3161,7 @@ async function startLockedHub(config, options) {
 				}
 				const targetGeneration = item.successor ?? item.from;
 				const successor = current(targetGeneration);
-				const proved = successor && await proveBackend(grant, successor.generation, successor.port);
+				const proved = successor && await proof(grant, successor.generation, successor.port);
 				const latestGrant = readGrant(config, grant.run_id);
 				if (stopped || handoffs.get(token) !== item || item.expires <= Date.now() || latestGrant.revoked || !equal(latestGrant.token, grant.token) || latestGrant.backendHost !== grant.backendHost) {
 					handoffs.delete(token);
@@ -2609,7 +3199,7 @@ async function startLockedHub(config, options) {
 					}).end();
 					return;
 				}
-				if (!await proveBackend(session.grant, session.generation, session.port)) {
+				if (!await proof(session.grant, session.generation, session.port)) {
 					retire(session.generation);
 					fail(response, 410);
 					return;
@@ -2683,14 +3273,18 @@ async function startLockedHub(config, options) {
 				"Referrer-Policy": "no-referrer",
 				"Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
 			}).end(request.method === "HEAD" ? void 0 : asset[1]);
-		} catch {
-			if (!response.headersSent) fail(response, 500);
+		} catch (error) {
+			if (!response.headersSent) fail(response, error instanceof RegistryError && error.code === "HUB_BUSY" ? 503 : 500);
 			else response.destroy();
 		}
 	};
 	const server = http.createServer((request, response) => void handle(request, response));
 	const managementServer = config.management ? http.createServer((request, response) => void handle(request, response, true)) : void 0;
 	managementServer?.on("connection", (socket) => {
+		if (connections.size >= HUB_LIMITS.connections) {
+			socket.destroy();
+			return;
+		}
 		connections.add(socket);
 		socket.on("error", () => socket.destroy());
 		socket.once("close", () => connections.delete(socket));
@@ -2700,13 +3294,13 @@ async function startLockedHub(config, options) {
 	managementServer?.on("connect", (_request, socket) => socket.destroy());
 	const wss = new WebSocketServer({
 		noServer: true,
-		maxPayload: 16 * 1024 * 1024,
+		maxPayload: HUB_LIMITS.inFlightBytes,
 		perMessageDeflate: {
 			serverNoContextTakeover: true,
 			clientNoContextTakeover: true,
 			serverMaxWindowBits: 12,
 			clientMaxWindowBits: 12,
-			concurrencyLimit: 4,
+			concurrencyLimit: HUB_LIMITS.websocketCompression,
 			threshold: 1024,
 			zlibDeflateOptions: {
 				level: 3,
@@ -2715,6 +3309,10 @@ async function startLockedHub(config, options) {
 		}
 	});
 	server.on("connection", (socket) => {
+		if (connections.size >= HUB_LIMITS.connections) {
+			socket.destroy();
+			return;
+		}
 		connections.add(socket);
 		socket.on("error", () => socket.destroy());
 		socket.once("close", () => connections.delete(socket));
@@ -2725,18 +3323,42 @@ async function startLockedHub(config, options) {
 		socket.once("close", () => clearTimeout(timer));
 		socket.end(`HTTP/1.1 ${code} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, () => socket.destroy());
 	};
+	let browserAdmissions = 0;
 	server.on("upgrade", async (request, socket, head) => {
+		let reserved = false;
+		let upgradePending = true;
+		let browserClosed = false;
+		let upstreamSocket;
+		let upstreamClosed = false;
+		const release = () => {
+			if (reserved && !upgradePending && browserClosed && (!upstreamSocket || upstreamClosed)) {
+				reserved = false;
+				browserAdmissions--;
+			}
+		};
 		try {
 			if (!allowedBrowser(request, true)) {
 				rejectUpgrade(socket, 403);
 				return;
 			}
-			const route = matchRoute(request);
-			const session = route && route[2] === "/ws" ? current(route[1]) : void 0;
-			if (!session || !await proveBackend(session.grant, session.generation, session.port) || stopped || current(session.generation) !== session) {
-				rejectUpgrade(socket, 410);
+			if (browserAdmissions >= HUB_LIMITS.browserPairs) {
+				rejectUpgrade(socket, 503);
 				return;
 			}
+			browserAdmissions++;
+			reserved = true;
+			socket.once("close", () => {
+				browserClosed = true;
+				upstreamSocket?.terminate();
+				release();
+			});
+			const route = matchRoute(request);
+			const session = route && route[2] === "/ws" ? current(route[1]) : void 0;
+			if (!session || !await proof(session.grant, session.generation, session.port) || stopped || current(session.generation) !== session) {
+				if (!socket.destroyed) rejectUpgrade(socket, 410);
+				return;
+			}
+			if (browserClosed || socket.destroyed || !reserved) return;
 			const host = net.isIP(session.grant.backendHost) === 6 ? `[${session.grant.backendHost}]` : session.grant.backendHost;
 			const headers = backendHeaders(request, session);
 			delete headers["sec-websocket-extensions"];
@@ -2744,15 +3366,19 @@ async function startLockedHub(config, options) {
 				headers,
 				perMessageDeflate: false,
 				handshakeTimeout: 3e3,
-				maxPayload: 16 * 1024 * 1024
+				maxPayload: HUB_LIMITS.inFlightBytes
 			});
+			upstreamSocket = upstream;
 			webSockets.set(upstream, session.generation);
-			socket.once("close", () => upstream.terminate());
 			const handshakeError = () => {
 				if (!socket.destroyed) rejectUpgrade(socket, 502);
 			};
 			upstream.once("error", handshakeError);
-			upstream.once("close", () => webSockets.delete(upstream));
+			upstream.once("close", () => {
+				upstreamClosed = true;
+				webSockets.delete(upstream);
+				release();
+			});
 			upstream.once("open", () => {
 				upstream.removeListener("error", handshakeError);
 				upstream.on("error", () => socket.destroy());
@@ -2764,23 +3390,36 @@ async function startLockedHub(config, options) {
 				if (!boundedDeflateOffer(request.headers["sec-websocket-extensions"])) delete request.headers["sec-websocket-extensions"];
 				wss.handleUpgrade(request, socket, head, (client) => {
 					webSockets.set(client, session.generation);
+					let slowClosing = false;
+					const slowPair = () => {
+						if (slowClosing) return;
+						slowClosing = true;
+						for (const peer of [client, upstream]) {
+							if (peer.readyState === WebSocket.OPEN) peer.close(1013, "Slow consumer; reconnect");
+							const timer = setTimeout(() => peer.terminate(), 250);
+							timer.unref();
+							peer.once("close", () => clearTimeout(timer));
+						}
+					};
+					const clientQueue = new ForwardQueue(client, slowPair);
+					const upstreamQueue = new ForwardQueue(upstream, slowPair);
+					outbound.set(client, clientQueue);
 					const forward = (from, to) => {
+						const queue = to === client ? clientQueue : upstreamQueue;
 						from.on("message", (data, binary) => {
+							if (slowClosing) return;
 							if (from === upstream && !binary) try {
 								const value = JSON.parse(data.toString());
 								if (value?.type === "event" && value.event === "hub_route") return;
 							} catch {}
-							if (to.readyState !== WebSocket.OPEN) return;
-							if (to.bufferedAmount > 8 * 1024 * 1024) {
-								from.terminate();
-								to.terminate();
-								return;
-							}
-							to.send(data, { binary });
+							if (!queue.enqueue(data, binary)) slowPair();
 						});
 						from.once("close", () => {
 							webSockets.delete(from);
-							to.terminate();
+							outbound.delete(from);
+							clientQueue.dispose();
+							upstreamQueue.dispose();
+							if (!slowClosing) to.terminate();
 						});
 						from.on("error", () => to.terminate());
 					};
@@ -2804,7 +3443,7 @@ async function startLockedHub(config, options) {
 							activateRestart(item.from);
 							item.expires = item.restart?.deadline ?? Date.now() + 45e3;
 						});
-						client.send(JSON.stringify({
+						sendControl(client, JSON.stringify({
 							type: "event",
 							event: "hub_route",
 							payload: {
@@ -2820,7 +3459,11 @@ async function startLockedHub(config, options) {
 				});
 			});
 		} catch {
-			rejectUpgrade(socket, 502);
+			upstreamSocket?.terminate();
+			if (!socket.destroyed) rejectUpgrade(socket, 502);
+		} finally {
+			upgradePending = false;
+			release();
 		}
 	});
 	server.on("clientError", (_error, socket) => socket.destroy());

@@ -1,5 +1,25 @@
 # Pi Web UI 开发日志
 
+## 2026-10-20 · 有界 Hub 状态：集成、随包构建与视觉证据
+
+- 四个新扩展模块纳入固定 source manifest 和合成 fixture；红→绿验证后重建
+  tracked browser/Hub dist。新客户端通过 packaged Hub 使用 `b2-boot-slot-nonce`，
+  没有放宽旧 Hub fail-closed 边界，run/operation ID 仍严格 32hex。
+- 强化真实 Pi 的完整 UTF-8 历史/详情信封、所有旧页进度、日期替换、错误作用域/
+  游标与实际分支切换断言。20 MiB 临时 JSONL 读取前后哈希一致；代表性最大
+  历史信封41,093 bytes、详情65,523 bytes，均包括信封开销。
+- Playwright Chromium（无可调用内置 Browser 的明确回退）经真实 Pi/packaged Hub
+  捕获1440×1000和390×844截图，包括工具行淘汰后系统预览按钮、下一块替换、
+  分支清理旧详情和旧日期窗口。实现者检查实际图片，主控独立检查12张核心图片。
+  记录系统预览提示重复及既有鲸鱼局部遮挡普通文字的轻微问题，不宣称全局零遮挡。
+- 保留8 MiB逻辑配额、512 active grants、512 KiB等待加单条16 MiB在途、八个浏览器
+  配对而非Pi进程限制；没有自动删除旧墓碑/grant/回执、没有主机变更或部署。
+  文档同步Hub优先/全写入器升级、保守export计费、可信锁恢复和2 MiB×3日志建议。
+- 集成测试适配Pi SDK安装的Undici dispatcher；只改测试HTTP客户端，不改上传协议
+  或依赖。Hub portal不变卡片测试先等待初次版本检查终态，再检查响应不变、DOM
+  身份和焦点，避免把实际版本状态变化误当“不变轮询”。完整证据及限制见
+  [bounded Hub validation](validation/bounded-hub-state.md)。
+
 ## 2026-10-20 · Hub 隧道前压缩与私有静态缓存
 
 - 实测本机主脚本44ms、远端隧道约30.4s，列表/HTML约38–56ms，定位为资源传输瓶颈；

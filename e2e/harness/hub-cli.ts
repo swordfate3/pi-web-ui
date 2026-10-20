@@ -59,7 +59,11 @@ export async function startHubCli(options: { repositoryRoot: string; runtimeDir?
       maxBuffer: 64 * 1024,
     });
     // Never include stdout/stderr or raw parsing errors: a regressed CLI could print a capability token.
-    if (result.error || result.status !== 0) throw new Error(`Hub CLI ${args[0]} failed`);
+    if (result.error || result.status !== 0) {
+      // Whitelist only a fixed non-secret diagnostic; never echo child output.
+      const reason = result.stderr?.includes("Hub state lock busy") ? ": state writer lock busy" : "";
+      throw new Error(`Hub CLI ${args[0]} failed${reason}`);
+    }
     return result;
   }
 

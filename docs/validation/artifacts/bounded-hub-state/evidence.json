@@ -1,0 +1,89 @@
+{
+  "method": "Playwright Chromium fallback; real Pi + packaged Hub",
+  "evidence": [
+    {
+      "url": "http://127.0.0.1:46327/s/b2-0f4631b0849bcff5ed315828e0186627-0000000000000001-114ca7cb206e4038d60621d31f103294/",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fixture": "20MiB-history",
+      "pageErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-hub-state/history-1440-preview.png",
+        "docs/validation/artifacts/bounded-hub-state/history-1440-detail-first.png",
+        "docs/validation/artifacts/bounded-hub-state/history-1440-detail-next.png",
+        "docs/validation/artifacts/bounded-hub-state/history-1440-scope-reset.png",
+        "docs/validation/artifacts/bounded-hub-state/history-1440-old-date.png"
+      ],
+      "detailRequests": 2,
+      "firstTextBytes": 65145,
+      "nextTextBytes": 65145,
+      "jsonlHashBefore": "450037bdebd84bb863c8b34778c2c28ab795b9fd97624be623ca123e08b92341",
+      "jsonlHashAfter": "450037bdebd84bb863c8b34778c2c28ab795b9fd97624be623ca123e08b92341"
+    },
+    {
+      "url": "http://127.0.0.1:46269/s/b2-8295ee08b5069509893d5cfaf14b8889-0000000000000001-acf0f376e584db94a740ac7670539c25/",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "fixture": "20MiB-history",
+      "pageErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-hub-state/history-390-preview.png",
+        "docs/validation/artifacts/bounded-hub-state/history-390-detail-first.png",
+        "docs/validation/artifacts/bounded-hub-state/history-390-detail-next.png",
+        "docs/validation/artifacts/bounded-hub-state/history-390-scope-reset.png",
+        "docs/validation/artifacts/bounded-hub-state/history-390-old-date.png"
+      ],
+      "detailRequests": 2,
+      "firstTextBytes": 65145,
+      "nextTextBytes": 65145,
+      "jsonlHashBefore": "1ef984ec76db847122a2c56f4959a80f30efcd9692e7dff20c6bcad061c78faf",
+      "jsonlHashAfter": "1ef984ec76db847122a2c56f4959a80f30efcd9692e7dff20c6bcad061c78faf"
+    },
+    {
+      "url": "http://127.0.0.1:44897/s/b2-ebe28438e22c1680408f919c2be3fe46-0000000000000001-ad4dc944efa29afe68baede9546cec86/",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "fixture": "tool-eviction",
+      "pageErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-preview.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-detail-first.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-detail-next.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-scope-reset.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-1440-old-date.png"
+      ],
+      "detailRequests": 2,
+      "firstTextBytes": 58621,
+      "nextTextBytes": 58619,
+      "jsonlHashBefore": "90cd1c6258396a72937bf2a4dda3c5fd1b8663248175e49e5a026b4c06e63f09",
+      "jsonlHashAfter": "90cd1c6258396a72937bf2a4dda3c5fd1b8663248175e49e5a026b4c06e63f09"
+    },
+    {
+      "url": "http://127.0.0.1:45399/s/b2-6ac1df605cb718942d2be983ec8f2e66-0000000000000001-db6a5b9d3fffb9c79da719254c14a712/",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "fixture": "tool-eviction",
+      "pageErrors": [],
+      "screenshots": [
+        "docs/validation/artifacts/bounded-hub-state/tools-390-preview.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-390-detail-first.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-390-detail-next.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-390-scope-reset.png",
+        "docs/validation/artifacts/bounded-hub-state/tools-390-old-date.png"
+      ],
+      "detailRequests": 2,
+      "firstTextBytes": 58621,
+      "nextTextBytes": 58619,
+      "jsonlHashBefore": "1063550ec5f7c02166e54135f176e1ff269458b986064110ef2891e2c5e9316c",
+      "jsonlHashAfter": "1063550ec5f7c02166e54135f176e1ff269458b986064110ef2891e2c5e9316c"
+    }
+  ]
+}

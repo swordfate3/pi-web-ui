@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { chromium } from "@playwright/test";
+import { isHubSessionPath } from "../../extensions/hub-generation.ts";
 
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
@@ -69,7 +70,7 @@ try {
       `Synthetic restart did not restore: ${(await admin.locator(".restart-result").allTextContents()).join(" ").slice(0, 1200)}`,
     );
   }
-  await chat.waitForURL((url) => url.href !== previousUrl && /^\/s\/[a-f0-9]{32}\/$/.test(url.pathname), {
+  await chat.waitForURL((url) => url.href !== previousUrl && isHubSessionPath(url.pathname), {
     timeout: 45_000,
   });
   await chat.getByText("Synthetic saved reply", { exact: true }).waitFor();

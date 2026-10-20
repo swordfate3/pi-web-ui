@@ -12,6 +12,7 @@ import {
   writeSync,
 } from "node:fs";
 import http from "node:http";
+import { createRequire } from "node:module";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,6 +29,12 @@ import {
 import WebSocket from "ws";
 import { startHubCli } from "./harness/hub-cli.ts";
 import { type PiWebUiHarness, startPiWebUi } from "./harness/pi-process.ts";
+
+// Importing the real SDK installs its Undici dispatcher. Node 22's bundled
+// fetch is incompatible with that dispatcher's zero-length PUT headers; use
+// the same installed implementation (no extra dependency or protocol change).
+const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+const fetch: typeof globalThis.fetch = piRequire("undici").fetch;
 
 type Prepared = { uploadId: string; url: string; relativePath: string; maxBytes: number };
 type PreparedV2 = Prepared & {

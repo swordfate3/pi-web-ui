@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { selectSessionHistory } from "../extensions/session-history.ts";
+import { readEntryDetail, selectSessionHistory } from "../extensions/session-history.ts";
+import { syncToItems } from "../src/web/src/core/chat-conversion.ts";
 import { entryDetailTargets } from "../src/web/src/core/conversation-window.ts";
 import { dispatchPiEvent } from "../src/web/src/core/store/event-dispatch.ts";
 import { createSessionSlice } from "../src/web/src/core/store/session-slice.ts";
@@ -210,14 +211,15 @@ test("partial invocation keeps omitted result entries inspectable without changi
   const { state, requests } = historyStore(entries);
   await state.loadHistory(range);
   const boundary = state.items[0];
-  assert.equal(boundary.id, "call-1-9");
+  assert.equal(boundary.id, "call-1-10");
   assert.equal(boundary.entryId, "entry-1");
-  assert.deepEqual(boundary.relatedEntryIds, ["entry-1"], "do not associate tool 0's result with tool 9");
-  assert.deepEqual(
-    entryDetailTargets(boundary),
-    ["entry-1", "result-1"],
-    "result-1 is newer than the older-page cursor and needs explicit detail access",
-  );
+  assert.deepEqual(boundary.relatedEntryIds, ["entry-1"], "do not associate tool 0's result with tool 10");
+  assert.deepEqual(entryDetailTargets(boundary), ["entry-1"]);
+  const resultPreview = state.items.find((item) => item.entryId === "result-1");
+  assert.ok(resultPreview, "result-1 is newer than the older-page cursor and needs explicit detail access");
+  assert.equal(resultPreview.kind, "system", "detail placeholder has no tool or message actions");
+  assert.deepEqual(entryDetailTargets(resultPreview), ["result-1"]);
+  assert.equal(resultPreview.relatedEntryIds, undefined);
   assert.equal(state.history?.nextBefore, "entry-1");
   assert.equal(state.history?.returned, 38);
   assert.equal(state.history?.truncatedEntries, 2);
@@ -231,6 +233,99 @@ test("partial invocation keeps omitted result entries inspectable without changi
   assert.equal(state.history?.nextBefore, null);
   assert.equal(state.items.length, 11);
   assert.equal(state.items[0].entryId, "entry-0");
+  assert.equal(JSON.stringify(entries), original);
+});
+
+test("escape-heavy omitted result identities cannot evict the whole snapshot or lose detail reachability", async (t) => {
+  const entries: SessionEntry[] = [
+    {
+      id: "assistant",
+      type: "message",
+      timestamp: new Date(range.from).toISOString(),
+      message: {
+        role: "assistant",
+        content: Array.from({ length: 240 }, (_, i) => ({ type: "toolCall", id: `t${i}` })),
+      },
+    },
+    ...Array.from(
+      { length: 39 },
+      (_, i): SessionEntry => ({
+        id: `${"\u0001".repeat(500)}${i}`,
+        type: "message",
+        timestamp: new Date(range.from + i + 1).toISOString(),
+        message: { role: "toolResult", toolCallId: `t${i}`, content: `result ${i}` },
+      }),
+    ),
+  ];
+  const original = JSON.stringify(entries);
+  const page = selectSessionHistory(entries, [], range);
+  assert.equal(page.entries.length, 40);
+  assert.equal(page.history.nextBefore, null);
+  assert.ok(Buffer.byteLength(JSON.stringify(page.entries)) <= 192 * 1024);
+  for (const entry of page.entries) {
+    assert.ok(entry.id && entry.id.length <= 512);
+    assert.ok(Buffer.byteLength(JSON.stringify(entry)) <= 16 * 1024);
+  }
+  assert.equal(syncToItems(page.entries as SessionEntry[], () => "unused").length, 240);
+  const { state, requests } = historyStore(entries);
+  await state.loadHistory(range);
+  t.diagnostic(
+    `server entries=${page.entries.length}, bytes=${Buffer.byteLength(JSON.stringify(page.entries))}; retained rows=${state.items.length}, bytes=${Buffer.byteLength(JSON.stringify(state.items))}, returned=${state.history?.returned}, truncated=${state.history?.truncatedEntries}, cursor=${state.history?.nextBefore}`,
+  );
+  assert.ok(state.items.length > 0, "valid omitted IDs must not evict every row");
+  assert.ok(
+    state.items.some((item) => item.kind === "tool"),
+    "retain actual conversation content as well as previews",
+  );
+  assert.ok(state.items.length <= 200);
+  assert.ok(Buffer.byteLength(JSON.stringify(state.items)) <= 512 * 1024);
+  for (const item of state.items) assert.ok(Buffer.byteLength(JSON.stringify(item)) <= 64 * 1024);
+  assert.equal(new Set(state.items.map((item) => item.id)).size, state.items.length);
+  const targets = new Set(state.items.flatMap(entryDetailTargets));
+  assert.deepEqual(
+    targets,
+    new Set(entries.map((entry) => entry.id)),
+    "every omitted entry keeps its exact detail target",
+  );
+  assert.equal(state.history?.returned, 40);
+  assert.equal(state.history?.truncatedEntries, 40);
+  assert.equal(state.history?.nextBefore, null);
+  assert.deepEqual(state.historyRange, range);
+  assert.equal(requests.length, 1, "no automatic detail or older-page fetch");
+  for (const item of state.items) {
+    if (item.kind === "tool")
+      assert.deepEqual(item.relatedEntryIds, ["assistant"], "do not attach another tool's result");
+    else {
+      assert.equal(item.kind, "system", "omission previews do not expose message/tool actions");
+      assert.equal(item.historyPreview, true);
+      assert.deepEqual(entryDetailTargets(item), [item.entryId]);
+    }
+  }
+  let reads = 0;
+  for (const entryId of targets) {
+    state.send = async (method, params) => {
+      reads++;
+      assert.equal(method, "get_entry_detail");
+      assert.deepEqual(params, { sessionId: "s", runtimeId: "r", entryId });
+      const detail = readEntryDetail(
+        entries,
+        { sessionId: "s", runtimeId: "r", leafId: entries.at(-1)?.id ?? null },
+        params as Record<string, unknown>,
+        "detail",
+      );
+      assert.ok(
+        Buffer.byteLength(JSON.stringify({ type: "res", id: "detail", ok: true, result: detail })) <= 64 * 1024,
+      );
+      return detail;
+    };
+    await state.loadEntryDetail(entryId);
+    assert.equal(state.entryDetailError, null);
+    assert.equal(state.entryDetail?.entryId, entryId);
+    assert.ok(state.entryDetail?.text);
+  }
+  assert.equal(reads, 40);
+  state.toggleAllTools(true);
+  assert.deepEqual(new Set(state.items.flatMap(entryDetailTargets)), targets);
   assert.equal(JSON.stringify(entries), original);
 });
 

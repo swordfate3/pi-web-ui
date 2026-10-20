@@ -1,5 +1,6 @@
 import { boundedJson, jsonTextPrefix } from "../../../../extensions/bounded-json";
 import type { ChatItem, HistoryMetadata, SessionEntry, WorkspaceArtifact } from "./types";
+import { uiText } from "./ui-text";
 
 const ITEM_BYTES = 64 * 1024;
 const WINDOW_BYTES = 512 * 1024;
@@ -9,11 +10,7 @@ const prefix = (value: unknown, budget = 8192) => (typeof value === "string" ? j
 
 export function entryDetailTargets(item: ChatItem): string[] {
   if (!item.historyPreview) return [];
-  return [
-    ...new Set(
-      [item.entryId, item.detailEntryId, ...(item.omittedEntryIds ?? [])].filter((id): id is string => Boolean(id)),
-    ),
-  ];
+  return [...new Set([item.entryId, item.detailEntryId].filter((id): id is string => Boolean(id)))];
 }
 
 function boundedItem(source: ChatItem) {
@@ -28,7 +25,6 @@ function boundedItem(source: ChatItem) {
       id: source.id,
       entryId: source.entryId,
       detailEntryId: source.detailEntryId,
-      omittedEntryIds: source.omittedEntryIds?.slice(0, 40),
       relatedEntryIds: source.relatedEntryIds?.slice(-4),
       historyPreview: true,
     };
@@ -114,15 +110,17 @@ export function boundHistoryWindow(
       if (row.entryId) ids.add(row.entryId);
       if (row.detailEntryId) ids.add(row.detailEntryId);
       for (const id of row.relatedEntryIds ?? []) ids.add(id);
-      for (const id of row.omittedEntryIds ?? []) ids.add(id);
     }
     return ids;
   };
   const originalIds = identities(items);
-  while (window.items.length < items.length) {
+  const rowIds = new Set<string>();
+  for (const item of items) rowIds.add(item.id);
+  let previewCounter = 0;
+  while (window.limited) {
     const retainedCounts = counts(window.items);
     const marked = new Set<string>();
-    const rows = window.items.map((row) => {
+    const rows: ChatItem[] = window.items.map((row) => {
       const id = row.entryId;
       if (!id || marked.has(id) || retainedCounts.get(id) === originalCounts.get(id)) return row;
       marked.add(id);
@@ -133,22 +131,34 @@ export function boundHistoryWindow(
     const first = entries.findIndex((entry) => entry.id && retainedIds.has(entry.id));
     // A tool result may be newer than its invocation but live on an evicted
     // tool row. It cannot be reached by paging before the retained invocation.
-    // Keep exact detail targets on the boundary, separate from tool associations.
+    // Give each omitted entry its own small, action-safe detail preview. Never
+    // put an entire page's opaque IDs on one row: that list can exceed 64 KiB.
     const omitted = entries.flatMap((entry, index) =>
       index >= first && entry.id && originalIds.has(entry.id) && !retainedIds.has(entry.id) ? [entry.id] : [],
     );
-    if (rows.length && omitted.length) {
-      rows[0] = {
-        ...rows[0],
+    for (const entryId of omitted) {
+      let id: string;
+      do {
+        id = `history-preview-${previewCounter++}`;
+      } while (rowIds.has(id));
+      rowIds.add(id);
+      const preview = boundedItem({
+        kind: "system",
+        id,
+        entryId,
         historyPreview: true,
-        omittedEntryIds: [...(rows[0].omittedEntryIds ?? []), ...omitted],
-        ...(rows[0].kind === "message" ? { copyable: false } : {}),
-      };
+        text: uiText("History preview. Full data remains in the original session."),
+      });
+      // Invalid legacy identities must not create a retry loop either. Valid
+      // page IDs fit individually; an unrepresentable ID is never shortened.
+      if (preview) rows.push(preview.item);
     }
-    // The preview marker itself counts toward both byte budgets. If it evicts
-    // another row, repair that new boundary too; each retry strictly shrinks.
+    // Previews are at the retained tail, so older source rows make room for
+    // them. At most 40 entry IDs from a <=192-KiB page fit comfortably in their
+    // own rows. Recheck the boundary after count/byte eviction or projection.
     const next = boundConversationWindow(rows);
-    const stable = next.items.length === window.items.length;
+    const nextIds = identities(next.items);
+    const stable = next.items.length === rows.length && [...identities(rows)].every((id) => nextIds.has(id));
     window = { ...next, limited: true };
     if (stable) break;
   }

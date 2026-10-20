@@ -48,6 +48,30 @@ test("partial-entry marker bytes are rechecked and a newly evicted boundary rema
   assert.ok(items.every((item) => !item.historyPreview), "never mark the source rows");
 });
 
+test("omitted identities stay reachable when preview rows consume an already full byte window", () => {
+  const omittedIds = Array.from({ length: 39 }, (_, i) => `${"\u0001".repeat(500)}${i}`);
+  const rows: ChatItem[] = Array.from({ length: 10 }, (_, i) => {
+    const row: ChatItem = { kind: "tool", id: `t${i}`, entryId: "entry", name: "read", state: "input-available", input: "" };
+    row.input = "x".repeat((i === 9 ? 52425 : 52428) - Buffer.byteLength(JSON.stringify(row)));
+    return row;
+  });
+  const items: ChatItem[] = [{ kind: "tool", id: "history-preview-0", entryId: "entry", relatedEntryIds: ["entry", ...omittedIds], name: "read", state: "input-available", input: "old" }, ...rows];
+  const before = JSON.stringify(items);
+  const result = boundHistoryWindow(items, ["entry", ...omittedIds].map((id) => ({ type: "message", id })), {
+    from: 1, to: 2, returned: 40, total: 41, nextBefore: "older-exact-id", truncatedEntries: 0, treeLimited: false,
+  });
+  assert.ok(result.items.some((item) => item.kind === "tool"), "metadata must not evict all source rows");
+  assert.ok(result.items.length <= 200);
+  assert.ok(Buffer.byteLength(JSON.stringify(result.items)) <= 512 * 1024);
+  for (const item of result.items) assert.ok(Buffer.byteLength(JSON.stringify(item)) <= 64 * 1024);
+  assert.equal(new Set(result.items.map((item) => item.id)).size, result.items.length);
+  assert.deepEqual(new Set(result.items.flatMap(entryDetailTargets)), new Set(["entry", ...omittedIds]));
+  assert.equal(result.history?.nextBefore, "older-exact-id");
+  assert.equal(result.history?.returned, 40);
+  assert.equal(result.history?.truncatedEntries, 40);
+  assert.equal(JSON.stringify(items), before);
+});
+
 test("history conversion exposes message/tool previews and exact detail targets", () => {
   const items = syncToItems([
     { type: "message", id: "user", historyPreview: true, message: { role: "user", content: "preview" } },

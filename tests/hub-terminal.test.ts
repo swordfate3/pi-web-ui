@@ -195,7 +195,7 @@ test("terminal uses a third listener and explicitly reports backend unavailable"
   assert.equal(value.authorized, true);
   assert.equal(value.available, false, "pairing must not pretend a terminal exists");
   assert.deepEqual(value.scope, scope);
-  assert.equal((await post("api/terminal/attach", {}, { Cookie: cookie })).status, 404);
+  assert.equal((await post("api/terminal/attach", {}, { Cookie: cookie })).status, 403);
   assert.equal((await post("api/terminal/logout", {}, { Cookie: cookie })).status, 403);
   assert.equal(
     (await post("api/terminal/logout", {}, { Cookie: cookie, "X-Pi-Hub-Terminal-Csrf": value.csrf })).status,
@@ -260,7 +260,6 @@ test("terminal rejects bad Host, missing/cross Origin writes, worker routes and 
     403,
   );
   for (const route of [
-    "/",
     "/sessions/",
     "/hub.js",
     "/sw.js",
@@ -285,7 +284,7 @@ test("unlock has bounded exact JSON request schema and does not echo invalid val
     assert.equal(response.status, 403);
     assert.ok(!(await response.text()).includes("PRIVATE_FIXTURE"));
   }
-  assert.equal((await post("api/terminal/unlock", { code: "x".repeat(2048) })).status, 413);
+  assert.equal((await post("api/terminal/unlock", { code: "x".repeat(4096) })).status, 413);
   assert.equal((await post("api/terminal/unlock", { code })).status, 200);
 });
 
@@ -336,6 +335,34 @@ test("configuration rejects shared ports/origins, HTTP public terminal and unkno
     mode: 0o600,
   });
   assert.equal(readHubConfig(file).terminal?.publicUrl, "https://terminal.example/");
+});
+test("trusted init CLI accepts only a paired private provider socket/token configuration", (t) => {
+  const { dir } = fixture(t);
+  const cli = fileURLToPath(new URL("../bin/pi-web-hub.mjs", import.meta.url));
+  const file = path.join(dir, "provider-hub.json");
+  const result = spawnSync(
+    process.execPath,
+    [
+      cli,
+      "init",
+      "--config",
+      file,
+      "--port",
+      "0",
+      "--terminal-port",
+      "0",
+      "--terminal-provider-socket",
+      path.join(dir, "provider.sock"),
+      "--terminal-provider-credential-file",
+      path.join(dir, "provider.token"),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readHubConfig(file).terminal?.provider, {
+    socketPath: path.join(dir, "provider.sock"),
+    credentialFile: path.join(dir, "provider.token"),
+  });
 });
 
 test("HTTPS terminal cookies use their own __Host name and Secure attribute", (t) => {

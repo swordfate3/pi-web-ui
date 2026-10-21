@@ -59,6 +59,19 @@ type RuntimeJob = {
 };
 
 const taskId = "cd".repeat(16);
+
+test("terminal install outcome tells user to exit and relaunch without claiming process refresh", async () => {
+  const value = job({
+    status: "manual_restart_required",
+    stage: "installed_manual_restart_required",
+    targets: [{ run_id: "a".repeat(32), status: "manual_restart_required", wait_reason: "terminal_profile_unaudited" }],
+  });
+  const f = fixture({ authorized: true, jobs: [value] });
+  await settled();
+  assert.match(f.text("runtime-update-results"), /已安装.*手动.*退出.*重新启动/);
+  assert.doesNotMatch(f.text("runtime-update-results"), /已加载新版本|所有受管 Pi 进程已刷新/);
+  assert.equal(f.get("runtime-update-submit").disabled, false);
+});
 const savedTaskId = "ef".repeat(16);
 
 function job(overrides: Partial<RuntimeJob> = {}): RuntimeJob {

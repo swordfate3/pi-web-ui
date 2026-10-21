@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const DEFAULT_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MANIFEST_NAME = "build-manifest.json";
 const SCHEMA_VERSION = 1;
-const REQUIRED_OUTPUTS = ["index.html", "hub/pi-web-hub.mjs", "runtime/broker.cjs", "runtime/supervisor.py", "runtime/client.py"];
+const REQUIRED_OUTPUTS = ["index.html", "hub/pi-web-hub.mjs", "runtime/broker.cjs", "runtime/supervisor.py", "runtime/client.py", "terminal/index.html", "terminal/app.js", "terminal/app.css"];
 const SOURCE_DIRECTORIES = ["src/web", "public", "hub", "bin"];
 const SOURCE_FILES = [
   "vite.config.ts",

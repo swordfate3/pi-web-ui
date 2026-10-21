@@ -11,6 +11,8 @@ const help = `Pi Web Hub — independent multi-session portal
   pi-web-hub init [--port 16180] [--public-url https://pi.example.com/]
     [--management-port 16181] [--management-public-url https://admin.example.com/]
     [--terminal-port 16182] [--terminal-public-url https://terminal.example.com/]
+    [--terminal-provider-socket /run/pi-terminal-provider/provider.sock]
+    [--terminal-provider-credential-file /run/pi-terminal-credentials/provider.token]
   pi-web-hub serve
   pi-web-hub issue --label "Project A" --output /private/session-a.json [--backend-host 127.0.0.1]
   pi-web-hub revoke --run-id <session-capability-id>
@@ -20,7 +22,12 @@ const help = `Pi Web Hub — independent multi-session portal
     --terminal-epoch <id> --access <read|write>  Generate a scoped terminal code (10 minutes)
   pi-web-hub revoke-terminal          Revoke all browser terminal sessions
 
-Terminal auth is opt-in; terminal backend/PTY is not available in this build.
+Terminal is opt-in and requires a real private Gate provider. Configure a distinct
+public HTTPS hostname, not another port on the chat/admin hostname. Paste the
+terminal code manually into that origin; no automatic attach, retry or renewal.
+Hub UID/GID1000:1000 mounts only dedicated provider IPC/credential volumes read-only;
+no Docker socket on Hub, no provider credential or authority on Pi. Keep cap-drop
+ALL and no-new-privileges; no sudo. Missing input ACK means unknown, never resend.
 
 All commands accept --config <file> (default ~/.pi/web-hub/config.json).
 The hub never launches agents or deploys SSH/TLS/login. See docs/hub.md.
@@ -45,6 +52,8 @@ async function main(args) {
         "--management-public-url",
         "--terminal-port",
         "--terminal-public-url",
+        "--terminal-provider-socket",
+        "--terminal-provider-credential-file",
       ],
     ],
     ["serve", ["--config"]],
@@ -92,6 +101,10 @@ async function main(args) {
       );
     }
     let terminal;
+    const providerSocket = options.get("--terminal-provider-socket");
+    const providerCredential = options.get("--terminal-provider-credential-file");
+    if (Boolean(providerSocket) !== Boolean(providerCredential) || (providerSocket && !options.has("--terminal-port")))
+      throw new Error("Both private provider paths and terminal port are required");
     if (options.has("--terminal-public-url") && !options.has("--terminal-port"))
       throw new Error("Terminal port required");
     if (options.has("--terminal-port")) {
@@ -100,6 +113,7 @@ async function main(args) {
         {
           port: Number(options.get("--terminal-port")),
           ...(options.has("--terminal-public-url") ? { publicUrl: options.get("--terminal-public-url") } : {}),
+          ...(providerSocket ? { provider: { socketPath: providerSocket, credentialFile: providerCredential } } : {}),
         },
         port,
         publicUrl,

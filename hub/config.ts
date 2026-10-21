@@ -5,6 +5,7 @@ import path from "node:path";
 import { validatedPublicUrl } from "../extensions/connection-config.ts";
 import { type LifecycleConfig, lifecycleConfig } from "./lifecycle.ts";
 import { privateStateDirectory, publishCredential, readStateJson, withStateWriter } from "./state-budget.ts";
+import { type TerminalProviderConfig, terminalProviderConfig } from "./terminal-provider.ts";
 
 export type HubConfig = {
   stateDir: string;
@@ -17,7 +18,7 @@ export type HubConfig = {
   lifecycle?: LifecycleConfig;
   runtimeUpdates?: LifecycleConfig;
   management?: { port: number; publicUrl?: string; gateway?: { credentialFile: string } };
-  terminal?: { port: number; publicUrl?: string };
+  terminal?: { port: number; publicUrl?: string; provider?: TerminalProviderConfig };
 };
 export type Grant = {
   run_id: string;
@@ -110,7 +111,7 @@ export function terminalConfig(
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid terminal configuration");
   const v = value as Record<string, unknown>;
   if (
-    Object.keys(v).some((key) => !["port", "publicUrl"].includes(key)) ||
+    Object.keys(v).some((key) => !["port", "publicUrl", "provider"].includes(key)) ||
     !Number.isInteger(v.port) ||
     Number(v.port) < 0 ||
     Number(v.port) > 65535 ||
@@ -124,11 +125,12 @@ export function terminalConfig(
       !publicUrl.startsWith("https:") ||
       new URL(publicUrl).pathname !== "/" ||
       [chatPublicUrl, management?.publicUrl].some(
-        (other) => other && new URL(other).origin === new URL(publicUrl).origin,
+        (other) => other && new URL(other).hostname === new URL(publicUrl).hostname,
       ))
   )
     throw new Error("Terminal requires a distinct canonical HTTPS origin");
-  return { port: Number(v.port), ...(publicUrl ? { publicUrl } : {}) };
+  const provider = v.provider === undefined ? undefined : terminalProviderConfig(v.provider);
+  return { port: Number(v.port), ...(publicUrl ? { publicUrl } : {}), ...(provider ? { provider } : {}) };
 }
 
 export function managementConfig(

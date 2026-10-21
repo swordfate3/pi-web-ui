@@ -11,6 +11,7 @@ import { FileDownloadBoundary } from "./file-message-response";
 import { UserMessageView } from "./user-message-view";
 
 type ChatListProps = {
+  readOnly?: boolean;
   items: ChatItem[];
   highlightedEntryId: string | null;
   onBranch?: (entryId: string) => Promise<void> | void;
@@ -24,7 +25,7 @@ type ChatListProps = {
   onSwitchVersion?: (entryId: string, version: { userEntryId: string; targetEntryId: string | null }) => void;
 };
 
-type ChatRowProps = Omit<ChatListProps, "items" | "highlightedEntryId" | "versions"> & {
+type ChatRowProps = Omit<ChatListProps, "items" | "highlightedEntryId" | "versions" | "readOnly"> & {
   versionGroup?: MessageVersionGroup;
   item: ChatItem;
   highlighted: boolean;
@@ -85,14 +86,24 @@ const ChatRow = memo(function ChatRow({
   );
 });
 
-export const ChatList = memo(function ChatList({ items, highlightedEntryId, versions, ...props }: ChatListProps) {
+export const ChatList = memo(function ChatList({
+  items,
+  highlightedEntryId,
+  versions,
+  readOnly = false,
+  ...props
+}: ChatListProps) {
   // The empty state subscribes here; each message subscribes independently, so memo
   // boundaries never freeze translated UI or translated system/error messages.
   useLanguage();
   if (items.length === 0) {
     return (
       <ConversationEmptyState
-        description={t("Connect to the running Pi session and send a message.")}
+        description={t(
+          readOnly
+            ? "Read-only chat: view history here; send input in the native terminal."
+            : "Connect to the running Pi session and send a message.",
+        )}
         icon={<TerminalIcon className="size-7" />}
         title="Pi Web UI"
       />

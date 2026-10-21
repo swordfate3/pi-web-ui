@@ -81,6 +81,8 @@ async function runtimeOutputs(root) {
   await mkdir(path.join(root, "dist/runtime"), { recursive: true });
   for (const file of ["broker.cjs", "supervisor.py", "client.py"])
     await writeFile(path.join(root, "dist/runtime", file), "runtime fixture\n");
+  await mkdir(path.join(root, "dist/terminal"), { recursive: true });
+  for (const file of ["app.js", "app.css", "index.html"]) await writeFile(path.join(root, "dist/terminal", file), "terminal fixture\n");
 }
 
 async function loadManifest(root) {
@@ -171,7 +173,7 @@ test("creates and verifies deterministic source and output inventories", async (
   );
   assert.deepEqual(
     first.outputs.files.map(({ path: file }) => file),
-    ["assets/app.js", "hub/pi-web-hub.mjs", "index.html", "runtime/broker.cjs", "runtime/client.py", "runtime/supervisor.py"],
+    ["assets/app.js", "hub/pi-web-hub.mjs", "index.html", "runtime/broker.cjs", "runtime/client.py", "runtime/supervisor.py", "terminal/app.css", "terminal/app.js", "terminal/index.html"],
   );
 
   const written = await writeManifest(root);
@@ -225,6 +227,16 @@ test("runtime outputs cannot be removed from an installed package or its manifes
     refreshInventory(manifest.outputs);
     await saveManifest(root, manifest);
     await assert.rejects(verifyManifest(root, { assetsOnly: true }), /outputs must include runtime/);
+  }
+});
+test("independent terminal bundle is mandatory even when an attacker recomputes the manifest", async () => {
+  for (const file of ["terminal/app.js", "terminal/app.css", "terminal/index.html"]) {
+    const root = await fixture(); await writeManifest(root);
+    await rm(path.join(root, "dist", file));
+    const manifest = await loadManifest(root);
+    manifest.outputs.files = manifest.outputs.files.filter((entry) => entry.path !== file);
+    refreshInventory(manifest.outputs); await saveManifest(root, manifest);
+    await assert.rejects(verifyManifest(root, { assetsOnly: true }), /outputs must include terminal/);
   }
 });
 

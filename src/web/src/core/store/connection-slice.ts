@@ -1,3 +1,4 @@
+import { terminalReadOnly } from "../../../../../extensions/terminal-barrier";
 import type { WebConnectionInfo } from "../types";
 import { UiError, uiText } from "../ui-text";
 import type { ConnectionSlice, StoreSlice } from "./types";
@@ -8,10 +9,13 @@ export const createConnectionSlice: StoreSlice<ConnectionSlice> = (set, get) => 
   error: null,
   advancedFeatures: false,
   archAvailable: false,
+  browserInputPolicy: "unknown",
 
   setClient: (client) => set({ client }),
 
   send: async (method, params) => {
+    if (get().browserInputPolicy !== "ordinary" && !terminalReadOnly(method))
+      throw new UiError(uiText("Browser chat is read-only. Use the native terminal."));
     const client = get().client;
     if (!client) throw new UiError(uiText("Pi client is not connected"));
     return client.send(method, params);

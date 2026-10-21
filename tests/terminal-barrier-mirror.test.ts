@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,6 +19,9 @@ test("real mirror rejects startup browser mutations before preflight, SDK and up
   timeout: 20_000,
 }, async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "pi-terminal-mirror-race-"));
+  mkdirSync(path.join(directory, "terminal"));
+  for (const file of ["index.html", "app.js", "app.css"])
+    writeFileSync(path.join(directory, "terminal", file), "terminal-only");
   const probe = net.createServer();
   await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
   const port = (probe.address() as net.AddressInfo).port;
@@ -163,6 +166,14 @@ test("real mirror rejects startup browser mutations before preflight, SDK and up
     }[] = [];
     ws.on("message", (data) => messages.push(JSON.parse(data.toString())));
     await until(() => messages.some((message) => message.event === "state_sync"));
+    const initial = messages.find((message) => message.event === "state_sync") as unknown as {
+      payload: { browserInputPolicy: unknown };
+    };
+    assert.equal(
+      initial.payload.browserInputPolicy,
+      "terminal-readonly",
+      "startup display is independent of successful prepare",
+    );
     return async (method: string, params: object = {}) => {
       const id = String(++sequence);
       ws.send(JSON.stringify({ type: "req", id, method, params }));
@@ -197,6 +208,13 @@ test("real mirror rejects startup browser mutations before preflight, SDK and up
     const start = commands.get("webui-start");
     assert.ok(start);
     await start.handler("", context());
+    for (const route of ["/terminal/index.html", "/terminal/app.js", "/terminal/app.css", "//terminal/app.js"]) {
+      assert.equal(
+        (await fetch(`http://127.0.0.1:${port}${route}`)).status,
+        404,
+        "terminal assets must not be served by chat",
+      );
+    }
     const request = await connect();
     const second = await connect();
     const diskBefore = readdirSync(directory, { recursive: true }).sort();

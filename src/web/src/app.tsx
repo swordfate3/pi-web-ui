@@ -93,6 +93,29 @@ export function App() {
   const leafId = usePiWebUiStore((state) => state.leafId);
   const sessionId = usePiWebUiStore((state) => state.sessionId);
   const runtimeId = usePiWebUiStore((state) => state.runtimeId);
+  const browserInputPolicy = usePiWebUiStore((state) => state.browserInputPolicy);
+  const browserReadOnly = browserInputPolicy !== "ordinary";
+  const [terminalPageUrl, setTerminalPageUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!location.pathname.startsWith("/s/")) return;
+    const abort = new AbortController();
+    void fetch("/api/terminal-link", { signal: abort.signal, cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const value = await response.json();
+        if (typeof value.url !== "string" || value.url.length > 2048) return;
+        const url = new URL(value.url);
+        if (url.pathname !== "/" || url.search || url.hash || url.username || url.password) return;
+        const local =
+          url.protocol === "http:" &&
+          url.hostname === "127.0.0.1" &&
+          location.hostname === "127.0.0.1" &&
+          url.port !== location.port;
+        if ((url.protocol === "https:" && url.hostname !== location.hostname) || local) setTerminalPageUrl(url.href);
+      })
+      .catch(() => {});
+    return () => abort.abort();
+  }, []);
   const sessionActionPending = usePiWebUiStore((state) => state.sessionActionPending);
   const sessionActionError = usePiWebUiStore((state) => state.sessionActionError);
   const resumeSession = usePiWebUiStore((state) => state.resumeSession);
@@ -1320,6 +1343,7 @@ export function App() {
   );
 
   const messageActionsEnabled =
+    !browserReadOnly &&
     advancedFeatures &&
     connection === "connected" &&
     chatStatus === "ready" &&
@@ -1650,6 +1674,7 @@ export function App() {
       style={{ "--sidebar-width": `${leftSidebarWidth}px` } as CSSProperties}
     >
       <ConversationSidebar
+        readOnly={browserReadOnly}
         key={sessionId ?? "pending-session"}
         branchEnabled={messageActionsEnabled}
         connection={connection}
@@ -1669,6 +1694,7 @@ export function App() {
 
       <SidebarInset className="h-full min-h-0 min-w-0">
         <AppHeader
+          readOnly={browserReadOnly}
           connection={connection}
           canLeaveForHub={() =>
             !(
@@ -1702,7 +1728,22 @@ export function App() {
           totalCost={totalCost}
         />
 
-        {remoteHint && !remoteAccess && !settingsOpen && (
+        {browserInputPolicy === "terminal-readonly" && (
+          <div
+            role="status"
+            data-testid="terminal-readonly-banner"
+            className="shrink-0 border-b bg-muted/40 px-4 py-3 text-sm"
+          >
+            <p>终端模式：聊天从启动起只读。电脑和手机的所有输入都在同一个原生终端中完成；此提示不代表已取得控制权。</p>
+            {terminalPageUrl && (
+              <a href={terminalPageUrl} target="_blank" rel="noopener noreferrer" className="underline">
+                打开独立终端 ↗（需单独配对）
+              </a>
+            )}
+          </div>
+        )}
+
+        {!browserReadOnly && remoteHint && !remoteAccess && !settingsOpen && (
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-muted/40 px-4 py-2">
             <button type="button" className="text-sm underline" onClick={() => setRemoteAccess("access")}>
               {t("Connect your phone to Pi")}
@@ -1747,6 +1788,7 @@ export function App() {
                     </p>
                   )}
                   <ChatList
+                    readOnly={browserReadOnly}
                     versions={messageVersions.versions}
                     onSwitchVersion={messageActionsEnabled && !conversationSyncing ? switchMessageVersion : undefined}
                     items={items}
@@ -1855,6 +1897,7 @@ export function App() {
               chatStatus={chatStatus}
               connection={connection}
               disabled={
+                browserReadOnly ||
                 sessionActionPending ||
                 resumeLoading ||
                 attachmentHandoff ||
@@ -1862,7 +1905,11 @@ export function App() {
                 Boolean(messageRevision)
               }
               attachmentsDisabled={
-                uploadingAttachments || attachmentHandoff || Boolean(loadingTreeEntryId) || Boolean(messageRevision)
+                browserReadOnly ||
+                uploadingAttachments ||
+                attachmentHandoff ||
+                Boolean(loadingTreeEntryId) ||
+                Boolean(messageRevision)
               }
               uploadProgress={uploadProgress}
               onCancelUpload={uploadingAttachments ? () => uploadControllerRef.current?.abort() : undefined}
@@ -1925,7 +1972,7 @@ export function App() {
             onTextChange={(text) => setMessageRevision((current) => current && { ...current, text })}
           />
         )}
-        {modelOpen && (
+        {!browserReadOnly && modelOpen && (
           <ModelPicker
             currentModel={currentModel}
             models={availableModels}
@@ -1935,8 +1982,10 @@ export function App() {
             setQuery={setModelSearch}
           />
         )}
-        {remoteAccess && <RemoteAccessPanel initialTab={remoteAccess} onClose={closeRemoteAccess} />}
-        {settingsOpen && (
+        {!browserReadOnly && remoteAccess && (
+          <RemoteAccessPanel initialTab={remoteAccess} onClose={closeRemoteAccess} />
+        )}
+        {!browserReadOnly && settingsOpen && (
           <SettingsPanel
             whaleSettings={
               <WhaleSettings
@@ -1977,7 +2026,9 @@ export function App() {
             availableThinkingLevels={availableThinkingLevels}
           />
         )}
-        {commandOpen && <CommandPalette commands={commandActions} onClose={() => setCommandOpen(false)} />}
+        {!browserReadOnly && commandOpen && (
+          <CommandPalette commands={commandActions} onClose={() => setCommandOpen(false)} />
+        )}
         {forkPickerMessages && (
           <ForkMessagePicker
             messages={forkPickerMessages}
@@ -2002,7 +2053,7 @@ export function App() {
           />
         )}
         {sessionDetails && <SessionDetails stats={sessionDetails} onClose={() => setSessionDetails(null)} />}
-        {dialog && (
+        {!browserReadOnly && dialog && (
           <ExtensionDialogView
             dialog={dialog}
             onCancel={() => respondDialog({ cancelled: true })}

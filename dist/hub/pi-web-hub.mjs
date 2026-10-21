@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import net, { isIP } from "node:net";
+import net, { Socket, isIP } from "node:net";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { fileURLToPath } from "node:url";
@@ -465,6 +465,463 @@ var init_state_budget = __esmMin((() => {
 	storageDiagnostics = (config) => withStateWriter(config, (writer) => writer.diagnostics());
 }));
 //#endregion
+//#region hub/terminal-contract.ts
+function record$1(value, keys) {
+	return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === keys;
+}
+function terminalId(value) {
+	return typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
+}
+function identityText(value) {
+	return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\p{Cc}\p{Cs}]/u.test(value);
+}
+function parseTerminalTarget(value) {
+	if (!record$1(value, "inputState,managedRestartEligible,profile,runId,runtimeId,sessionId,terminalEpoch,v") || value.v !== 1 || !terminalId(value.runId) || !identityText(value.runtimeId) || !identityText(value.sessionId) || !terminalId(value.terminalEpoch) || value.profile !== "web-terminal-v1" || value.managedRestartEligible !== false || ![
+		"local",
+		"none",
+		"remote",
+		"fenced"
+	].includes(value.inputState)) throw new Error("Invalid terminal target");
+	return {
+		v: 1,
+		runId: value.runId,
+		runtimeId: value.runtimeId,
+		sessionId: value.sessionId,
+		terminalEpoch: value.terminalEpoch,
+		profile: "web-terminal-v1",
+		inputState: value.inputState,
+		managedRestartEligible: false
+	};
+}
+function sameTerminal(left, right) {
+	return left.runId === right.runId && left.runtimeId === right.runtimeId && left.sessionId === right.sessionId && left.terminalEpoch === right.terminalEpoch;
+}
+function validTerminalBinding(value) {
+	return record$1(value, "authorizationId,connectionId") && terminalId(value.authorizationId) && terminalId(value.connectionId);
+}
+var init_terminal_contract = __esmMin((() => {}));
+//#endregion
+//#region hub/terminal-wire.ts
+function exact(value, keys) {
+	if (!record(value) || Object.keys(value).sort().join(",") !== keys) throw new Error("terminal_invalid_frame");
+}
+function terminalSize(columns, rows) {
+	return Number.isInteger(columns) && Number(columns) >= 20 && Number(columns) <= 240 && Number.isInteger(rows) && Number(rows) >= 5 && Number(rows) <= 120;
+}
+/** Bounded JSON with duplicate-key, depth, nonfinite and lone-surrogate rejection. */
+function parseTerminalJson(text) {
+	if (textBytes(text) + 1 > 65536) throw new Error("terminal_invalid_frame");
+	let at = 0;
+	const space = () => {
+		while (/[\t\r\n ]/.test(text[at] ?? "x")) at++;
+	};
+	const string = () => {
+		const start = at++;
+		while (at < text.length) {
+			if (text[at] === "\\") {
+				at += 2;
+				continue;
+			}
+			if (text[at++] === "\"") {
+				const result = JSON.parse(text.slice(start, at));
+				if (/\p{Cs}/u.test(result)) throw new Error();
+				return result;
+			}
+		}
+		throw new Error();
+	};
+	const value = (depth) => {
+		if (depth > 16) throw new Error();
+		space();
+		if (text[at] === "\"") return string();
+		if (text[at] === "{") {
+			at++;
+			space();
+			const result = Object.create(null);
+			if (text[at] === "}") {
+				at++;
+				return result;
+			}
+			for (;;) {
+				space();
+				if (text[at] !== "\"") throw new Error();
+				const key = string();
+				space();
+				if (text[at++] !== ":" || Object.hasOwn(result, key)) throw new Error();
+				result[key] = value(depth + 1);
+				space();
+				const delimiter = text[at++];
+				if (delimiter === "}") return result;
+				if (delimiter !== ",") throw new Error();
+			}
+		}
+		if (text[at] === "[") {
+			at++;
+			space();
+			const result = [];
+			if (text[at] === "]") {
+				at++;
+				return result;
+			}
+			for (;;) {
+				result.push(value(depth + 1));
+				space();
+				const delimiter = text[at++];
+				if (delimiter === "]") return result;
+				if (delimiter !== ",") throw new Error();
+			}
+		}
+		const token = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(at))?.[0];
+		if (!token) throw new Error();
+		at += token.length;
+		const result = JSON.parse(token);
+		if (typeof result === "number" && !Number.isFinite(result)) throw new Error();
+		return result;
+	};
+	try {
+		const result = value(0);
+		space();
+		if (at !== text.length || !record(result)) throw new Error();
+		return result;
+	} catch {
+		throw new Error("terminal_invalid_frame");
+	}
+}
+function parseTerminalRequest(frame) {
+	if (!Number.isSafeInteger(frame.id) || Number(frame.id) < 1) throw new Error("terminal_invalid_request");
+	if (frame.type === "acquire" || frame.type === "release") exact(frame, "id,type");
+	else if (frame.type === "resize") {
+		exact(frame, "columns,id,leaseId,rows,type");
+		if (!terminalId(frame.leaseId) || !terminalSize(frame.columns, frame.rows)) throw new Error("terminal_invalid_request");
+	} else {
+		exact(frame, "data,id,leaseId,sequence,terminalEpoch,type,v");
+		if (frame.v !== 1 || frame.type !== "input" || !terminalId(frame.terminalEpoch) || !terminalId(frame.leaseId) || !Number.isSafeInteger(frame.sequence) || Number(frame.sequence) < 1 || typeof frame.data !== "string" || !frame.data || /\p{Cs}/u.test(frame.data) || textBytes(frame.data) > 8192) throw new Error("terminal_invalid_request");
+	}
+	return frame;
+}
+function parseTerminalResult(action, result) {
+	if (!record(result)) throw new Error("terminal_invalid_result");
+	if (action === "acquire") if (result.ok === true) {
+		exact(result, "expiresInMs,leaseId,ok");
+		if (!terminalId(result.leaseId) || result.expiresInMs !== 3e4) throw new Error();
+	} else {
+		exact(result, "error,ok");
+		if (result.ok !== false || !["local_owns_input", "control_unavailable"].includes(String(result.error))) throw new Error();
+	}
+	else if (action === "input") if (result.ok === true) {
+		exact(result, "delivery,ok");
+		if (result.delivery !== "written") throw new Error();
+	} else {
+		exact(result, "delivery,error,ok");
+		if (result.ok !== false || !(result.delivery === "unknown" && result.error === "input_delivery_unknown") && !(result.delivery === "rejected" && result.error === "input_rejected")) throw new Error();
+	}
+	else if (action === "release") {
+		exact(result, "ok");
+		if (result.ok !== true) throw new Error();
+	} else if (result.error === void 0) {
+		exact(result, "ok");
+		if (typeof result.ok !== "boolean") throw new Error();
+	} else {
+		exact(result, "error,ok");
+		if (result.ok !== false || !["resize_rejected", "resize_unknown"].includes(String(result.error))) throw new Error();
+	}
+	return result;
+}
+var TERMINAL_FRAME_BYTES, utf8, textBytes, record, TerminalSnapshotAssembly;
+var init_terminal_wire = __esmMin((() => {
+	init_terminal_contract();
+	TERMINAL_FRAME_BYTES = 65536;
+	utf8 = new TextEncoder();
+	textBytes = (value) => utf8.encode(value).length;
+	record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+	TerminalSnapshotAssembly = class {
+		current;
+		sequence = -1;
+		target;
+		constructor(target) {
+			this.target = target;
+		}
+		clear() {
+			this.current = void 0;
+		}
+		accept(frame) {
+			if (frame.type === "screen-start") {
+				exact(frame, "bytes,chunks,columns,rows,sequence,target,type");
+				if (this.current || !sameTerminal(parseTerminalTarget(frame.target), this.target) || !Number.isSafeInteger(frame.sequence) || Number(frame.sequence) <= this.sequence || !terminalSize(frame.columns, frame.rows) || !Number.isInteger(frame.bytes) || Number(frame.bytes) < 0 || Number(frame.bytes) > 1048576 || frame.chunks !== Math.ceil(Number(frame.bytes) / 20480)) throw new Error("terminal_invalid_snapshot");
+				this.current = {
+					sequence: Number(frame.sequence),
+					columns: Number(frame.columns),
+					rows: Number(frame.rows),
+					bytes: new Uint8Array(Number(frame.bytes)),
+					chunks: Number(frame.chunks),
+					index: 0,
+					offset: 0
+				};
+				return;
+			}
+			const current = this.current;
+			if (!current || frame.terminalEpoch !== this.target.terminalEpoch || frame.sequence !== current.sequence) throw new Error("terminal_invalid_snapshot");
+			if (frame.type === "screen-chunk") {
+				exact(frame, "data,index,sequence,terminalEpoch,type");
+				if (frame.index !== current.index || current.index >= current.chunks || typeof frame.data !== "string" || frame.data.length > 27308 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(frame.data)) throw new Error("terminal_invalid_snapshot");
+				const binary = atob(frame.data);
+				if (btoa(binary) !== frame.data || binary.length !== Math.min(20480, current.bytes.length - current.offset)) throw new Error("terminal_invalid_snapshot");
+				for (let i = 0; i < binary.length; i++) current.bytes[current.offset++] = binary.charCodeAt(i);
+				current.index++;
+				return;
+			}
+			exact(frame, "sequence,terminalEpoch,type");
+			if (frame.type !== "screen-end" || current.index !== current.chunks || current.offset !== current.bytes.length) throw new Error("terminal_invalid_snapshot");
+			const data = new TextDecoder("utf-8", { fatal: true }).decode(current.bytes);
+			if (/\p{Cs}/u.test(data)) throw new Error("terminal_invalid_snapshot");
+			this.sequence = current.sequence;
+			this.current = void 0;
+			return {
+				sequence: current.sequence,
+				columns: current.columns,
+				rows: current.rows,
+				data
+			};
+		}
+	};
+}));
+//#endregion
+//#region hub/terminal-provider.ts
+/** Dedicated read-only secret mount only; never loosens the generic 0600 reader. */
+function readTerminalProviderSecret(file) {
+	if (!path.isAbsolute(file) || realpathSync(file) !== file) throw unavailable();
+	const parent = lstatSync(path.dirname(file));
+	const uid = process.getuid?.();
+	if (!parent.isDirectory() || parent.isSymbolicLink()) throw unavailable();
+	const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	try {
+		const stat = fstatSync(fd);
+		const local = stat.uid === uid && (stat.mode & 4095) === 384 && parent.uid === uid && (parent.mode & 63) === 0;
+		const mounted = stat.uid === 0 && stat.gid === 1e3 && (stat.mode & 4095) === 416 && parent.uid === 0 && parent.gid === 1e3 && (parent.mode & 4095) === 1528;
+		if (!stat.isFile() || stat.nlink !== 1 || stat.size !== 64 || !local && !mounted) throw unavailable();
+		if (mounted && (process.platform !== "linux" || !readFileSync("/proc/self/mountinfo", "utf8").split("\n").some((line) => {
+			const fields = line.split(" ");
+			return fields[4] === path.dirname(file).replaceAll(" ", "\\040") && fields[5]?.split(",").includes("ro");
+		}))) throw unavailable();
+		let ancestor = path.dirname(path.dirname(file));
+		for (;;) {
+			const directory = lstatSync(ancestor);
+			if (!directory.isDirectory() || directory.isSymbolicLink() || ![0, uid].includes(directory.uid) || (directory.mode & 18) !== 0 && !(directory.uid === 0 && directory.mode & 512)) throw unavailable();
+			if (ancestor === path.dirname(ancestor)) break;
+			ancestor = path.dirname(ancestor);
+		}
+		const token = readFileSync(fd, "utf8");
+		if (!/^[a-f0-9]{64}$/.test(token)) throw unavailable();
+		return token;
+	} finally {
+		closeSync(fd);
+	}
+}
+function terminalProviderConfig(value) {
+	exact(value, "credentialFile,socketPath");
+	for (const key of ["socketPath", "credentialFile"]) if (typeof value[key] !== "string" || !path.isAbsolute(value[key]) || value[key].includes("\0") || path.normalize(value[key]) !== value[key]) throw unavailable();
+	return {
+		socketPath: value.socketPath,
+		credentialFile: value.credentialFile
+	};
+}
+async function terminalProviderStatus(config, runId) {
+	if (!terminalId(runId)) throw unavailable();
+	const client = new ProviderConnection(terminalProviderConfig(config), {
+		v: 1,
+		op: "status",
+		runId
+	});
+	try {
+		return await client.ready;
+	} finally {
+		client.close();
+	}
+}
+async function connectTerminalProvider(config, value, scope, binding, callbacks) {
+	const target = parseTerminalTarget(value);
+	if (!["read", "write"].includes(scope) || !validTerminalBinding(binding)) throw unavailable();
+	const client = new ProviderConnection(terminalProviderConfig(config), {
+		v: 1,
+		op: "connect",
+		target,
+		scope,
+		binding
+	}, callbacks);
+	try {
+		await client.ready;
+		return client;
+	} catch {
+		client.close();
+		throw unavailable();
+	}
+}
+var unavailable, active, ProviderConnection;
+var init_terminal_provider = __esmMin((() => {
+	init_terminal_contract();
+	init_terminal_wire();
+	unavailable = () => /* @__PURE__ */ new Error("terminal_backend_unavailable");
+	active = /* @__PURE__ */ new Set();
+	ProviderConnection = class {
+		ready;
+		socket;
+		buffer = Buffer.alloc(0);
+		partialAt = 0;
+		startedAt = Date.now();
+		readyTarget;
+		assembly;
+		closed = false;
+		lastId = 0;
+		pending = /* @__PURE__ */ new Map();
+		resolveReady;
+		rejectReady;
+		timer;
+		abort = () => this.close();
+		opening;
+		callbacks;
+		constructor(config, opening, callbacks) {
+			this.opening = opening;
+			this.callbacks = callbacks;
+			if (active.size >= 8) throw unavailable();
+			const token = readTerminalProviderSecret(config.credentialFile);
+			this.ready = new Promise((resolve, reject) => {
+				this.resolveReady = resolve;
+				this.rejectReady = reject;
+			});
+			this.socket = new Socket({ onread: {
+				buffer: Buffer.alloc(32768),
+				callback: (length, buffer) => {
+					const chunk = Buffer.from(buffer.subarray(0, length));
+					this.consume(chunk).then(() => {
+						if (!this.closed) this.socket.resume();
+					}).catch(() => this.close());
+					return false;
+				}
+			} });
+			active.add(this.socket);
+			this.timer = setInterval(() => {
+				const now = Date.now();
+				if (!this.readyTarget && now - this.startedAt >= 2e3 || this.partialAt && now - this.partialAt >= 2e3 || now - this.startedAt >= 3e5) this.close();
+			}, 20);
+			this.timer.unref();
+			this.socket.once("connect", () => this.write({
+				...opening,
+				token
+			}));
+			this.socket.on("error", () => this.close());
+			this.socket.on("end", () => this.close());
+			this.socket.on("close", () => this.close());
+			callbacks?.signal?.addEventListener("abort", this.abort, { once: true });
+			if (callbacks?.signal?.aborted) this.close();
+			else this.socket.connect(config.socketPath);
+		}
+		write(frame) {
+			const bytes = Buffer.from(`${JSON.stringify(frame)}\n`);
+			if (this.closed || bytes.length > 65536 || this.socket.writableLength + bytes.length > 262144) {
+				this.close();
+				return;
+			}
+			this.socket.write(bytes);
+		}
+		async consume(chunk) {
+			let start = 0;
+			while (!this.closed && start < chunk.length) {
+				const newline = chunk.indexOf(10, start);
+				const end = newline < 0 ? chunk.length : newline;
+				if (this.buffer.length === 0 && end > start) this.partialAt = Date.now();
+				if (this.buffer.length + end - start + 1 > 65536) throw unavailable();
+				this.buffer = Buffer.concat([this.buffer, chunk.subarray(start, end)]);
+				if (newline < 0) break;
+				const text = new TextDecoder("utf-8", { fatal: true }).decode(this.buffer);
+				const length = this.buffer.length + 1;
+				this.buffer = Buffer.alloc(0);
+				this.partialAt = 0;
+				const frame = parseTerminalJson(text);
+				if (frame.type === "screen-chunk" && length > 32768) throw unavailable();
+				await this.frame(frame);
+				start = newline + 1;
+			}
+		}
+		async frame(frame) {
+			if (!this.readyTarget) {
+				exact(frame, "target,type");
+				if (frame.type !== "ready") throw unavailable();
+				const target = parseTerminalTarget(frame.target);
+				if (this.opening.op === "status" ? target.runId !== this.opening.runId : !sameTerminal(target, this.opening.target)) throw unavailable();
+				this.readyTarget = target;
+				this.assembly = new TerminalSnapshotAssembly(target);
+				this.resolveReady(target);
+				if (this.opening.op === "status") this.close();
+				return;
+			}
+			if (frame.type === "response") {
+				exact(frame, "id,result,type");
+				const pending = this.pending.get(Number(frame.id));
+				if (!pending || frame.id !== Number(frame.id)) throw unavailable();
+				const result = parseTerminalResult(pending.action, frame.result);
+				clearTimeout(pending.timer);
+				this.pending.delete(Number(frame.id));
+				pending.resolve(result);
+				return;
+			}
+			if (frame.type === "screen-unavailable") {
+				exact(frame, "type");
+				this.assembly?.clear();
+				this.callbacks?.onUnavailable();
+				return;
+			}
+			const snapshot = this.assembly?.accept(frame);
+			if (snapshot) {
+				let timer;
+				try {
+					await Promise.race([this.callbacks?.onSnapshot(snapshot), new Promise((_, reject) => {
+						timer = setTimeout(() => reject(unavailable()), 2e3);
+					})]);
+				} finally {
+					clearTimeout(timer);
+				}
+			}
+		}
+		request(value) {
+			const frame = parseTerminalRequest(value);
+			if (this.closed || !this.readyTarget || this.opening.scope !== "write" || frame.id <= this.lastId || this.pending.size >= 64) return Promise.reject(unavailable());
+			this.lastId = frame.id;
+			return new Promise((resolve, reject) => {
+				const timer = setTimeout(() => this.close(), 2e3);
+				this.pending.set(frame.id, {
+					action: frame.type,
+					resolve,
+					reject,
+					timer
+				});
+				this.write(frame);
+			});
+		}
+		close() {
+			if (this.closed) return;
+			this.closed = true;
+			clearInterval(this.timer);
+			this.callbacks?.signal?.removeEventListener("abort", this.abort);
+			active.delete(this.socket);
+			this.buffer = Buffer.alloc(0);
+			this.assembly?.clear();
+			this.rejectReady(unavailable());
+			this.socket.destroy();
+			for (const pending of this.pending.values()) {
+				clearTimeout(pending.timer);
+				if (pending.action === "input") pending.resolve({
+					ok: false,
+					delivery: "unknown",
+					error: "input_delivery_unknown"
+				});
+				else pending.reject(unavailable());
+			}
+			this.pending.clear();
+			this.callbacks?.onUnavailable();
+		}
+	};
+}));
+//#endregion
 //#region hub/config.ts
 var config_exports = /* @__PURE__ */ __exportAll({
 	initializeHub: () => initializeHub,
@@ -536,12 +993,18 @@ function readHubConfig(file) {
 function terminalConfig(value, chatPort, chatPublicUrl, management) {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid terminal configuration");
 	const v = value;
-	if (Object.keys(v).some((key) => !["port", "publicUrl"].includes(key)) || !Number.isInteger(v.port) || Number(v.port) < 0 || Number(v.port) > 65535 || v.port !== 0 && (v.port === chatPort || v.port === management?.port)) throw new Error("Terminal requires a distinct port");
+	if (Object.keys(v).some((key) => ![
+		"port",
+		"publicUrl",
+		"provider"
+	].includes(key)) || !Number.isInteger(v.port) || Number(v.port) < 0 || Number(v.port) > 65535 || v.port !== 0 && (v.port === chatPort || v.port === management?.port)) throw new Error("Terminal requires a distinct port");
 	const publicUrl = v.publicUrl === void 0 ? void 0 : validatedPublicUrl(v.publicUrl);
-	if (publicUrl && (!chatPublicUrl || !publicUrl.startsWith("https:") || new URL(publicUrl).pathname !== "/" || [chatPublicUrl, management?.publicUrl].some((other) => other && new URL(other).origin === new URL(publicUrl).origin))) throw new Error("Terminal requires a distinct canonical HTTPS origin");
+	if (publicUrl && (!chatPublicUrl || !publicUrl.startsWith("https:") || new URL(publicUrl).pathname !== "/" || [chatPublicUrl, management?.publicUrl].some((other) => other && new URL(other).hostname === new URL(publicUrl).hostname))) throw new Error("Terminal requires a distinct canonical HTTPS origin");
+	const provider = v.provider === void 0 ? void 0 : terminalProviderConfig(v.provider);
 	return {
 		port: Number(v.port),
-		...publicUrl ? { publicUrl } : {}
+		...publicUrl ? { publicUrl } : {},
+		...provider ? { provider } : {}
 	};
 }
 function managementConfig(value, chatPort, chatPublicUrl) {
@@ -622,6 +1085,7 @@ var init_config = __esmMin((() => {
 	init_connection_config();
 	init_lifecycle();
 	init_state_budget();
+	init_terminal_provider();
 }));
 //#endregion
 //#region hub/gateway-auth.ts
@@ -1141,7 +1605,7 @@ var ForwardQueue = class {
 var runtimePortalJs = String.raw`
   const runtimeUpdates = (() => {
     const storageKey = 'pi-hub-runtime-update';
-    const terminalStatuses = new Set(['succeeded', 'failed', 'recovery_required', 'rejected', 'stale']);
+    const terminalStatuses = new Set(['succeeded', 'failed', 'recovery_required', 'rejected', 'stale', 'manual_restart_required']);
     const activeStatuses = new Set(['pending', 'queued', 'running']);
     const jobs = new Map();
     let policy;
@@ -1183,16 +1647,20 @@ var runtimePortalJs = String.raw`
       unmanaged_or_unavailable_consumer: '存在未受管或不可用的共享运行时使用者，需要迁移或检查',
       install_failed: '安装失败', installation_outcome_unknown: '安装结果不确定，需要管理员检查',
       refresh_requires_inspection: '刷新结果需要管理员检查', complete: '任务已完成',
+      installed_manual_restart_required: '共享包已安装；终端需要手动退出并重新启动',
     })[stage] || String(stage || 'unknown').replaceAll('_', ' ');
     const statusLabel = (status) => ({
       pending: '等待处理', queued: '已排队', running: '任务进行中', succeeded: '安装成功；所有受管 Pi 进程已刷新或退出', failed: '安装失败',
       recovery_required: '结果不确定，需要管理员检查', rejected: '任务已拒绝', stale: '任务已过期',
+      manual_restart_required: '共享包已安装；终端子进程尚未刷新，请手动退出并重新启动',
     })[status] || '结果未知';
     const targetLabel = (status) => ({
       waiting_for_idle: '等待目标空闲', refreshing: '正在刷新 Pi 进程', succeeded: '已加载新版本', exited: '已退出',
+      manual_restart_required: '需要手动退出并重新启动；正在运行的子进程版本未知，未计为已刷新',
     })[status] || String(status || 'unknown').replaceAll('_', ' ');
     const reasonLabel = (reason) => ({
       consumer_not_ready: '共享运行时使用者尚未就绪', awaiting_state_change: '等待运行状态变化', busy_race: '空闲确认期间再次忙碌',
+      terminal_profile_unaudited: '终端进程不允许受管重启',
     })[reason] || String(reason || '').replaceAll('_', ' ');
     function renderJob(value) {
       const row = document.createElement('div'); row.className = 'runtime-update-result';
@@ -1219,7 +1687,7 @@ var runtimePortalJs = String.raw`
         let text = '目标 ' + target.run_id + ' · ' + targetLabel(target.status);
         if (typeof target.old_version === 'string') text += ' · 原版本 ' + target.old_version;
         if (typeof target.version === 'string') text += ' · 当前版本 ' + target.version;
-        if (target.status === 'waiting_for_idle' && typeof target.wait_reason === 'string') text += ' · ' + reasonLabel(target.wait_reason);
+        if (['waiting_for_idle', 'manual_restart_required'].includes(target.status) && typeof target.wait_reason === 'string') text += ' · ' + reasonLabel(target.wait_reason);
         line.textContent = text; row.append(line);
       }
       return row;
@@ -1634,7 +2102,8 @@ var states = [
 	"failed",
 	"recovery_required",
 	"rejected",
-	"stale"
+	"stale",
+	"manual_restart_required"
 ];
 /** A bounded error category, never the upstream response body or credential. */
 var RuntimeUpdateError = class extends Error {
@@ -1652,6 +2121,11 @@ function job(value) {
 			run_id: target.run_id,
 			status: target.status
 		};
+		if (target.profile !== void 0) {
+			if (target.profile !== "web-terminal-v1") throw new RuntimeUpdateError();
+			result.profile = target.profile;
+		}
+		if (target.status === "manual_restart_required" && (target.old_version !== void 0 || target.version !== void 0 || target.restart_id !== void 0 || target.wait_reason !== "terminal_profile_unaudited")) throw new RuntimeUpdateError();
 		for (const key of ["old_version", "version"]) if (target[key] !== void 0) {
 			if (!runtimeVersion(target[key])) throw new RuntimeUpdateError();
 			result[key] = target[key];
@@ -2139,41 +2613,10 @@ function createRestartApi(config, hooks) {
 	};
 }
 //#endregion
-//#region hub/terminal-contract.ts
-function record(value, keys) {
-	return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === keys;
-}
-function terminalId(value) {
-	return typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
-}
-function identityText(value) {
-	return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\p{Cc}\p{Cs}]/u.test(value);
-}
-function parseTerminalTarget(value) {
-	if (!record(value, "inputState,managedRestartEligible,profile,runId,runtimeId,sessionId,terminalEpoch,v") || value.v !== 1 || !terminalId(value.runId) || !identityText(value.runtimeId) || !identityText(value.sessionId) || !terminalId(value.terminalEpoch) || value.profile !== "web-terminal-v1" || value.managedRestartEligible !== false || ![
-		"local",
-		"none",
-		"remote",
-		"fenced"
-	].includes(value.inputState)) throw new Error("Invalid terminal target");
-	return {
-		v: 1,
-		runId: value.runId,
-		runtimeId: value.runtimeId,
-		sessionId: value.sessionId,
-		terminalEpoch: value.terminalEpoch,
-		profile: "web-terminal-v1",
-		inputState: value.inputState,
-		managedRestartEligible: false
-	};
-}
-function sameTerminal(left, right) {
-	return left.runId === right.runId && left.runtimeId === right.runtimeId && left.sessionId === right.sessionId && left.terminalEpoch === right.terminalEpoch;
-}
-//#endregion
 //#region hub/terminal-auth.ts
 init_config();
 init_state_budget();
+init_terminal_contract();
 var digest = (value) => createHash("sha256").update(value).digest("hex");
 var hex = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
 var equal$1 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -2363,78 +2806,169 @@ var HubTerminalAuth = class {
 };
 //#endregion
 //#region hub/terminal-server.ts
-/** Real, opt-in Hub listener; no proxy, terminal stream, PTY or write API yet. */
+init_terminal_contract();
+init_terminal_provider();
+init_terminal_wire();
+/** Third-origin listener; only this fixed asset bundle and the private provider. */
 async function startTerminalServer(config, otherOrigins) {
 	if (!config.terminal) throw new Error("Terminal listener is disabled");
 	const terminal = config.terminal;
 	const auth = new HubTerminalAuth(config);
 	const connections = /* @__PURE__ */ new Set();
-	let url = "";
-	let closed = false;
+	const nonces = /* @__PURE__ */ new Map();
+	const peers = /* @__PURE__ */ new Set();
+	const wss = new WebSocketServer({
+		noServer: true,
+		maxPayload: TERMINAL_FRAME_BYTES,
+		perMessageDeflate: false
+	});
+	let url = "", closed = false, pending = 0;
+	const assets = /* @__PURE__ */ new Map();
+	const assetRoot = new URL(import.meta.url.endsWith(".ts") ? "../dist/terminal/" : "../terminal/", import.meta.url);
+	for (const [route, name, mime] of [
+		[
+			"/",
+			"index.html",
+			"text/html"
+		],
+		[
+			"/terminal.js",
+			"app.js",
+			"text/javascript"
+		],
+		[
+			"/terminal.css",
+			"app.css",
+			"text/css"
+		]
+	]) try {
+		const bytes = readFileSync(fileURLToPath(new URL(name, assetRoot)));
+		if (bytes.length <= 2 * 1024 * 1024) assets.set(route, [mime, bytes]);
+	} catch {}
 	const allowed = (request, write) => {
-		const origins = new Set([new URL(url).origin, ...terminal.publicUrl ? [new URL(terminal.publicUrl).origin] : []]);
-		const origin = request.headers.origin;
-		const host = request.headers.host;
-		const matched = [...origins].find((candidate) => new URL(candidate).host === host);
-		return !!matched && request.headers["sec-fetch-site"] !== "cross-site" && (origin === void 0 ? !write : origin === matched);
+		if (closed || !url || request.headers["service-worker"] !== void 0 || request.headers["sec-fetch-site"] === "cross-site") return false;
+		const matched = [new URL(url).origin, ...terminal.publicUrl ? [new URL(terminal.publicUrl).origin] : []].find((candidate) => new URL(candidate).host === request.headers.host);
+		return !!matched && (request.headers.origin === void 0 ? !write : request.headers.origin === matched);
 	};
 	const respond = (res, status, value) => {
-		if (!res.destroyed) res.writeHead(status, { "Content-Type": "application/json" }).end(value === void 0 ? void 0 : JSON.stringify(value));
+		if (!res.destroyed && !res.writableEnded) res.writeHead(status, { "Content-Type": "application/json" }).end(value === void 0 ? void 0 : JSON.stringify(value));
+	};
+	const validate = (req, expected, target, access) => {
+		if (!allowed(req, true)) throw new Error();
+		const current = auth.authorizeTarget(req, target, true, access);
+		auth.revalidate(req, expected, true, access);
+		if (current.authorizationId !== expected.authorizationId) throw new Error();
+	};
+	const prune = () => {
+		for (const [key, nonce] of nonces) if (nonce.expires <= Date.now()) nonces.delete(key);
+		for (const peer of peers) peer.check();
+	};
+	const admit = (target, access) => {
+		const all = [...nonces.values(), ...[...peers].flatMap((peer) => peer.reservation ? [peer.reservation] : [])].filter((r) => r.target.runId === target.runId);
+		return all.length < 2 && (access !== "write" || !all.some((r) => r.access === "write"));
 	};
 	const handle = async (req, res) => {
 		res.setHeader("Cache-Control", "no-store");
 		res.setHeader("Referrer-Policy", "no-referrer");
 		res.setHeader("X-Content-Type-Options", "nosniff");
-		res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+		res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'");
 		res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
 		res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-		if (closed || !allowed(req, req.method !== "GET") || req.headers["service-worker"] !== void 0) {
-			respond(res, 403);
+		if (!allowed(req, req.method !== "GET")) return respond(res, 403);
+		const route = req.url;
+		const asset = assets.get(route ?? "");
+		if (req.method === "GET" && asset) {
+			const [mime, bytes] = asset;
+			res.writeHead(200, { "Content-Type": `${mime}; charset=utf-8` }).end(bytes);
 			return;
 		}
-		const route = req.url;
 		if (req.method === "GET" && route === "/api/terminal/status") {
-			respond(res, 200, {
-				...auth.status(req),
+			const status = auth.status(req);
+			if (!status.authorized || !terminal.provider) return respond(res, 200, {
+				...status,
 				available: false,
 				reason: "terminal_backend_unavailable"
 			});
-			return;
+			if (pending >= 8) return respond(res, 503);
+			pending++;
+			try {
+				const session = auth.authorize(req);
+				const target = await terminalProviderStatus(terminal.provider, session.scope.runId);
+				auth.revalidate(req, session);
+				if (!allowed(req, false) || !sameTerminal(target, session.scope)) throw new Error();
+				return respond(res, 200, {
+					...auth.status(req),
+					available: true,
+					target
+				});
+			} catch {
+				return respond(res, 200, {
+					...auth.status(req),
+					available: false,
+					reason: "terminal_backend_unavailable"
+				});
+			} finally {
+				pending--;
+			}
 		}
-		if (req.method !== "POST" || !["/api/terminal/unlock", "/api/terminal/logout"].includes(route ?? "")) {
-			respond(res, 404);
-			return;
-		}
-		if (req.headers["content-type"] !== "application/json" || req.headers["transfer-encoding"] !== void 0 || !/^[0-9]{1,4}$/.test(req.headers["content-length"] ?? "") || Number(req.headers["content-length"]) > 1024) {
+		if (req.method !== "POST" || ![
+			"/api/terminal/unlock",
+			"/api/terminal/logout",
+			"/api/terminal/attach"
+		].includes(route ?? "")) return respond(res, 404);
+		if (req.headers["content-type"] !== "application/json" || req.headers["transfer-encoding"] !== void 0 || !/^[0-9]{1,4}$/.test(req.headers["content-length"] ?? "") || Number(req.headers["content-length"]) > 2048) {
 			res.setHeader("Connection", "close");
-			respond(res, 413);
-			return;
+			return respond(res, 413);
 		}
 		const timer = setTimeout(() => req.destroy(), 2e3);
 		try {
-			let body = "";
+			const chunks = [];
+			let length = 0;
 			for await (const chunk of req) {
-				body += chunk.toString("utf8");
-				if (Buffer.byteLength(body) > 1024) throw new Error();
+				length += chunk.length;
+				if (length > 2048) throw new Error();
+				chunks.push(chunk);
 			}
-			if (closed || !allowed(req, true)) throw new Error();
-			const data = JSON.parse(body);
-			if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error();
+			if (!allowed(req, true)) throw new Error();
+			const data = parseTerminalJson(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
 			if (route === "/api/terminal/unlock") {
-				if (Object.keys(data).join(",") !== "code") throw new Error();
+				exact(data, "code");
 				const result = auth.unlock(data.code);
 				res.setHeader("Set-Cookie", result.cookie);
-				respond(res, 200, {
+				return respond(res, 200, {
 					csrf: result.csrf,
 					expiresAt: result.expiresAt
 				});
-			} else {
-				if (Object.keys(data).length !== 0) throw new Error();
-				res.setHeader("Set-Cookie", auth.logout(req));
-				respond(res, 200, { authorized: false });
 			}
+			if (route === "/api/terminal/logout") {
+				exact(data, "");
+				res.setHeader("Set-Cookie", auth.logout(req));
+				prune();
+				return respond(res, 200, { authorized: false });
+			}
+			exact(data, "access,target");
+			if (data.access !== "read" && data.access !== "write") throw new Error();
+			const target = parseTerminalTarget(data.target), access = data.access;
+			const session = auth.authorizeTarget(req, target, true, access);
+			if (!terminal.provider) return respond(res, 503, {
+				available: false,
+				reason: "terminal_backend_unavailable"
+			});
+			prune();
+			if (nonces.size >= 8 || !admit(target, access)) return respond(res, 409);
+			const nonce = randomBytes(32).toString("hex"), expiresAt = Date.now() + 1e4;
+			nonces.set(nonce, {
+				session,
+				target,
+				access,
+				expires: expiresAt
+			});
+			return respond(res, 200, {
+				nonce,
+				expiresAt
+			});
 		} catch {
-			respond(res, 403);
+			return respond(res, 403);
 		} finally {
 			clearTimeout(timer);
 		}
@@ -2453,8 +2987,191 @@ async function startTerminalServer(config, otherOrigins) {
 		socket.once("close", () => connections.delete(socket));
 	});
 	server.on("clientError", (_error, socket) => socket.destroy());
-	server.on("upgrade", (_request, socket) => socket.destroy());
 	server.on("connect", (_request, socket) => socket.destroy());
+	server.on("upgrade", (request, socket, head) => {
+		try {
+			if (!allowed(request, true) || request.url !== "/api/terminal/ws" || pending >= 8 || peers.size >= 8) throw new Error();
+			auth.authorize(request);
+			wss.handleUpgrade(request, socket, head, (ws) => attachSocket(ws, request));
+		} catch {
+			socket.destroy();
+		}
+	});
+	function attachSocket(ws, request) {
+		let reservation;
+		let provider;
+		let dead = false, initialized = false, inputAllowed = false, acquiring = false, lastId = 0, generation = 0;
+		const abort = new AbortController();
+		const peer = {
+			close,
+			check: () => {
+				if (reservation) try {
+					validate(request, reservation.session, reservation.target, reservation.access);
+				} catch {
+					close();
+				}
+			},
+			get reservation() {
+				return reservation;
+			}
+		};
+		peers.add(peer);
+		pending++;
+		const timer = setTimeout(close, 2e3);
+		const lifespan = setTimeout(close, 3e5);
+		function close() {
+			if (dead) return;
+			dead = true;
+			inputAllowed = false;
+			generation++;
+			abort.abort();
+			provider?.close();
+			peers.delete(peer);
+			if (!initialized) {
+				initialized = true;
+				pending--;
+			}
+			clearTimeout(timer);
+			clearTimeout(lifespan);
+			ws.terminate();
+		}
+		const check = () => {
+			if (dead || !reservation || ws.readyState !== WebSocket.OPEN) throw new Error();
+			validate(request, reservation.session, reservation.target, reservation.access);
+		};
+		const send = (frame) => new Promise((resolve, reject) => {
+			try {
+				check();
+				const text = JSON.stringify(frame);
+				if (Buffer.byteLength(text) > 65536 || ws.bufferedAmount + Buffer.byteLength(text) > 262144) throw new Error();
+				const timeout = setTimeout(() => {
+					close();
+					reject(/* @__PURE__ */ new Error());
+				}, 2e3);
+				ws.send(text, (error) => {
+					clearTimeout(timeout);
+					if (error) {
+						close();
+						reject(/* @__PURE__ */ new Error());
+					} else resolve();
+				});
+			} catch {
+				close();
+				reject(/* @__PURE__ */ new Error());
+			}
+		});
+		const snapshot = async (value) => {
+			check();
+			if (!reservation) throw new Error();
+			const bytes = Buffer.from(value.data), target = reservation.target;
+			await send({
+				type: "screen-start",
+				target,
+				sequence: value.sequence,
+				columns: value.columns,
+				rows: value.rows,
+				bytes: bytes.length,
+				chunks: Math.ceil(bytes.length / 20480)
+			});
+			for (let index = 0; index * 20480 < bytes.length; index++) await send({
+				type: "screen-chunk",
+				terminalEpoch: target.terminalEpoch,
+				sequence: value.sequence,
+				index,
+				data: bytes.subarray(index * 20480, (index + 1) * 20480).toString("base64")
+			});
+			await send({
+				type: "screen-end",
+				terminalEpoch: target.terminalEpoch,
+				sequence: value.sequence
+			});
+		};
+		ws.on("error", close);
+		ws.on("close", close);
+		ws.on("message", (raw, binary) => {
+			(async () => {
+				if (dead || binary) throw new Error();
+				const frame = parseTerminalJson(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+				if (!reservation) {
+					exact(frame, "access,csrf,nonce,target,type");
+					if (frame.type !== "attach" || typeof frame.nonce !== "string") throw new Error();
+					const nonce = nonces.get(frame.nonce);
+					nonces.delete(frame.nonce);
+					if (!nonce || nonce.expires <= Date.now() || frame.access !== nonce.access || !sameTerminal(parseTerminalTarget(frame.target), nonce.target)) throw new Error();
+					request.headers["x-pi-hub-terminal-csrf"] = frame.csrf;
+					validate(request, nonce.session, nonce.target, nonce.access);
+					reservation = nonce;
+					const identity = generation;
+					let sentReady = false;
+					const ensureReady = async () => {
+						if (!sentReady) {
+							sentReady = true;
+							await send({
+								type: "ready",
+								target: nonce.target
+							});
+						}
+					};
+					if (!terminal.provider) throw new Error();
+					const live = await connectTerminalProvider(terminal.provider, nonce.target, nonce.access, {
+						authorizationId: nonce.session.authorizationId,
+						connectionId: randomBytes(16).toString("hex")
+					}, {
+						signal: abort.signal,
+						onSnapshot: async (value) => {
+							check();
+							await ensureReady();
+							await snapshot(value);
+						},
+						onUnavailable: close
+					});
+					if (dead || generation !== identity) {
+						live.close();
+						return;
+					}
+					provider = live;
+					check();
+					if (!initialized) {
+						initialized = true;
+						pending--;
+						clearTimeout(timer);
+					}
+					await ensureReady();
+					return;
+				}
+				check();
+				const { csrf, target, ...action } = frame;
+				if (csrf !== request.headers["x-pi-hub-terminal-csrf"] || !sameTerminal(parseTerminalTarget(target), reservation.target) || reservation.access !== "write" || !provider) throw new Error();
+				const command = parseTerminalRequest(action);
+				if (command.id <= lastId) throw new Error();
+				lastId = command.id;
+				if (command.type === "release") {
+					close();
+					return;
+				}
+				if (command.type === "acquire") {
+					if (acquiring || inputAllowed) throw new Error();
+					acquiring = true;
+				} else if (!inputAllowed) throw new Error();
+				const identity = generation;
+				const result = await provider.request(command);
+				check();
+				if (identity !== generation) throw new Error();
+				if (command.type === "acquire") {
+					acquiring = false;
+					inputAllowed = result.ok === true;
+				}
+				if (command.type === "input" && result.delivery !== "written") inputAllowed = false;
+				await send({
+					type: "response",
+					id: command.id,
+					result
+				});
+			})().catch(close);
+		});
+	}
+	const sweep = setInterval(prune, 100);
+	sweep.unref();
 	try {
 		await new Promise((resolve, reject) => {
 			server.once("error", reject);
@@ -2464,13 +3181,14 @@ async function startTerminalServer(config, otherOrigins) {
 			});
 		});
 		url = `http://127.0.0.1:${server.address().port}/`;
-		const forbidden = new Set(otherOrigins.map((origin) => new URL(origin).origin));
-		if ([url, terminal.publicUrl].some((origin) => origin && forbidden.has(new URL(origin).origin))) throw new Error("Terminal origin must differ from chat and management");
+		if ([url, terminal.publicUrl].some((origin) => origin && otherOrigins.some((other) => terminal.publicUrl && new URL(origin).protocol === "https:" ? new URL(other).hostname === new URL(origin).hostname : new URL(other).origin === new URL(origin).origin))) throw new Error("Terminal origin must differ from chat and management");
 	} catch (error) {
 		closed = true;
+		clearInterval(sweep);
 		auth.close();
 		for (const socket of connections) socket.destroy();
 		await new Promise((resolve) => server.close(() => resolve()));
+		wss.close();
 		throw error;
 	}
 	let closing;
@@ -2479,9 +3197,12 @@ async function startTerminalServer(config, otherOrigins) {
 		close() {
 			if (closing) return closing;
 			closed = true;
+			clearInterval(sweep);
+			for (const peer of peers) peer.close();
+			nonces.clear();
 			auth.close();
 			for (const socket of connections) socket.destroy();
-			closing = new Promise((resolve) => server.close(() => resolve()));
+			closing = Promise.all([new Promise((resolve) => server.close(() => resolve())), new Promise((resolve) => wss.close(() => resolve()))]).then(() => {});
 			return closing;
 		}
 	};
@@ -2743,7 +3464,7 @@ function captureHubMetadata(moduleUrl = import.meta.url) {
 	{
 		const embedded = {
 			"version": "1.0.1",
-			"build": "e29f165bbb2b1a76c58d2804f8e29badb20ae4d62a1c763448d7cae7e0bed804"
+			"build": "58b06fd885ada106e9a16f06abac0a227da1a71f2f4325568594bfa9bab4780c"
 		};
 		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
 			version: embedded.version,
@@ -3626,6 +4347,13 @@ async function startLockedHub(config, options) {
 				}));
 				return;
 			}
+			if (!admin && pathname === "/api/terminal-link") {
+				response.writeHead(200, {
+					"Content-Type": "application/json",
+					"Cache-Control": "no-store"
+				}).end(JSON.stringify({ url: terminalServer ? config.terminal?.publicUrl ?? terminalServer.url : null }));
+				return;
+			}
 			const asset = pathname === "/sessions/" ? ["text/html", renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl)] : pathname === "/hub.js" ? ["text/javascript", portalJs] : admin && pathname === "/hub-management.js" ? ["text/javascript", portalManagementJs] : pathname === "/hub.css" ? ["text/css", portalCss + portalManagementCss] : void 0;
 			if (!asset) {
 				fail(response, pathname?.startsWith("/s/") ? 410 : 404);
@@ -3915,6 +4643,8 @@ var help = `Pi Web Hub — independent multi-session portal
   pi-web-hub init [--port 16180] [--public-url https://pi.example.com/]
     [--management-port 16181] [--management-public-url https://admin.example.com/]
     [--terminal-port 16182] [--terminal-public-url https://terminal.example.com/]
+    [--terminal-provider-socket /run/pi-terminal-provider/provider.sock]
+    [--terminal-provider-credential-file /run/pi-terminal-credentials/provider.token]
   pi-web-hub serve
   pi-web-hub issue --label "Project A" --output /private/session-a.json [--backend-host 127.0.0.1]
   pi-web-hub revoke --run-id <session-capability-id>
@@ -3924,7 +4654,12 @@ var help = `Pi Web Hub — independent multi-session portal
     --terminal-epoch <id> --access <read|write>  Generate a scoped terminal code (10 minutes)
   pi-web-hub revoke-terminal          Revoke all browser terminal sessions
 
-Terminal auth is opt-in; terminal backend/PTY is not available in this build.
+Terminal is opt-in and requires a real private Gate provider. Configure a distinct
+public HTTPS hostname, not another port on the chat/admin hostname. Paste the
+terminal code manually into that origin; no automatic attach, retry or renewal.
+Hub UID/GID1000:1000 mounts only dedicated provider IPC/credential volumes read-only;
+no Docker socket on Hub, no provider credential or authority on Pi. Keep cap-drop
+ALL and no-new-privileges; no sudo. Missing input ACK means unknown, never resend.
 
 All commands accept --config <file> (default ~/.pi/web-hub/config.json).
 The hub never launches agents or deploys SSH/TLS/login. See docs/hub.md.
@@ -3945,7 +4680,9 @@ async function main(args) {
 			"--management-port",
 			"--management-public-url",
 			"--terminal-port",
-			"--terminal-public-url"
+			"--terminal-public-url",
+			"--terminal-provider-socket",
+			"--terminal-provider-credential-file"
 		]],
 		["serve", ["--config"]],
 		["issue", [
@@ -3994,12 +4731,19 @@ async function main(args) {
 			}, port, publicUrl);
 		}
 		let terminal;
+		const providerSocket = options.get("--terminal-provider-socket");
+		const providerCredential = options.get("--terminal-provider-credential-file");
+		if (Boolean(providerSocket) !== Boolean(providerCredential) || providerSocket && !options.has("--terminal-port")) throw new Error("Both private provider paths and terminal port are required");
 		if (options.has("--terminal-public-url") && !options.has("--terminal-port")) throw new Error("Terminal port required");
 		if (options.has("--terminal-port")) {
 			const { terminalConfig } = await Promise.resolve().then(() => (init_config(), config_exports));
 			terminal = terminalConfig({
 				port: Number(options.get("--terminal-port")),
-				...options.has("--terminal-public-url") ? { publicUrl: options.get("--terminal-public-url") } : {}
+				...options.has("--terminal-public-url") ? { publicUrl: options.get("--terminal-public-url") } : {},
+				...providerSocket ? { provider: {
+					socketPath: providerSocket,
+					credentialFile: providerCredential
+				} } : {}
 			}, port, publicUrl, management);
 		}
 		initializeHub(configFile, {

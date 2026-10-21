@@ -1,5 +1,8 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "Browser chat is read-only. Use the native terminal.": "聊天页为只读，请使用原生终端。",
+  "Read-only chat: view history here; send input in the native terminal.":
+    "只读聊天：在此查看历史，请在原生终端中输入。",
   "Conversation window limited. Older content remains in the original session.":
     "会话窗口已限制大小，较早内容仍保留在原始会话中。",
   "Could not load entry detail": "无法加载条目详情",

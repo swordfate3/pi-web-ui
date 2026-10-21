@@ -893,6 +893,12 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
           .end(JSON.stringify({ sessions: items, versions: versionStatus.snapshot() }));
         return;
       }
+      if (!admin && pathname === "/api/terminal-link") {
+        response
+          .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
+          .end(JSON.stringify({ url: terminalServer ? (config.terminal?.publicUrl ?? terminalServer.url) : null }));
+        return;
+      }
       const asset =
         pathname === "/sessions/"
           ? [

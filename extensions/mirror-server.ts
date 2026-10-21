@@ -1623,6 +1623,7 @@ export default function (pi: ExtensionAPI) {
         sessionFile,
         sessionId: ctx.sessionManager.getSessionId(),
         runtimeId,
+        browserInputPolicy: terminalBarrier ? "terminal-readonly" : "ordinary",
         terminalPrompt: terminalPrompt.snapshot(),
         isStreaming: !ctx.isIdle(),
         contextUsage,
@@ -2824,6 +2825,16 @@ export default function (pi: ExtensionAPI) {
         res.writeHead(404, { "Cache-Control": "no-store" });
         res.end("Export not found or expired");
       }
+      return;
+    }
+
+    // The independent terminal bundle belongs only to the third-origin Hub
+    // listener, never to this chat listener (including session proxies).
+    const terminalAssetRoot = path.join(STATIC_DIR, "terminal");
+    const requestedAsset = path.join(STATIC_DIR, urlPath);
+    if (requestedAsset === terminalAssetRoot || requestedAsset.startsWith(`${terminalAssetRoot}${path.sep}`)) {
+      res.writeHead(404);
+      res.end("Not Found");
       return;
     }
 

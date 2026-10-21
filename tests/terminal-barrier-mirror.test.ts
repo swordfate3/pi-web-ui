@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { WebSocket } from "ws";
+import { childTerminalBarrier } from "../extensions/terminal-barrier.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -143,6 +144,7 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
     },
     getThinkingLevel: () => "off",
     getSessionName: () => "fixture",
+    setSessionName() {},
     getCommands: () => [],
     getSettings: () => ({}),
     setModel: async (value: typeof model) => {
@@ -281,7 +283,8 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
     });
     const partialPath = path.join(directory, path.dirname(pendingUpload.result.relativePath), ".partial");
     await until(() => existsSync(partialPath) && statSync(partialPath).size === 3);
-    assert.equal((await adapter("terminal-prepare", expected)).ok, false);
+    const preparing = adapter("terminal-prepare", expected);
+    await until(() => childTerminalBarrier().blocked);
     assert.equal((await second("abort")).error, "terminal_untracked");
     lookup.resolve(models);
     credentials.resolve({ ok: true });
@@ -293,12 +296,16 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
     assert.equal(existsSync(path.join(directory, pendingUpload.result.relativePath)), false);
     assert.equal(model.id, "one", "neither delayed model operation reaches the sink");
     assert.equal(sends, 0, "attachment preflight cannot dispatch after takeover");
-    assert.equal((await adapter("terminal-prepare", expected)).ok, false, "compaction ACK is not completion");
+    assert.equal((await preparing).ok, false, "compaction ACK is not completion; bounded drain must time out");
+    assert.equal(childTerminalBarrier().blocked, false);
+    assert.equal((await second("set_session_name", { name: "chat survived timeout" })).ok, true);
     generation++; // New event context within the same session; compact closure is stale.
     await emit("turn_start");
+    const retry = adapter("terminal-prepare", expected);
+    await until(() => childTerminalBarrier().blocked);
     compactOptions.onComplete({ summary: "done" });
     assert.equal((await request("get_messages")).ok, true, "compact callback must not restore its stale context");
-    assert.equal((await adapter("terminal-prepare", expected)).result.latched, true);
+    assert.equal((await retry).result.latched, true);
   } finally {
     for (const ws of sockets) ws.terminate();
     await emit("session_shutdown", { reason: "quit" });

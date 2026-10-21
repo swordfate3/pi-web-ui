@@ -3,16 +3,18 @@ export class TerminalBarrier {
   #closed = false;
   #active = 0;
   #unknown = false;
+  #pending = false;
+  #changed: (() => void) | undefined;
 
   get blocked() {
-    return this.#closed;
+    return this.#closed || this.#pending;
   }
   get latched() {
     return this.#closed && this.#active === 0 && !this.#unknown;
   }
 
   assertWritable() {
-    if (this.#closed) throw new Error("terminal_untracked");
+    if (this.blocked) throw new Error("terminal_untracked");
   }
 
   enter() {
@@ -23,6 +25,7 @@ export class TerminalBarrier {
       if (finished) return;
       finished = true;
       this.#active--;
+      this.#changed?.();
     };
   }
 
@@ -30,11 +33,55 @@ export class TerminalBarrier {
   // No event, timeout, idle observation or extension reload clears this bit.
   markUnknown() {
     this.#unknown = true;
+    this.#changed?.();
   }
 
   prepare() {
+    if (this.#active || this.#unknown || this.#pending) return false;
     this.#closed = true;
     return this.latched;
+  }
+
+  prepareWhenDrained(signal: AbortSignal, isCurrent: () => boolean): Promise<boolean> {
+    if (signal.aborted || this.#unknown || this.#pending || !isCurrent()) return Promise.resolve(false);
+    if (this.#closed) return Promise.resolve(this.latched);
+    this.#pending = true;
+    const deadline = performance.now() + 250;
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (commit: boolean) => {
+        if (settled) return;
+        settled = true;
+        let success = false;
+        try {
+          success =
+            commit &&
+            performance.now() < deadline &&
+            !signal.aborted &&
+            !this.#unknown &&
+            this.#active === 0 &&
+            isCurrent();
+        } catch {
+          // Replacement/disposal can invalidate the context used by the identity check.
+        }
+        if (success) this.#closed = true;
+        this.#pending = false;
+        this.#changed = undefined;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", cancel);
+        resolve(success);
+      };
+      const cancel = () => finish(false);
+      // The broker allows 500 ms for the entire adapter call. Leave transport
+      // headroom and never infer completion when this shorter drain expires.
+      const timer = setTimeout(cancel, 250);
+      signal.addEventListener("abort", cancel, { once: true });
+      this.#changed = () => {
+        if (this.#unknown) cancel();
+        else if (this.#active === 0) finish(true);
+      };
+      this.#changed();
+    });
   }
 }
 

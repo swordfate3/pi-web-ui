@@ -129,7 +129,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
     if (Buffer.byteLength(`${JSON.stringify({ ok: true, result })}\n`) > 16384) throw new Error("Runtime unavailable");
     return result;
   };
-  const server = net.createServer((peer) => {
+  const server = net.createServer({ allowHalfOpen: true }, (peer) => {
     if (peers.size >= 8 || closed) {
       peer.destroy();
       return;
@@ -137,13 +137,15 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
     peers.add(peer);
     let data = Buffer.alloc(0);
     let replied = false;
+    const preparation = new AbortController();
     const timer = setTimeout(() => peer.destroy(), 2000);
     peer.on("error", () => {});
     peer.once("close", () => {
+      preparation.abort();
       clearTimeout(timer);
       peers.delete(peer);
     });
-    peer.on("data", (chunk: Buffer) => {
+    peer.on("data", async (chunk: Buffer) => {
       if (replied) return;
       data = Buffer.concat([data, chunk]);
       if (data.length > 16384) {
@@ -181,9 +183,21 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
             (!discovery && (expected.runtimeId !== current.runtime_id || expected.sessionId !== current.session_id))
           )
             throw new Error();
-          // Closing admission is irreversible even if admitted/unknown work prevents
-          // a grant. A failed preparation never fabricates completion or waits on idle.
-          if (request.action === "terminal-prepare" && !barrier.prepare()) throw new Error();
+          if (request.action === "terminal-prepare") {
+            const isCurrent = () => {
+              const live = snapshot();
+              return (
+                !closed &&
+                !peer.destroyed &&
+                live?.run_id === runId &&
+                live.runtime_id === current.runtime_id &&
+                live.session_id === current.session_id
+              );
+            };
+            // Unknown work is rejected without closing chat. Observable work gets
+            // a reversible bounded drain; only a successful drain commits the latch.
+            if (!(await barrier.prepareWhenDrained(preparation.signal, isCurrent))) throw new Error();
+          }
           result = {
             runId,
             runtimeId: current.runtime_id,

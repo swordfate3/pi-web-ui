@@ -189,10 +189,11 @@ test("real SDK void browser command ACK and later dialog completion never prove 
       f.events.find((e) => e.type === "extension_ui_request" && e.method === "confirm"),
     );
     assert.equal((await f.adapter("terminal-prepare", await f.identity())).ok, false);
-    assert.equal((await request("prompt", { message: "must not execute" })).error, "terminal_untracked");
+    assert.equal((await request("set_session_name", { name: "chat still usable" })).ok, true);
     f.harness.respondToUI(String(dialog.id), false);
     await waitFor(() => f.events.find((e) => e.message === "FIXTURE_REJECTED_BY_RPC"));
     assert.equal((await f.adapter("terminal-prepare", await f.identity())).ok, false);
+    assert.equal((await request("set_session_name", { name: "unknown still retained" })).ok, true);
     await f.harness.rpc({ type: "prompt", message: "/test-barrier-reload" });
     assert.equal((await f.adapter("terminal-prepare", await f.identity())).ok, false);
   } finally {

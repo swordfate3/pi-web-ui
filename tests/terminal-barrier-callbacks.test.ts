@@ -51,10 +51,11 @@ test("open_file cannot launch a host opener after preparation during its deferre
   syncBuiltinESMExports();
   try {
     const work = f.context.handleRequest({}, { id: "open", method: "open_file", params: { filePath: "/fixture" } });
-    assert.equal(f.barrier.prepare(), false);
+    const preparing = f.barrier.prepareWhenDrained(new AbortController().signal, () => true);
     await work;
     assert.equal(launches, 0);
     assert.equal(f.responses[0].error, "terminal_untracked");
+    assert.equal(await preparing, true);
   } finally {
     opener.mock.restore();
     syncBuiltinESMExports();
@@ -147,7 +148,7 @@ function fixture() {
   return { barrier, context, responses, commands, dispatched };
 }
 
-test("delayed internal reload command cannot execute after prepare even though dispatch was ACKed", async () => {
+test("rejected unknown-work prepare preserves a delayed internal command without clearing uncertainty", async () => {
   const f = fixture();
   let reloads = 0;
   f.context.registerSessionCommand("webui-reload", {
@@ -163,7 +164,7 @@ test("delayed internal reload command cannot execute after prepare even though d
   const command = f.commands.get("webui-reload");
   assert.ok(command);
   await command.handler(dispatchId, f.context.latestExecuteCtx);
-  assert.equal(reloads, 0);
+  assert.equal(reloads, 1, "a rejected prepare must not strand the pre-takeover chat command");
   f.context.clearSessionAction();
   assert.equal(f.barrier.prepare(), false, "clearing a dispatch timer cannot erase unknown completion");
 });
@@ -193,10 +194,11 @@ test("admitted navigation blocks grant and cannot ACK success after terminal pre
     {},
     { id: "navigate", method: "navigate_tree", params: { entryId: "target" } },
   );
-  assert.equal(f.barrier.prepare(), false);
+  const preparing = f.barrier.prepareWhenDrained(new AbortController().signal, () => true);
   navigation.resolve({ cancelled: false });
   await request;
   assert.equal(f.responses[0].error, "terminal_untracked");
+  assert.equal(await preparing, true);
   assert.equal(f.barrier.prepare(), true);
 });
 
@@ -227,13 +229,14 @@ test("revision navigation admitted before takeover cannot dispatch its queued us
   f.context.latestExecuteCtx.navigateTree = () => navigation.promise;
   const request = f.context.handleRequest(ws, { id: "revision", method: "submit_message_revision", params });
   assert.equal(f.context.sessionReplacementPending, true);
-  assert.equal(f.barrier.prepare(), false);
+  const preparing = f.barrier.prepareWhenDrained(new AbortController().signal, () => true);
   leaf = null;
   f.context.revisionTreeVersion++;
   navigation.resolve({ cancelled: false });
   await request;
   assert.equal(f.responses[0].ok, false);
   assert.equal(f.dispatched.length, 0);
+  assert.equal(await preparing, true);
   assert.equal(f.barrier.prepare(), true);
 });
 
@@ -253,11 +256,12 @@ test("already dispatched async model work keeps grant unavailable until its real
     { id: "model", method: "set_model", params: { provider: "fixture", modelId: "model" } },
   );
   await started.promise;
-  assert.equal(f.barrier.prepare(), false);
+  const preparing = f.barrier.prepareWhenDrained(new AbortController().signal, () => true);
   assert.equal(f.barrier.latched, false);
   setting.resolve(true);
   await request;
   assert.equal(f.responses[0].error, "terminal_untracked");
+  assert.equal(await preparing, true);
   assert.equal(f.barrier.prepare(), true);
 });
 
@@ -306,7 +310,8 @@ for (const takeover of [false, true]) {
     const command = f.commands.get("webui-resume-session");
     assert.ok(command);
     const work = command.handler("dispatch selection", old);
-    if (takeover) assert.equal(f.barrier.prepare(), false);
+    const preparing = takeover ? f.barrier.prepareWhenDrained(new AbortController().signal, () => true) : undefined;
+    if (takeover) assert.equal(f.barrier.latched, false);
     else {
       stale = true;
       f.context.latestExecuteCtx = { ...old, isIdle: () => true };
@@ -319,5 +324,6 @@ for (const takeover of [false, true]) {
       false,
     );
     if (takeover) assert.ok(errors.includes("terminal_untracked"));
+    if (preparing) assert.equal(await preparing, true);
   });
 }

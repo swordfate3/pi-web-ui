@@ -111,11 +111,31 @@ test("terminal adapter authenticates exact live identity, drains browser work, s
     const barrier = childTerminalBarrier();
     assert.equal(barrier.blocked, false);
     const finish = barrier.enter();
+    const started = performance.now();
     assert.equal((await f.request(prepare)).ok, false);
-    assert.throws(() => barrier.enter(), /terminal_untracked/);
+    assert.ok(performance.now() - started < 500, "failed drain must fit the broker handshake budget");
+    const stillWritable = barrier.enter();
+    stillWritable();
     assert.equal((await f.request(state)).result.latched, false);
     finish();
-    assert.equal((await f.request(prepare)).result.latched, true);
+
+    const staleFinish = barrier.enter();
+    const stalePrepare = f.request(prepare);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(barrier.blocked, true, "admission pauses while preparation is pending");
+    f.set({ session_id: "session-2" });
+    staleFinish();
+    assert.equal((await stalePrepare).ok, false, "identity must be rechecked before committing");
+    assert.equal(barrier.blocked, false);
+    f.set({ session_id: "session-1" });
+
+    const drained = barrier.enter();
+    const preparing = f.request(prepare);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(barrier.blocked, true);
+    assert.equal(barrier.latched, false);
+    drained();
+    assert.equal((await preparing).result.latched, true);
     assert.equal((await f.request(state)).result.latched, true);
     assert.equal(
       (

@@ -22,7 +22,7 @@ async function waitFor<T>(read: () => T | undefined): Promise<T> {
   throw new Error("Timed out waiting for isolated fixture");
 }
 
-async function fixture() {
+async function fixture(profile = "web-terminal-v1") {
   const directory = mkdtempSync(path.join(tmpdir(), "pi-terminal-barrier-real-"));
   const socketPath = path.join(directory, "adapter.sock");
   const env = {
@@ -30,7 +30,7 @@ async function fixture() {
     PI_RUNTIME_TERMINAL_EPOCH: terminalEpoch,
     PI_RUNTIME_CHILD_TOKEN: token,
     PI_RUNTIME_EXTENSION_SOCKET: socketPath,
-    PI_RUNTIME_PROFILE: "web-terminal-v1",
+    PI_RUNTIME_PROFILE: profile,
   };
   const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
   Object.assign(process.env, env);
@@ -57,7 +57,8 @@ async function fixture() {
   const connect = async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${harness.port}/ws`);
     sockets.push(ws);
-    const messages: { type?: string; event?: string; id?: string; ok: boolean; error?: string }[] = [];
+    const messages: { type?: string; event?: string; id?: string; ok: boolean; error?: string; result?: unknown }[] =
+      [];
     ws.on("message", (data) => messages.push(JSON.parse(data.toString())));
     await waitFor(() => messages.find((message) => message.event === "state_sync"));
     return async (method: string, params: Record<string, unknown> = {}) => {
@@ -112,6 +113,7 @@ test("real native dialog permits takeover; two browsers and HTTP cannot mutate; 
   try {
     const first = await f.connect();
     const second = await f.connect();
+    assert.equal((await f.adapter("terminal-state")).result.latched, false, "startup policy is not prepare");
     const command = f.harness.rpc({ type: "prompt", message: "/test-terminal-confirm" });
     void command.catch(() => {}); // A failed assertion still shuts down the waiting fixture.
     const dialog = await waitFor(() =>
@@ -119,7 +121,6 @@ test("real native dialog permits takeover; two browsers and HTTP cannot mutate; 
     );
     const before = await f.adapter("terminal-state");
     const identity = await f.identity();
-    assert.equal((await f.adapter("terminal-prepare", identity)).result.latched, true);
     for (const request of [first, second]) {
       for (const method of [
         "prompt",
@@ -129,6 +130,8 @@ test("real native dialog permits takeover; two browsers and HTTP cannot mutate; 
         "set_model",
         "cycle_model",
         "set_thinking_level",
+        "set_settings",
+        "extension_command",
         "set_session_name",
         "compact",
         "navigate_tree",
@@ -164,6 +167,7 @@ test("real native dialog permits takeover; two browsers and HTTP cannot mutate; 
       f.events.some((e) => e.message === "FIXTURE_APPROVED_BY_RPC"),
       false,
     );
+    assert.equal((await f.adapter("terminal-prepare", identity)).result.latched, true);
     f.harness.respondToUI(String(dialog.id), false);
     await command;
     await waitFor(() => f.events.find((e) => e.message === "FIXTURE_REJECTED_BY_RPC"));
@@ -178,24 +182,58 @@ test("real native dialog permits takeover; two browsers and HTTP cannot mutate; 
   }
 });
 
-test("real SDK void browser command ACK and later dialog completion never prove mutation drained", {
+test("real SDK rejects browser prompt and command before prepare without executing; native dialog still works", {
   timeout: 60_000,
 }, async () => {
   const f = await fixture();
   try {
     const request = await f.connect();
-    assert.equal((await request("prompt", { message: "/test-terminal-confirm", executePiCommand: true })).ok, true);
+    const marker = "BROWSER_STARTUP_MUST_NOT_EXECUTE";
+    assert.equal((await request("prompt", { message: marker })).error, "terminal_untracked");
+    assert.equal(
+      (await request("prompt", { message: "/test-terminal-confirm", executePiCommand: true })).error,
+      "terminal_untracked",
+    );
+    // Actual SDK state, not an ACK or idle observation: neither a user message
+    // nor an extension command reached the session.
+    const state = await f.harness.rpc({ type: "get_messages" });
+    assert.equal(JSON.stringify(state).includes(marker), false);
+    assert.equal(
+      f.events.some((e) => e.type === "message_start" || (e.type === "extension_ui_request" && e.method === "confirm")),
+      false,
+    );
+    assert.equal((await f.adapter("terminal-state")).result.latched, false);
+    await f.harness.rpc({ type: "prompt", message: "/test-barrier-reload" });
+    assert.equal(
+      (await f.adapter("terminal-state")).result.latched,
+      false,
+      "reload preserves policy without inventing a latch",
+    );
+    assert.equal((await (await f.connect())("prompt", { message: marker })).error, "terminal_untracked");
+    assert.equal((await f.adapter("terminal-prepare", await f.identity())).result.latched, true);
+    const command = f.harness.rpc({ type: "prompt", message: "/test-terminal-confirm" });
+    void command.catch(() => {});
     const dialog = await waitFor(() =>
       f.events.find((e) => e.type === "extension_ui_request" && e.method === "confirm"),
     );
-    assert.equal((await f.adapter("terminal-prepare", await f.identity())).ok, false);
-    assert.equal((await request("set_session_name", { name: "chat still usable" })).ok, true);
     f.harness.respondToUI(String(dialog.id), false);
+    await command;
     await waitFor(() => f.events.find((e) => e.message === "FIXTURE_REJECTED_BY_RPC"));
-    assert.equal((await f.adapter("terminal-prepare", await f.identity())).ok, false);
-    assert.equal((await request("set_session_name", { name: "unknown still retained" })).ok, true);
-    await f.harness.rpc({ type: "prompt", message: "/test-barrier-reload" });
-    assert.equal((await f.adapter("terminal-prepare", await f.identity())).ok, false);
+  } finally {
+    await f.close();
+  }
+});
+
+test("ordinary inherited-tui profile still executes an actual browser prompt", { timeout: 60_000 }, async () => {
+  const f = await fixture("inherited-tui");
+  try {
+    const request = await f.connect();
+    const marker = "ORDINARY_BROWSER_PROMPT_WORKS";
+    assert.equal((await request("prompt", { message: marker })).ok, true);
+    await waitFor(() => f.events.find((event) => event.type === "agent_end"));
+    const messages = await f.harness.rpc({ type: "get_messages" });
+    assert.ok(JSON.stringify(messages).includes(marker));
+    assert.ok(JSON.stringify(messages).includes('"role":"assistant"'), "actual agent response, not dispatch ACK");
   } finally {
     await f.close();
   }

@@ -1,10 +1,24 @@
 /** Child-owned browser mutation accounting, separate from native agent work. */
 export class TerminalBarrier {
+  readonly #browserReadOnly: boolean;
   #closed = false;
   #active = 0;
   #unknown = false;
   #pending = false;
   #changed: (() => void) | undefined;
+
+  constructor(browserReadOnly = false) {
+    this.#browserReadOnly = browserReadOnly;
+  }
+
+  // Startup policy is not a successful prepare, and never clears accounting.
+  get browserBlocked() {
+    return this.#browserReadOnly || this.blocked;
+  }
+
+  assertBrowserWritable() {
+    if (this.browserBlocked) throw new Error("terminal_untracked");
+  }
 
   get blocked() {
     return this.#closed || this.#pending;
@@ -18,6 +32,8 @@ export class TerminalBarrier {
   }
 
   enter() {
+    // Internal work accounting remains available independently of browser
+    // admission. Every browser ingress must check assertBrowserWritable first.
     this.assertWritable();
     this.#active++;
     let finished = false;
@@ -85,15 +101,24 @@ export class TerminalBarrier {
   }
 }
 
+const key = Symbol.for("pi.web.terminal-barrier.v1");
+
+export function browserTerminalBarrier(profile: string | undefined): TerminalBarrier | undefined {
+  // Once established, policy belongs to the child, not reloadable environment
+  // or module state. Ordinary children never create the terminal singleton.
+  return profile === "web-terminal-v1" || Object.getOwnPropertyDescriptor(globalThis, key)
+    ? childTerminalBarrier()
+    : undefined;
+}
+
 export function childTerminalBarrier(): TerminalBarrier {
-  const key = Symbol.for("pi.web.terminal-barrier.v1");
   const existing = Object.getOwnPropertyDescriptor(globalThis, key);
   if (existing) {
     if (existing.configurable || existing.writable || !Object.isFrozen(existing.value))
       throw new Error("Invalid child terminal barrier");
     return existing.value as TerminalBarrier;
   }
-  const barrier = new TerminalBarrier();
+  const barrier = new TerminalBarrier(true);
   Object.freeze(barrier);
   Object.defineProperty(globalThis, key, { value: barrier, writable: false, configurable: false });
   return barrier;

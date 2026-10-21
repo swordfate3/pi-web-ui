@@ -11,6 +11,8 @@ import { TerminalBarrier, terminalReadOnly } from "../extensions/terminal-barrie
 
 // Exercise the actual nested callbacks; only SDK/disk scheduling is controlled.
 // Separate real SDK/WS/HTTP tests cover ingress and native lifecycle wiring.
+// These use internal accounting, not a reachable pre-takeover browser path:
+// terminal-profile browser admission is immutable read-only from startup.
 const source = ts.createSourceFile(
   "mirror-server.ts",
   readFileSync(new URL("../extensions/mirror-server.ts", import.meta.url), "utf8"),

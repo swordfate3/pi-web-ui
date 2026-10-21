@@ -80,10 +80,15 @@ test("an overdue drain cannot commit ahead of its delayed timer callback", async
 
 test("child-global latch survives a fresh module instance without a writable reset slot", async () => {
   const barrier = childTerminalBarrier();
+  assert.equal(barrier.browserBlocked, true, "startup browser policy precedes prepare");
+  assert.equal(barrier.blocked, false, "internal accounting is distinct from browser policy");
+  assert.equal(barrier.latched, false, "startup policy cannot fake a successful prepare");
+  assert.throws(() => barrier.assertBrowserWritable(), /terminal_untracked/);
   assert.equal(barrier.prepare(), true);
   const freshModule = "../extensions/terminal-barrier.ts?reload";
   const reloaded = await import(freshModule);
   assert.equal(reloaded.childTerminalBarrier(), barrier);
+  assert.equal(reloaded.browserTerminalBarrier("inherited-tui"), barrier, "reload cannot unfence the child policy");
   assert.throws(() => reloaded.childTerminalBarrier().enter(), /terminal_untracked/);
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, Symbol.for("pi.web.terminal-barrier.v1"));
   assert.equal(descriptor?.writable, false);

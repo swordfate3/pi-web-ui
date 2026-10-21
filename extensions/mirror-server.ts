@@ -42,7 +42,7 @@ import {
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
 import { captureSoftwareMetadata } from "./software-metadata.ts";
-import { childTerminalBarrier, terminalReadOnly } from "./terminal-barrier.ts";
+import { browserTerminalBarrier, terminalReadOnly } from "./terminal-barrier.ts";
 import { TERMINAL_UI_REQUIRED, TerminalPromptState } from "./terminal-prompt.ts";
 import { serveWorkspaceUpload, WorkspaceUploads } from "./workspace-uploads.ts";
 
@@ -380,7 +380,7 @@ export default function (pi: ExtensionAPI) {
   // Keep pre-existing async browser mutations ineligible to race revision navigation.
   let activeBrowserMutations = 0;
   let activeHttpMutations = 0;
-  const terminalBarrier = process.env.PI_RUNTIME_PROFILE === "web-terminal-v1" ? childTerminalBarrier() : undefined;
+  const terminalBarrier = browserTerminalBarrier(process.env.PI_RUNTIME_PROFILE);
   let runtimeControl: Awaited<ReturnType<typeof startRuntimeControl>>;
   let runtimeStopping = false;
   // Protocol: replacement acknowledgements mean accepted, never completed.
@@ -417,7 +417,7 @@ export default function (pi: ExtensionAPI) {
   let activeExport: { controller: AbortController; done: Promise<unknown> } | null = null;
 
   function assertBrowserWritable(scope?: ReturnType<typeof sessionScope>) {
-    terminalBarrier?.assertWritable();
+    terminalBarrier?.assertBrowserWritable();
     if (runtimeStopping || !runtimeActive || (scope && !scopeIsCurrent(scope)))
       throw new Error("Session changed. Nothing was sent.");
   }
@@ -640,7 +640,7 @@ export default function (pi: ExtensionAPI) {
     // when dispatch fails before a command context can be supplied.
     dispatchTimer = setTimeout(() => {
       if (
-        !terminalBarrier?.blocked &&
+        !terminalBarrier?.browserBlocked &&
         runtimeActive &&
         lifecycleEpoch === epoch &&
         pendingDispatchId === dispatchId &&
@@ -1088,7 +1088,7 @@ export default function (pi: ExtensionAPI) {
       handler: async (args, commandCtx) => {
         const [dispatchId, ...commandArgs] = args.trim().split(/\s+/);
         if (
-          terminalBarrier?.blocked ||
+          terminalBarrier?.browserBlocked ||
           !runtimeActive ||
           pendingSessionCommand !== name ||
           pendingDispatchId !== dispatchId ||
@@ -1879,7 +1879,10 @@ export default function (pi: ExtensionAPI) {
       !request.method.startsWith("get_") &&
       !["abort", "health", "sync_request", "extension_ui_response"].includes(request.method);
     try {
-      if (!terminalReadOnly(request.method)) finishTerminalMutation = terminalBarrier?.enter();
+      if (!terminalReadOnly(request.method)) {
+        terminalBarrier?.assertBrowserWritable();
+        finishTerminalMutation = terminalBarrier?.enter();
+      }
       if (
         (runtimeStopping || runtimeControl?.prepared) &&
         (mutates || request.method === "abort" || request.method === "extension_ui_response")
@@ -2476,7 +2479,8 @@ export default function (pi: ExtensionAPI) {
           const uploadCtx = checkHistoryIdentity(params, true);
           if (params.runtimeId !== runtimeId) throw new Error("Invalid upload identity");
           const scope = sessionScope(uploadCtx);
-          const isCurrent = () => !terminalBarrier?.blocked && scopeIsCurrent(scope) && !sessionReplacementPending;
+          const isCurrent = () =>
+            !terminalBarrier?.browserBlocked && scopeIsCurrent(scope) && !sessionReplacementPending;
           if (params.protocol === 2) {
             sendTo(
               ws,
@@ -2506,7 +2510,7 @@ export default function (pi: ExtensionAPI) {
           const result = await workspaceUploads.complete(
             params.uploadId,
             scope,
-            () => !terminalBarrier?.blocked && scopeIsCurrent(scope) && !sessionReplacementPending,
+            () => !terminalBarrier?.browserBlocked && scopeIsCurrent(scope) && !sessionReplacementPending,
           );
           sendTo(ws, success(result));
           break;
@@ -2699,7 +2703,7 @@ export default function (pi: ExtensionAPI) {
     urlPath = urlPath.split("?")[0];
 
     if (urlPath.startsWith("/api/uploads")) {
-      if (terminalBarrier?.blocked || runtimeStopping || runtimeControl?.prepared) {
+      if (terminalBarrier?.browserBlocked || runtimeStopping || runtimeControl?.prepared) {
         res.writeHead(409, { "Cache-Control": "no-store" }).end();
         return;
       }
@@ -2713,7 +2717,7 @@ export default function (pi: ExtensionAPI) {
         scope,
         () =>
           !!scope &&
-          !terminalBarrier?.blocked &&
+          !terminalBarrier?.browserBlocked &&
           !runtimeStopping &&
           !runtimeControl?.prepared &&
           !sessionReplacementPending &&

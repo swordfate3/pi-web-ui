@@ -14,6 +14,7 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 type Frame = {
   id?: number;
   type?: string;
+  error?: string;
   ready?: boolean;
   ok?: boolean;
   blocked?: boolean;
@@ -41,7 +42,59 @@ function frames(stream: Duplex) {
       end = data.indexOf("\n");
     }
   });
-  return received;
+  let failure: Error | undefined;
+  stream.on("error", (error) => {
+    failure = error;
+  });
+  stream.on("close", () => {
+    failure ??= new Error("broker fixture stream closed before expected frame");
+  });
+  stream.on("end", () => {
+    failure ??= new Error("broker fixture stream ended before expected frame");
+  });
+  return {
+    find(match: (frame: Frame) => boolean) {
+      const frame = received.find(match);
+      if (frame) return frame;
+      const error = received.find((item) => item.type === "error");
+      if (error) throw new Error(`broker fixture rejected request: ${error.error}`);
+      if (failure) throw failure;
+      return undefined;
+    },
+  };
+}
+
+async function backendReady(directory: string, runId: string) {
+  const deadline = performance.now() + 3000;
+  while (performance.now() < deadline) {
+    const response = await new Promise<Frame>((resolve, reject) => {
+      const socket = net.createConnection(path.join(directory, "terminal.sock"));
+      let data = "";
+      socket.setTimeout(Math.max(1, deadline - performance.now()), () =>
+        socket.destroy(new Error("broker status timed out")),
+      );
+      socket.on("connect", () => socket.write(`${JSON.stringify({ v: 1, op: "status", runId })}\n`));
+      socket.on("error", reject);
+      socket.on("close", () => reject(new Error("broker status closed before response")));
+      socket.on("data", (chunk) => {
+        data += chunk;
+        const end = data.indexOf("\n");
+        if (end < 0) return;
+        try {
+          resolve(JSON.parse(data.slice(0, end)));
+        } catch (error) {
+          reject(error);
+        } finally {
+          socket.destroy();
+        }
+      });
+    });
+    if (response.type === "ready") return;
+    assert.equal(response.type, "error");
+    assert.equal(response.error, "terminal_backend_unavailable");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("broker adapter discovery did not become ready within 3s");
 }
 
 for (const scenario of ["drain", "timeout", "unknown"] as const) {
@@ -101,8 +154,9 @@ for (const scenario of ["drain", "timeout", "unknown"] as const) {
         })}\n`,
       );
       await until(() => relayFrames.find((frame) => frame.type === "started"));
-      // Allow the production broker's first adapter discovery/heartbeat to run.
-      await new Promise((resolve) => setTimeout(resolve, 120));
+      // started is not adapter discovery. Poll only the read-only status
+      // endpoint; do not reconnect/retry a control acquisition automatically.
+      await backendReady(directory, target.runId);
       peer = net.createConnection(path.join(directory, "terminal.sock"));
       const responses = frames(peer);
       await once(peer, "connect");
@@ -135,7 +189,7 @@ for (const scenario of ["drain", "timeout", "unknown"] as const) {
       assert.ok(performance.now() - start < 500, "composition must fit the unchanged broker adapter deadline");
       assert.equal(acquired.ok, scenario === "drain");
       if (scenario !== "drain") {
-        assert.equal((await control("write")).ok, true, "failed acquire must preserve browser admission");
+        assert.equal((await control("write")).ok, true, "failed acquire preserves internal accounting admission");
         assert.equal((await control("state")).latched, false);
         if (scenario === "unknown") {
           assert.equal((await request("acquire")).ok, false, "unknown was not cleared by rejection or another write");
@@ -147,7 +201,7 @@ for (const scenario of ["drain", "timeout", "unknown"] as const) {
       assert.equal((await control("write")).ok, false);
       assert.equal((await control("state")).latched, true);
       assert.equal((await request("release")).ok, true);
-      assert.equal((await control("write")).ok, false, "release cannot restore committed browser writes");
+      assert.equal((await control("write")).ok, false, "release cannot restore committed accounting admission");
     } finally {
       peer?.destroy();
       const children = [broker, adapter].filter((child) => child !== undefined);

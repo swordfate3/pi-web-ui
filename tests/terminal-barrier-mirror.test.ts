@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
-import http from "node:http";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,13 +7,6 @@ import test from "node:test";
 import { WebSocket } from "ws";
 import { childTerminalBarrier } from "../extensions/terminal-barrier.ts";
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
 async function until(read: () => boolean) {
   const deadline = Date.now() + 4000;
   while (!read()) {
@@ -23,7 +15,7 @@ async function until(read: () => boolean) {
   }
 }
 
-test("real mirror drains admitted HTTP/compaction and cancels deferred model/upload dispatch with fresh context", {
+test("real mirror rejects startup browser mutations before preflight, SDK and upload effects across contexts", {
   timeout: 20_000,
 }, async () => {
   const directory = mkdtempSync(path.join(tmpdir(), "pi-terminal-mirror-race-"));
@@ -50,7 +42,6 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
   Object.assign(process.env, env);
   type Handler = (event: unknown, ctx: ReturnType<typeof context>) => unknown;
   type Command = { handler: (args: string, ctx: ReturnType<typeof context>) => unknown };
-  type Compaction = { onComplete: (result: { summary: string }) => void; onError: (error: Error) => void };
   const events = new Map<string, Handler[]>();
   const commands = new Map<string, Command>();
   let generation = 0;
@@ -59,11 +50,8 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
     { provider: "faux", id: "one" },
     { provider: "faux", id: "two" },
   ];
-  let model = models[0];
-  let getModels = async () => models;
-  let getCredentials = async () => ({ ok: true });
-  let compactOptions: Compaction | undefined;
-  let sends = 0;
+  const model = models[0];
+  const effects: string[] = [];
   const context = () => {
     const ownGeneration = generation;
     const check = () => assert.equal(ownGeneration, generation, "stale SDK context was accessed");
@@ -76,11 +64,13 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
       modelRegistry: {
         getAvailable: () => {
           check();
-          return getModels();
+          effects.push("model lookup");
+          return models;
         },
         getApiKeyAndHeaders: () => {
           check();
-          return getCredentials();
+          effects.push("credentials");
+          return { ok: true };
         },
       },
       ui: { notify() {}, setStatus() {} },
@@ -96,9 +86,9 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
         check();
         return undefined;
       },
-      compact: (options: Compaction) => {
+      compact: () => {
         check();
-        compactOptions = options;
+        effects.push("compact");
       },
       sessionManager: {
         getSessionId: () => {
@@ -144,15 +134,17 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
     },
     getThinkingLevel: () => "off",
     getSessionName: () => "fixture",
-    setSessionName() {},
+    setSessionName() {
+      effects.push("session name");
+    },
     getCommands: () => [],
     getSettings: () => ({}),
-    setModel: async (value: typeof model) => {
-      model = value;
+    setModel: async () => {
+      effects.push("set model");
       return true;
     },
     sendUserMessage() {
-      sends++;
+      effects.push("send");
     },
   };
   const module = "../extensions/mirror-server.ts";
@@ -207,105 +199,97 @@ test("real mirror drains admitted HTTP/compaction and cancels deferred model/upl
     await start.handler("", context());
     const request = await connect();
     const second = await connect();
-    let lookupStarted = false;
-    const oldLookup = deferred<typeof models>();
-    getModels = () => {
-      lookupStarted = true;
-      return oldLookup.promise;
+    const diskBefore = readdirSync(directory, { recursive: true }).sort();
+    const baseline = effects.length;
+    for (const ask of [request, second]) {
+      for (const method of [
+        "prompt",
+        "steer",
+        "follow_up",
+        "abort",
+        "enter_arch_mode",
+        "exit_arch_mode",
+        "set_model",
+        "cycle_model",
+        "cycle_thinking_level",
+        "set_thinking_level",
+        "set_session_name",
+        "set_auto_compaction",
+        "compact",
+        "export_html",
+        "switch_session",
+        "reload",
+        "fork_session",
+        "navigate_tree",
+        "submit_message_revision",
+        "switch_message_version",
+        "set_auth",
+        "prepare_upload",
+        "complete_upload",
+        "prepare_file_download",
+        "open_file",
+        "extension_ui_response",
+        "get_future_write",
+        "arbitrary_extension_command",
+      ]) {
+        const response = await ask(method, {
+          message: "/arbitrary-command",
+          executePiCommand: true,
+          provider: "faux",
+          modelId: "two",
+          name: "not renamed",
+          filename: "input.txt",
+          size: 3,
+          filePath: directory,
+          uploads: ["untrusted"],
+          confirmed: true,
+        });
+        assert.equal(response.error, "terminal_untracked", method);
+      }
+      assert.equal((await ask("health")).ok, true);
+      assert.equal((await ask("get_messages")).ok, true);
+    }
+    assert.deepEqual(effects.slice(baseline), [], "no SDK mutation or async model/credential preflight");
+    for (const suffix of ["", "/invalid", "?uploadId=invalid"]) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/uploads${suffix}`, {
+        method: "PUT",
+        headers: { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/octet-stream" },
+        body: "abc",
+      });
+      assert.equal(response.status, 409, suffix);
+    }
+    assert.deepEqual(
+      readdirSync(directory, { recursive: true }).sort(),
+      diskBefore,
+      "no upload directory or file effects",
+    );
+    const snapshot = (await request("get_messages")).result;
+    const expected = {
+      runId: env.PI_RUNTIME_RUN_ID,
+      terminalEpoch: env.PI_RUNTIME_TERMINAL_EPOCH,
+      sessionId,
+      runtimeId: snapshot.runtimeId,
     };
-    const oldChange = request("set_model", { provider: "faux", modelId: "two" });
-    await until(() => lookupStarted);
+    assert.equal((await adapter("terminal-state", expected)).result.latched, false);
+    // Internal accounting remains genuine even though browsers cannot create it.
+    const finish = childTerminalBarrier().enter();
+    assert.equal((await adapter("terminal-prepare", expected)).ok, false);
+    assert.equal(childTerminalBarrier().latched, false);
+    assert.equal(
+      (await second("prompt", { message: "still readonly after failed prepare" })).error,
+      "terminal_untracked",
+    );
+    finish();
     generation++;
     sessionId = "session-2";
     await emit("session_start");
-    oldLookup.resolve(models);
-    assert.equal((await oldChange).ok, false, "old session model lookup must not dispatch into replacement");
-    assert.equal(model.id, "one");
-
-    const snapshot = (await request("get_messages")).result;
-    const scope = { sessionId, runtimeId: snapshot.runtimeId };
-    const expected = { runId: env.PI_RUNTIME_RUN_ID, terminalEpoch: env.PI_RUNTIME_TERMINAL_EPOCH, ...scope };
-    const upload = await request("prepare_upload", { ...scope, filename: "input.txt", size: 3 });
-    assert.equal(upload.ok, true);
-    const uploaded = await fetch(`http://127.0.0.1:${port}/api/uploads/${upload.result.uploadId}`, {
-      method: "PUT",
-      headers: { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/octet-stream" },
-      body: "abc",
-    }).catch((error: Error) => {
-      throw new Error(`Upload fixture transport failed: ${String(error.cause)}`, { cause: error });
-    });
-    assert.equal(uploaded.status, 200);
-    let credentialsStarted = false;
-    const credentials = deferred<{ ok: boolean }>();
-    getCredentials = () => {
-      credentialsStarted = true;
-      return credentials.promise;
-    };
-    const send = request("prompt", { ...scope, message: "attachment", uploads: [upload.result.uploadId] });
-    await until(() => credentialsStarted);
-
-    lookupStarted = false;
-    let lookupCount = 0;
-    const lookup = deferred<typeof models>();
-    getModels = () => {
-      lookupCount++;
-      lookupStarted = true;
-      return lookup.promise;
-    };
-    const change = request("set_model", { provider: "faux", modelId: "two" });
-    const cycle = second("cycle_model");
-    await until(() => lookupCount === 2);
-    assert.equal((await second("compact")).ok, true);
-    assert.ok(compactOptions);
-    const pendingUpload = await second("prepare_upload", { ...scope, filename: "partial.txt", size: 6 });
-    assert.equal(pendingUpload.ok, true);
-    let httpRequest!: http.ClientRequest;
-    const httpResult = new Promise<number>((resolve) => {
-      httpRequest = http.request(
-        `http://127.0.0.1:${port}/api/uploads/${pendingUpload.result.uploadId}`,
-        {
-          method: "PUT",
-          headers: {
-            Origin: `http://127.0.0.1:${port}`,
-            "Content-Length": "6",
-            "Content-Type": "application/octet-stream",
-          },
-        },
-        (res) => {
-          res.resume();
-          res.on("end", () => resolve(res.statusCode ?? 0));
-          res.on("error", () => resolve(0));
-        },
-      );
-      httpRequest.on("error", () => resolve(0));
-      httpRequest.setTimeout(3000, () => httpRequest.destroy());
-      httpRequest.write("abc");
-    });
-    const partialPath = path.join(directory, path.dirname(pendingUpload.result.relativePath), ".partial");
-    await until(() => existsSync(partialPath) && statSync(partialPath).size === 3);
-    const preparing = adapter("terminal-prepare", expected);
-    await until(() => childTerminalBarrier().blocked);
-    assert.equal((await second("abort")).error, "terminal_untracked");
-    lookup.resolve(models);
-    credentials.resolve({ ok: true });
-    httpRequest.end("def");
-    assert.equal((await change).error, "terminal_untracked");
-    assert.equal((await cycle).error, "terminal_untracked");
-    assert.equal((await send).ok, false);
-    assert.notEqual(await httpResult, 200);
-    assert.equal(existsSync(path.join(directory, pendingUpload.result.relativePath)), false);
-    assert.equal(model.id, "one", "neither delayed model operation reaches the sink");
-    assert.equal(sends, 0, "attachment preflight cannot dispatch after takeover");
-    assert.equal((await preparing).ok, false, "compaction ACK is not completion; bounded drain must time out");
-    assert.equal(childTerminalBarrier().blocked, false);
-    assert.equal((await second("set_session_name", { name: "chat survived timeout" })).ok, true);
-    generation++; // New event context within the same session; compact closure is stale.
-    await emit("turn_start");
-    const retry = adapter("terminal-prepare", expected);
-    await until(() => childTerminalBarrier().blocked);
-    compactOptions.onComplete({ summary: "done" });
-    assert.equal((await request("get_messages")).ok, true, "compact callback must not restore its stale context");
-    assert.equal((await retry).result.latched, true);
+    assert.equal((await request("set_model", { provider: "faux", modelId: "two" })).error, "terminal_untracked");
+    const current = { ...expected, sessionId };
+    assert.equal((await adapter("terminal-prepare", expected)).ok, false, "old identity stays fenced");
+    assert.equal((await adapter("terminal-prepare", current)).result.latched, true);
+    assert.equal((await request("get_messages")).ok, true, "fresh context remains readable");
+    assert.equal((await second("prompt", { message: "latched too" })).error, "terminal_untracked");
+    assert.deepEqual(effects.slice(baseline), []);
   } finally {
     for (const ws of sockets) ws.terminate();
     await emit("session_shutdown", { reason: "quit" });

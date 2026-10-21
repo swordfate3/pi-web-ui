@@ -39,6 +39,11 @@ const SOURCE_FILES = [
   "extensions/remote-access/plan.ts",
   "extensions/remote-access/gateway.py",
   "scripts/web-dist.mjs",
+  "runtime/terminal/broker.ts",
+  "runtime/terminal/protocol.ts",
+  "runtime/terminal/supervisor.py",
+  "runtime/terminal/client.py",
+  "runtime/terminal/build.mjs",
 ];
 
 async function fixture({ dist = true } = {}) {
@@ -50,6 +55,7 @@ async function fixture({ dist = true } = {}) {
   await mkdir(path.join(root, "scripts"), { recursive: true });
   await mkdir(path.join(root, "hub"), { recursive: true });
   await mkdir(path.join(root, "bin"), { recursive: true });
+  await mkdir(path.join(root, "runtime/terminal"), { recursive: true });
   for (const file of SOURCE_FILES) {
     await writeFile(path.join(root, file), `fixture:${file}\n`);
   }
@@ -60,6 +66,7 @@ async function fixture({ dist = true } = {}) {
   await writeFile(path.join(root, "hub/server.ts"), "export const hub = true;\n");
   await writeFile(path.join(root, "bin/pi-web-hub.mjs"), "console.log('hub');\n");
   if (dist) {
+    await runtimeOutputs(root);
     await mkdir(path.join(root, "dist/assets"), { recursive: true });
     await mkdir(path.join(root, "dist/hub"), { recursive: true });
     await writeFile(path.join(root, "dist/hub/pi-web-hub.mjs"), "#!/usr/bin/env node\nconsole.log('hub fixture');\n");
@@ -67,6 +74,12 @@ async function fixture({ dist = true } = {}) {
     await writeFile(path.join(root, "dist/assets/app.js"), "console.log('fixture');\n");
   }
   return root;
+}
+
+async function runtimeOutputs(root) {
+  await mkdir(path.join(root, "dist/runtime"), { recursive: true });
+  for (const file of ["broker.cjs", "supervisor.py", "client.py"])
+    await writeFile(path.join(root, "dist/runtime", file), "runtime fixture\n");
 }
 
 async function loadManifest(root) {
@@ -99,6 +112,7 @@ test("build-time source identity needs no dist and matches the final manifest", 
   await mkdir(path.join(root, "dist/hub"), { recursive: true });
   await writeFile(path.join(root, "dist/index.html"), "<main>fixture</main>");
   await writeFile(path.join(root, "dist/hub/pi-web-hub.mjs"), "// independent output\n");
+  await runtimeOutputs(root);
   const manifest = await createManifest(root);
   assert.deepEqual(before, manifest.source);
   await writeFile(path.join(root, "package.json"), '{"version":"1.0.1"}');
@@ -140,6 +154,11 @@ test("creates and verifies deterministic source and output inventories", async (
       "package-lock.json",
       "package.json",
       "public/icons/icon.svg",
+      "runtime/terminal/broker.ts",
+      "runtime/terminal/build.mjs",
+      "runtime/terminal/client.py",
+      "runtime/terminal/protocol.ts",
+      "runtime/terminal/supervisor.py",
       "scripts/web-dist.mjs",
       "src/web/index.html",
       "src/web/nested/app.tsx",
@@ -150,7 +169,7 @@ test("creates and verifies deterministic source and output inventories", async (
   );
   assert.deepEqual(
     first.outputs.files.map(({ path: file }) => file),
-    ["assets/app.js", "hub/pi-web-hub.mjs", "index.html"],
+    ["assets/app.js", "hub/pi-web-hub.mjs", "index.html", "runtime/broker.cjs", "runtime/client.py", "runtime/supervisor.py"],
   );
 
   const written = await writeManifest(root);
@@ -192,6 +211,21 @@ test("refuses missing prebuilt hub in write, verify, install and assets-only", a
   }
 });
 
+test("runtime outputs cannot be removed from an installed package or its manifest", async () => {
+  for (const file of ["runtime/broker.cjs", "runtime/client.py", "runtime/supervisor.py"]) {
+    const root = await fixture();
+    await writeManifest(root);
+    await rm(path.join(root, "dist", file));
+    for (const options of [{}, { install: true }, { assetsOnly: true }])
+      await assert.rejects(verifyManifest(root, options), /Build output is incomplete/);
+    const manifest = await loadManifest(root);
+    manifest.outputs.files = manifest.outputs.files.filter((entry) => entry.path !== file);
+    refreshInventory(manifest.outputs);
+    await saveManifest(root, manifest);
+    await assert.rejects(verifyManifest(root, { assetsOnly: true }), /outputs must include runtime/);
+  }
+});
+
 test("detects changed, missing, and extra output files", async () => {
   const root = await fixture();
   await writeManifest(root);
@@ -223,7 +257,7 @@ test("detects stale source content and source inventory omissions", async () => 
 
 test("rejects stale browser, connection and hub inputs in verify and install", async (t) => {
   const inputs = [
-    ...SOURCE_FILES.filter((file) => file.startsWith("extensions/")),
+    ...SOURCE_FILES.filter((file) => file.startsWith("extensions/") || file.startsWith("runtime/")),
     "hub/server.ts",
     "bin/pi-web-hub.mjs",
     "vite.hub.config.ts",

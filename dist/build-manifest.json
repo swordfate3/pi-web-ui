@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "source": {
-    "count": 178,
-    "sha256": "46903a9c3574e3164feae5b1fbcd1414ebb0f2435a6b6b313db082a18204bb02",
+    "count": 183,
+    "sha256": "d5735c09ae9d5999d3dab9135cd787cfb6b7c32410c36164a1bedbed333f6e36",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -186,7 +186,7 @@
       },
       {
         "path": "package.json",
-        "sha256": "30cb222c72386988d30c2137f47b157008b1e72b102d604b1f1618ea12cb1da7"
+        "sha256": "bf64b84a33cf39cdb6f6e7441d56b90b0b475c2ef90e284f36dbbbaa85480bda"
       },
       {
         "path": "public/icons/pi-web-ui-192.png",
@@ -209,8 +209,28 @@
         "sha256": "5f848b1b6ec80ddacd80ed20c56aa7db7379a26b169d783a2c8a21e9e39d6dd2"
       },
       {
+        "path": "runtime/terminal/broker.ts",
+        "sha256": "c4e606ab9f89a32d444ce81395c1ebbc992210eb55a7c71d06070ea09e657635"
+      },
+      {
+        "path": "runtime/terminal/build.mjs",
+        "sha256": "fdf7d3c91519558988806b530758e6917928773b6cb20ce4efc46afa1ef43ec4"
+      },
+      {
+        "path": "runtime/terminal/client.py",
+        "sha256": "fa96788b157648614b00db038a84e5cad4ab3d7daf70d5474f72f828dd942fb0"
+      },
+      {
+        "path": "runtime/terminal/protocol.ts",
+        "sha256": "3644a11cc5724c83e85d86854a386b78e7ea19f3279055750ec0fb8ac963950e"
+      },
+      {
+        "path": "runtime/terminal/supervisor.py",
+        "sha256": "9d7be086a5394a08f52f5b7e85e5f72cbeee13cfe7e26f0ac74af1fd5ae7e600"
+      },
+      {
         "path": "scripts/web-dist.mjs",
-        "sha256": "3e9ae38ef91dac25808d43d8928187d3c51f6f2cd3c530b86d81193f9c6d1734"
+        "sha256": "959f2bfcb39f01a2467d822c3a431f522e950e7b685b114276e8dfe5e204a934"
       },
       {
         "path": "src/web/components/ai-elements/code-block.tsx",
@@ -719,8 +739,8 @@
     ]
   },
   "outputs": {
-    "count": 732,
-    "sha256": "b7d4d8c1a32513a647536438a2afb881f4f90aa365b18e613cf9f088675fd8bb",
+    "count": 735,
+    "sha256": "0733bf252459e1badb729cc1f7f60642e2876a6220de442fdcaa9775c5b559bd",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3624,7 +3644,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "29f87194ee5a08bee13396d03296975d5dda24eec94ec66c203bac2c4a51b8c7"
+        "sha256": "c456e85b0b7e265d5f96b7c642f0d562a5c243ba21502f7550eb0081666da197"
       },
       {
         "path": "icons/pi-web-ui-192.png",
@@ -3645,6 +3665,18 @@
       {
         "path": "manifest.json",
         "sha256": "aaaa0e1c772e86a0fd337926edbdef3d690f2c8575f2ca9688771bbe12522fee"
+      },
+      {
+        "path": "runtime/broker.cjs",
+        "sha256": "f1d5be77c3ba992e546d716ef9b7223c1a45998d929a513af181572a4bd35a87"
+      },
+      {
+        "path": "runtime/client.py",
+        "sha256": "fa96788b157648614b00db038a84e5cad4ab3d7daf70d5474f72f828dd942fb0"
+      },
+      {
+        "path": "runtime/supervisor.py",
+        "sha256": "9d7be086a5394a08f52f5b7e85e5f72cbeee13cfe7e26f0ac74af1fd5ae7e600"
       },
       {
         "path": "sw.js",

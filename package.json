@@ -27,7 +27,8 @@
   },
   "scripts": {
     "dev:web": "vite --host 127.0.0.1",
-    "build:web": "tsc --noEmit && vite build && vite build --config vite.hub.config.ts && node scripts/web-dist.mjs --write",
+    "build:web": "tsc --noEmit && vite build && vite build --config vite.hub.config.ts && npm run build:runtime && node scripts/web-dist.mjs --write",
+    "build:runtime": "node runtime/terminal/build.mjs",
     "verify:dist": "node scripts/web-dist.mjs",
     "test:unit": "node --import ./tests/register-ts.mjs --test tests/*.test.ts tests/*.test.mjs src/web/src/core/i18n.test.ts src/web/src/components/pi-web-ui/sidebar-tree.test.ts",
     "preview:web": "vite preview --host 127.0.0.1",
@@ -105,6 +106,11 @@
   "files": [
     "bin/",
     "hub/",
+    "runtime/terminal/broker.ts",
+    "runtime/terminal/protocol.ts",
+    "runtime/terminal/supervisor.py",
+    "runtime/terminal/client.py",
+    "runtime/terminal/build.mjs",
     "extensions/",
     "dist/",
     "public/",

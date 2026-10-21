@@ -61,7 +61,7 @@ function piEnv(agentDir, gitRepo) {
   });
   return env;
 }
-async function copyFixture(destination) {
+export async function copyFixture(destination) {
   await mkdir(destination, { recursive: true });
   const files = [
     "package.json",
@@ -76,7 +76,7 @@ async function copyFixture(destination) {
     "vite.hub.config.ts",
     "tsconfig.json",
   ];
-  const dirs = ["bin", "hub", "extensions", "src/web", "public", "dist", "docs/images"];
+  const dirs = ["bin", "hub", "extensions", "runtime/terminal", "src/web", "public", "dist", "docs/images"];
   for (const file of files) {
     await mkdir(path.dirname(path.join(destination, file)), { recursive: true });
     await cp(path.join(project, file), path.join(destination, file));
@@ -233,6 +233,11 @@ async function main() {
       "extensions/runtime-control.ts",
       "extensions/runtime-metadata.ts",
       "extensions/runtime-stdin-guard.mjs",
+      "runtime/terminal/broker.ts",
+      "runtime/terminal/protocol.ts",
+      "runtime/terminal/supervisor.py",
+      "runtime/terminal/client.py",
+      "runtime/terminal/build.mjs",
       "src/web/src/core/incremental-sha256.ts",
     ];
     for (const [index, input] of staleInputs.entries()) {
@@ -278,6 +283,14 @@ async function main() {
       "docs/hub.md",
       "bin/pi-web-hub.mjs",
       "dist/hub/pi-web-hub.mjs",
+      "dist/runtime/broker.cjs",
+      "dist/runtime/supervisor.py",
+      "dist/runtime/client.py",
+      "runtime/terminal/broker.ts",
+      "runtime/terminal/protocol.ts",
+      "runtime/terminal/supervisor.py",
+      "runtime/terminal/client.py",
+      "runtime/terminal/build.mjs",
       "hub/server.ts",
       "extensions/connection-config.ts",
       "extensions/connection-listener.ts",

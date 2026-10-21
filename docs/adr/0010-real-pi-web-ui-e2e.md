@@ -399,6 +399,43 @@ The real Hub scenarios cover desktop/mobile return-home links, unsent text and a
 
 ## References
 
+### Approved installed native-terminal exception (Task6)
+
+`e2e/features/native-terminal.feature` is a narrowly scoped exception to the
+RPC launch convention: native `ctx.ui.confirm` and `ctx.ui.custom` must run in
+the actual installed Pi TUI/PTY. Its Playwright-BDD steps use Browser → real Hub
+→ real Gate provider/Engine → fixed installed helper/broker/supervisor → one
+real Pi child with the real mirror adapter. Only the model is faux. No synthetic
+PTY child, mocked product WebSocket, browser state injection, or RPC process
+substitutes for this chain. Existing RPC scenarios and their default command are
+unchanged; this Docker-dependent scenario is explicitly opt-in.
+
+After building dist and generating BDD, run with `PI_TASK6_NATIVE_E2E=1`,
+`PI_TASK6_GATE_SOURCE` and `PI_TASK6_DOCKER_SOURCE` pointing to the reviewed host
+sources, and `PI_E2E_BROWSER_EXECUTABLE` pointing to an already cached browser:
+
+```bash
+PI_TASK6_NATIVE_E2E=1 npx playwright test -c e2e/playwright.config.ts --grep @native-terminal
+```
+
+The test owns uniquely labelled images/containers/volumes and a temporary git
+workspace/private Hub state; it supplies no user credentials or production
+volumes. It invokes the actual closed root-admin preflight before Pi creation,
+then actual installed Compose with the terminal logging overlay. The isolated
+Compose service deliberately has no production-named shared home volumes because
+existing Gate admission forbids renamed authority volumes; it does not weaken
+that admission. Ordinary launcher argument/credential tests are a separate layer.
+
+Kernel PID/PPID/start time plus native extension events distinguish the actual
+Pi child from supervisor PID1. Assertions cover startup-read-only chat, explicit
+pair/connect/acquire, native reject/zero-effects and accept-once, Chinese draft
+composition, custom keyboard UI/manual resize, local reclaim and renewed
+explicit handoff, no helper after disconnect, normal child exit and exact owned
+resource/socket cleanup. Synthetic SSH/model files check normal entry setup.
+Screenshot inspection (including scrolling to native dialog/panel bottoms) is
+separate visual validation; emulated composition/viewport is not physical IME or
+phone/public deployment acceptance. See the [Task6 evidence](../validation/2026-10-21-task6-terminal-wiring/README.md).
+
 - `AGENTS.md`
 - `docs/adr/0002-web-ui-extension-event-protocol.md`
 - `docs/adr/0008-unified-websocket-protocol.md`

@@ -72,6 +72,7 @@ export async function copyFixture(destination) {
     "docs/remote-access.md",
     "docs/hub.md",
     "scripts/web-dist.mjs",
+    "scripts/stage-terminal-image.mjs",
     "vite.config.ts",
     "vite.hub.config.ts",
     "tsconfig.json",
@@ -239,6 +240,7 @@ async function main() {
       "runtime/terminal/supervisor.py",
       "runtime/terminal/client.py",
       "runtime/terminal/build.mjs",
+      "scripts/stage-terminal-image.mjs",
       "src/web/src/core/incremental-sha256.ts",
     ];
     for (const [index, input] of staleInputs.entries()) {
@@ -292,6 +294,7 @@ async function main() {
       "runtime/terminal/supervisor.py",
       "runtime/terminal/client.py",
       "runtime/terminal/build.mjs",
+      "scripts/stage-terminal-image.mjs",
       "hub/server.ts",
       "extensions/connection-config.ts",
       "extensions/connection-listener.ts",

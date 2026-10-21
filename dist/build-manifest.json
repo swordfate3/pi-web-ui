@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "source": {
-    "count": 190,
-    "sha256": "202132b7f751ccd11f8078eb5a3868f6c30c932e07fcfc628f2f93ac0ef3a558",
+    "count": 191,
+    "sha256": "dd906fca6b3b2e9934fb2df234959705d17ad212c231512b0494dc1f54d0f410",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -198,7 +198,7 @@
       },
       {
         "path": "package.json",
-        "sha256": "949db07e18d064c6f4d0f55147a6916161d97e684a8045bea7da6adff4408daf"
+        "sha256": "3ff6cbe9c672aeb91439c6b03c48833e3c057879eb6e3e154e7060a482d9a27b"
       },
       {
         "path": "public/icons/pi-web-ui-192.png",
@@ -241,8 +241,12 @@
         "sha256": "af30f5e12db6c4da3275877f337d3716bc9732e227b58955c0dca478e631d4a4"
       },
       {
+        "path": "scripts/stage-terminal-image.mjs",
+        "sha256": "73284f0fd3df90baae927abdaf4e47941edca1b96ed38faf28550ea379f9a53d"
+      },
+      {
         "path": "scripts/web-dist.mjs",
-        "sha256": "ddeff8abaf327026d4592ede4e531548ab26a3faca51bc76baca3e82f5fd5ac5"
+        "sha256": "9ee52f662344ce627c646cf5ea492d6148fe60b6fc2f32e65f10309338b07acc"
       },
       {
         "path": "src/web/components/ai-elements/code-block.tsx",
@@ -768,7 +772,7 @@
   },
   "outputs": {
     "count": 738,
-    "sha256": "f04ad7508c5cdeed5880087f079fe9a6c0be15e2e741b210a225ea53b49defbd",
+    "sha256": "006166a682481411ed21160d5cd26453b34e6b0298c9019d13448d9c944ab1b0",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3672,7 +3676,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "f35f3b72a7ec9fb64d7b82dfe9265f9340d43d2260f1d3896d2933c9f40ab32d"
+        "sha256": "2de9eb60efc670e15ce2c57f0b62e305ae31da67c0136f6c2d657f515ce2a26f"
       },
       {
         "path": "icons/pi-web-ui-192.png",

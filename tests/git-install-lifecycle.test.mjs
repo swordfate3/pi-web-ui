@@ -13,8 +13,8 @@ test("Git-install fixture contains verified runtime build inputs and rejects the
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   await copyFixture(dir);
   await verifyManifest(dir, { install: true });
-  for (const file of ["broker.ts", "protocol.ts", "supervisor.py", "client.py", "build.mjs"]) {
-    const source = path.join(dir, "runtime/terminal", file);
+  for (const file of ["runtime/terminal/broker.ts", "runtime/terminal/protocol.ts", "runtime/terminal/supervisor.py", "runtime/terminal/client.py", "runtime/terminal/build.mjs", "scripts/stage-terminal-image.mjs"]) {
+    const source = path.join(dir, file);
     const original = readFileSync(source);
     writeFileSync(source, Buffer.concat([original, Buffer.from("\nchanged-source\n")]));
     await assert.rejects(verifyManifest(dir, { install: true }), /Source inventory mismatch/);
@@ -40,7 +40,7 @@ test("offline package inventory includes runtime artifacts but excludes interpre
   const start = result.stdout.indexOf("[\n");
   assert.ok(start >= 0);
   const files = JSON.parse(result.stdout.slice(start))[0].files.map((entry) => entry.path);
-  for (const file of ["dist/runtime/broker.cjs", "dist/runtime/client.py", "dist/runtime/supervisor.py", "runtime/terminal/build.mjs"])
+  for (const file of ["dist/runtime/broker.cjs", "dist/runtime/client.py", "dist/runtime/supervisor.py", "runtime/terminal/build.mjs", "scripts/stage-terminal-image.mjs"])
     assert.ok(files.includes(file), `required package artifact: ${file}`);
   assert.equal(files.some((file) => file.includes("__pycache__")), false, "unverified interpreter caches must not ship");
 });

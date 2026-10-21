@@ -1,0 +1,724 @@
+--- a/pi-deploy-gate/gate/service.py
++++ b/pi-deploy-gate/gate/service.py
+@@ -85,6 +85,26 @@
+     def upgrade_status(self):
+         return {'reservation': self.store.upgrade_reservation(), 'instance_id': self.instance_id}
+ 
++    def terminal_preflight(self, value):
++        """Read the live provider's frozen policy, never disk or Engine state."""
++        from .lifecycle_contract import IMAGE
++        exact(value, ('image',))
++        image = value['image']
++        if not isinstance(image, str) or not IMAGE.fullmatch(image):
++            raise ValueError('terminal preflight unavailable')
++        listener = self.terminal_server
++        if (self.closing or listener is None or listener.provider is None or
++                listener.server is None or listener.thread is None or not listener.thread.is_alive()):
++            raise ValueError('terminal preflight unavailable')
++        provider = listener.provider
++        with provider.lock:
++            if (self.closing or self.terminal_server is not listener or provider.closed or
++                    not provider.policy['enabled'] or image not in provider.policy['images'] or
++                    listener.server.socket.fileno() < 0):
++                raise ValueError('terminal preflight unavailable')
++            return {'v': 1, 'profile': 'web-terminal-v1', 'image': image,
++                    'instanceId': self.instance_id, 'ready': True}
++
+     def _upgrade_idle(self):
+         if (self.closing or (self.worker and self.worker.is_alive()) or self.lifecycle.active() or self.runtime_updates.active() or
+                 any(j['status'] in (*ACTIVE, *REQUEST_OPEN) for j in self.store.list())):
+@@ -376,14 +396,18 @@
+         self.wfile.write(raw)
+         self.close_connection = True
+ 
+-    def body(self):
++    def body(self, maximum=None, strict=False):
+         if self.headers.get('Transfer-Encoding') or self.headers.get('Content-Type') != 'application/json':
+             raise ValueError('JSON Content-Type and Content-Length required')
+         lengths = self.headers.get_all('Content-Length', [])
+-        maximum = 65536 if self.server.is_admin else 4096
++        maximum = maximum if maximum is not None else (65536 if self.server.is_admin else 4096)
+         if len(lengths) != 1 or not lengths[0].isdigit() or not 0 < int(lengths[0]) <= maximum:
+             raise ValueError('body length invalid')
+-        return json.loads(self.rfile.read(int(lengths[0])))
++        raw = self.rfile.read(int(lengths[0]))
++        if strict:
++            from .terminal_contract import pairs, nonfinite
++            return json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=pairs, parse_constant=nonfinite)
++        return json.loads(raw)
+ 
+     def dispatch(self):
+         gate = self.server.gate
+@@ -407,7 +431,9 @@
+                 self.reply(401, {'error': 'request credential required'})
+                 return
+         try:
+-            if admin and self.command == 'GET' and self.path == '/admin/upgrade-status':
++            if admin and self.command == 'POST' and self.path == '/admin/terminal-preflight':
++                self.reply(200, gate.terminal_preflight(self.body(maximum=4096, strict=True)))
++            elif admin and self.command == 'GET' and self.path == '/admin/upgrade-status':
+                 self.reply(200, gate.upgrade_status())
+             elif admin and self.command == 'POST' and self.path == '/admin/upgrade-reserve':
+                 value = self.body()
+--- a/pi-deploy-gate/gate/admin.py
++++ b/pi-deploy-gate/gate/admin.py
+@@ -5,6 +5,46 @@
+ from pathlib import Path
+ import socket
+ import sys
++import signal
++
++
++def terminal_preflight(state):
++    """Bounded host-only diagnostic; ordinary admin commands remain unchanged."""
++    from .terminal_contract import pairs, nonfinite
++    from .lifecycle_contract import IMAGE, HEX
++    def expired(*_):
++        raise TimeoutError('terminal preflight deadline')
++    signal.signal(signal.SIGALRM, expired)
++    signal.setitimer(signal.ITIMER_REAL, 2)
++    connection = None
++    try:
++        raw = sys.stdin.buffer.read(4097)
++        if len(raw) > 4096:
++            raise ValueError('terminal preflight limit')
++        value = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=pairs, parse_constant=nonfinite)
++        if (not isinstance(value, dict) or set(value) != {'image'} or
++                not isinstance(value['image'], str) or not IMAGE.fullmatch(value['image'])):
++            raise ValueError('terminal preflight request')
++        connection = http.client.HTTPConnection('localhost', timeout=2)
++        connection.sock = socket.socket(socket.AF_UNIX)
++        connection.sock.settimeout(2)
++        connection.sock.connect(str(Path(state) / 'admin.sock'))
++        connection.request('POST', '/admin/terminal-preflight', json.dumps(value), {'Content-Type': 'application/json'})
++        response = connection.getresponse()
++        raw = response.read(4097)
++        if response.status != 200 or len(raw) > 4096:
++            raise ValueError('terminal preflight unavailable')
++        reply = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=pairs, parse_constant=nonfinite)
++        if (not isinstance(reply, dict) or set(reply) != {'v', 'profile', 'image', 'instanceId', 'ready'} or
++                type(reply['v']) is not int or reply['v'] != 1 or reply['profile'] != 'web-terminal-v1' or
++                reply['image'] != value['image'] or reply['ready'] is not True or
++                not isinstance(reply['instanceId'], str) or not HEX.fullmatch(reply['instanceId'])):
++            raise ValueError('terminal preflight response')
++        print(json.dumps(reply))
++    finally:
++        if connection is not None:
++            connection.close()
++        signal.setitimer(signal.ITIMER_REAL, 0)
+ 
+ 
+ def main():
+@@ -17,12 +57,20 @@
+                                            'lifecycle-resolve', 'lifecycle-export', 'upgrade-status',
+                                            'upgrade-reserve', 'upgrade-finish', 'upgrade-abort',
+                                            'runtime-updates', 'runtime-policy', 'runtime-approve',
+-                                           'runtime-reject', 'runtime-resolve'))
++                                           'runtime-reject', 'runtime-resolve', 'terminal-preflight'))
+     parser.add_argument('id', nargs='?')
+     parser.add_argument('--commit')
+     parser.add_argument('--plan')
+     parser.add_argument('--json-stdin', action='store_true', help='bounded private request body on stdin')
+     args = parser.parse_args()
++    if args.command == 'terminal-preflight':
++        if not args.json_stdin or args.id or args.commit or args.plan:
++            parser.error('terminal-preflight requires only --json-stdin')
++        try:
++            terminal_preflight(args.state)
++        except Exception:
++            parser.exit(1, 'Terminal preflight unavailable. No run was admitted.\n')
++        return
+     if args.command == 'export-client':
+         print(json.dumps({'token': (Path(args.state) / 'request.token').read_text().strip()}))
+         return
+--- a/pi-deploy-gate/gatectl
++++ b/pi-deploy-gate/gatectl
+@@ -10,6 +10,7 @@
+ import time
+ import tempfile
+ import stat
++import selectors
+ 
+ from gate.hostseal import build, verified_image
+ 
+@@ -17,6 +18,49 @@
+ GATE = 'pi-deploy-gate'
+ 
+ 
++def terminal_preflight(image):
++    """One absolute host budget includes the fixed admin exec and all reads."""
++    from gate.terminal_contract import pairs, nonfinite
++    if not re.fullmatch('sha256:[0-9a-f]{64}', image):
++        raise ValueError('immutable terminal image required')
++    deadline = time.monotonic() + 2
++    process = subprocess.Popen([os.environ.get('PI_PIRUN_DOCKER_BIN', 'docker'), 'exec', '-i', GATE, '/usr/bin/python3', '-m',
++                                'gate.admin', 'terminal-preflight', '--json-stdin'],
++                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
++    try:
++        process.stdin.write(json.dumps({'image': image}).encode())
++        process.stdin.close()
++        raw = bytearray()
++        with selectors.DefaultSelector() as selector:
++            selector.register(process.stdout, selectors.EVENT_READ)
++            while True:
++                remaining = deadline - time.monotonic()
++                if remaining <= 0 or not selector.select(remaining):
++                    raise ValueError('terminal preflight unavailable')
++                block = os.read(process.stdout.fileno(), 4097 - len(raw))
++                if not block:
++                    break
++                raw.extend(block)
++                if len(raw) > 4096:
++                    raise ValueError('terminal preflight limit')
++        if process.wait(timeout=max(0.001, deadline-time.monotonic())) or time.monotonic() >= deadline:
++            raise ValueError('terminal preflight unavailable')
++        value = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=pairs, parse_constant=nonfinite)
++        if (not isinstance(value, dict) or set(value) != {'v', 'profile', 'image', 'instanceId', 'ready'} or
++                type(value['v']) is not int or value['v'] != 1 or value['profile'] != 'web-terminal-v1' or
++                value['image'] != image or value['ready'] is not True or
++                not isinstance(value['instanceId'], str) or not re.fullmatch('[0-9a-f]{32}', value['instanceId'])):
++            raise ValueError('terminal preflight unavailable')
++        return value
++    finally:
++        if process.poll() is None:
++            process.kill()
++        process.wait()
++        process.stdout.close()
++        if not process.stdin.closed:
++            process.stdin.close()
++
++
+ def docker(*args, data=None, timeout=30):
+     result = subprocess.run(['docker', *args], input=data, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, timeout=timeout)
+@@ -374,8 +418,17 @@
+                            description='必须先停止/确认退出原up进程并检查无未决工作；不删除任务或未知结果。', **formatting)
+     abort.add_argument('id', metavar='RESERVATION_ID')
+     abort.add_argument('--acknowledge', choices=('inspected_no_replacement',), required=True)
++    preflight = sub.add_parser('terminal-preflight', help='Host-only read-only live terminal image check (2s budget)')
++    preflight.add_argument('--image', required=True)
+     args = parser.parse_args()
+-    if args.command == 'upgrade-status':
++    if args.command == 'terminal-preflight':
++        if not re.fullmatch('sha256:[0-9a-f]{64}', args.image):
++            parser.error('full immutable image ID required')
++        try:
++            print(json.dumps(terminal_preflight(args.image)))
++        except Exception:
++            parser.exit(1, 'Terminal preflight unavailable. No run was admitted.\n')
++    elif args.command == 'upgrade-status':
+         print(json.dumps(admin('upgrade-status'), indent=2, ensure_ascii=False))
+     elif args.command in ('upgrade-finish', 'upgrade-abort'):
+         if not re.fullmatch('[0-9a-f]{32}', args.id):
+--- /dev/null
++++ b/pi-deploy-gate/tests/test_terminal_preflight.py
+@@ -0,0 +1,142 @@
++"""Host-only preflight: frozen live policy, no target exec, bounded host client."""
++import http.client
++import json
++import os
++from pathlib import Path
++import socket
++import subprocess
++import tempfile
++import threading
++import time
++from types import SimpleNamespace
++import unittest
++
++from gate.service import Gate, start_servers
++from gate.terminal_provider import TerminalProvider
++
++ROOT = Path(__file__).resolve().parents[1]
++IMAGE = 'sha256:' + 'a' * 64
++
++
++class PreflightTest(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory(prefix='pi-task6-admin-')
++        self.addCleanup(self.tmp.cleanup)
++        self.gate = Gate(Path(self.tmp.name))
++        self.http, self.admin = start_servers(self.gate, 0)
++        self.provider = TerminalProvider(self.gate, {'enabled': True, 'images': [IMAGE]}, 'f' * 64)
++        self.gate.terminal_server = SimpleNamespace(
++            provider=self.provider, thread=threading.current_thread(), server=self.admin)
++        def cleanup():
++            self.gate.terminal_server = None
++            self.provider.close()
++            for server in (self.http, self.admin):
++                server.shutdown()
++                server.server_close()
++            self.gate.close()
++        self.addCleanup(cleanup)
++
++    def request(self, body, public=False, token=None):
++        connection = http.client.HTTPConnection(
++            *self.http.server_address, timeout=3) if public else http.client.HTTPConnection('localhost', timeout=3)
++        if not public:
++            connection.sock = socket.socket(socket.AF_UNIX)
++            connection.sock.settimeout(3)
++            connection.sock.connect(str(self.gate.directory / 'admin.sock'))
++        connection.request('POST', '/admin/terminal-preflight', body,
++                           {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (token or self.gate.token)})
++        response = connection.getresponse()
++        result = response.status, json.loads(response.read())
++        connection.close()
++        return result
++
++    def test_exact_success_uses_live_frozen_policy_without_engine(self):
++        # Any Engine access is a bug: this operation is not target admission.
++        class ForbiddenEngine:
++            def __getattr__(self, name):
++                raise AssertionError('preflight accessed Engine: ' + name)
++        self.gate.lifecycle.engine = ForbiddenEngine()
++        code, value = self.request(json.dumps({'image': IMAGE}))
++        self.assertEqual(code, 200)
++        self.assertEqual(value, dict(v=1, profile='web-terminal-v1', image=IMAGE,
++                                    instanceId=self.gate.instance_id, ready=True))
++        self.assertRegex(value['instanceId'], r'^[0-9a-f]{32}$')
++        self.assertEqual(self.request(json.dumps({'image': 'sha256:' + 'b' * 64}))[0], 400)
++
++    def test_closed_schema_and_body_bounds(self):
++        for body in ('{}', '[]', '{"image":"tag"}', json.dumps({'image': IMAGE, 'runId': 'a' * 32}),
++                     '{"image":"tag","image":"' + IMAGE + '"}', ' ' * 4096 + '{}'):
++            with self.subTest(body=body[:100]):
++                self.assertEqual(self.request(body)[0], 400)
++
++    def test_missing_disabled_closed_and_closing_are_unavailable(self):
++        listener = self.gate.terminal_server
++        self.gate.terminal_server = None
++        self.assertEqual(self.request(json.dumps({'image': IMAGE}))[0], 400)
++        self.gate.terminal_server = listener
++        self.provider.policy['enabled'] = False
++        self.assertEqual(self.request(json.dumps({'image': IMAGE}))[0], 400)
++        self.provider.policy['enabled'] = True
++        self.provider.closed = True
++        self.assertEqual(self.request(json.dumps({'image': IMAGE}))[0], 400)
++        self.provider.closed = False
++        self.gate.closing = True
++        self.assertEqual(self.request(json.dumps({'image': IMAGE}))[0], 400)
++
++    def test_tcp_tokens_cannot_reach_admin_preflight(self):
++        for token in (self.gate.token, self.gate.lifecycle_token, self.provider.token):
++            self.assertNotEqual(self.request(json.dumps({'image': IMAGE}), public=True, token=token)[0], 200)
++
++    def test_actual_admin_module_roundtrip(self):
++        result = subprocess.run(['/usr/bin/python3', '-m', 'gate.admin', '--state', self.tmp.name,
++                                 'terminal-preflight', '--json-stdin'], cwd=ROOT,
++                                input=json.dumps({'image': IMAGE}).encode(), capture_output=True, timeout=3)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(json.loads(result.stdout)['instanceId'], self.gate.instance_id)
++        self.assertLessEqual(len(result.stdout), 4096)
++
++
++class HostPreflightClientTest(unittest.TestCase):
++    def run_host(self, source, image=IMAGE):
++        with tempfile.TemporaryDirectory(prefix='pi-task6-client-') as directory:
++            executable = Path(directory) / 'docker'
++            executable.write_text('#!/usr/bin/python3\n' + source)
++            executable.chmod(0o700)
++            started = time.monotonic()
++            result = subprocess.run(['/usr/bin/python3', str(ROOT / 'gatectl'),
++                                     'terminal-preflight', '--image', image],
++                                    env=dict(os.environ, PATH=directory + ':' + os.environ.get('PATH', '')),
++                                    capture_output=True, timeout=4)
++            return result, time.monotonic() - started
++
++    def test_fixed_host_transport_and_exact_success(self):
++        body = dict(v=1, profile='web-terminal-v1', image=IMAGE, instanceId='c' * 32, ready=True)
++        result, _ = self.run_host('import sys,json\n'
++            'assert sys.argv[1:] == ["exec","-i","pi-deploy-gate","/usr/bin/python3","-m","gate.admin","terminal-preflight","--json-stdin"]\n'
++            'assert json.load(sys.stdin) == {"image": "' + IMAGE + '"}\n'
++            'print(' + repr(json.dumps(body)) + ')\n')
++        self.assertEqual(result.returncode, 0, result.stderr)
++        self.assertEqual(json.loads(result.stdout), body)
++
++    def test_unsupported_malformed_and_oversized_fail_closed(self):
++        for source in ('raise SystemExit(2)\n', 'print("{}")\n', 'print("x"*5000)\n',
++                       'print(\'{' + '"ready":true,"ready":true}\')\n'):
++            with self.subTest(source=source):
++                result, _ = self.run_host(source)
++                self.assertNotEqual(result.returncode, 0)
++                self.assertEqual(result.stdout, b'')
++
++    def test_absolute_budget_does_not_reset_on_slow_bytes(self):
++        result, elapsed = self.run_host('import os,time\nfor _ in range(24):\n os.write(1,b" ")\n time.sleep(.15)\n')
++        self.assertNotEqual(result.returncode, 0)
++        self.assertLess(elapsed, 2.7)
++        self.assertEqual(result.stdout, b'')
++
++    def test_invalid_image_rejected_before_docker(self):
++        result, _ = self.run_host('raise AssertionError("must not invoke Docker")\n', 'pi-sandbox')
++        self.assertEqual(result.returncode, 2)
++        self.assertNotIn(b'AssertionError', result.stderr)
++
++
++if __name__ == '__main__':
++    unittest.main()
+--- a/pi-docker/scripts/pi-pirun
++++ b/pi-docker/scripts/pi-pirun
+@@ -15,6 +15,30 @@
+ # shellcheck disable=SC1090
+ PI_PIRUN_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+ PI_PIRUN_CONFIG_DIR="$(cd -- "$PI_PIRUN_SCRIPT_DIR/.." && pwd -P)"
++PI_PIRUN_WEB_TERMINAL="${PI_PIRUN_WEB_TERMINAL:-off}"
++PI_PIRUN_WEB_TERMINAL_CONTROL="${PI_PIRUN_WEB_TERMINAL_CONTROL:-local}"
++case "$PI_PIRUN_WEB_TERMINAL" in
++    on|off) ;;
++    *) printf 'pi-pirun: PI_PIRUN_WEB_TERMINAL must be on or off\n' >&2; exit 2 ;;
++esac
++case "$PI_PIRUN_WEB_TERMINAL_CONTROL" in
++    local|remote) ;;
++    *) printf 'pi-pirun: terminal control must be local or remote\n' >&2; exit 2 ;;
++esac
++if [[ "$PI_PIRUN_WEB_TERMINAL" == on ]]; then
++    if [[ ! -t 0 || ! -t 1 ]] || ! /usr/bin/python3 "$PI_PIRUN_CONFIG_DIR/runtime/pi_launch_policy.py" "$@"; then
++        printf 'pi-pirun: terminal mode requires a saved native TUI with extensions and a local TTY; no maintenance/print/RPC\n' >&2
++        exit 2
++    fi
++    if [[ "${PI_PIRUN_WEB_HUB:-auto}" == off ]]; then
++        printf 'pi-pirun: terminal mode requires Hub; ordinary chat is read-only from startup\n' >&2; exit 2
++    fi
++    PI_PIRUN_WEB_HUB=on
++    if ! /usr/bin/python3 "$PI_PIRUN_SCRIPT_DIR/pi-terminal-preflight.py" \
++        --workspace "$(pwd -P)" --image "${PI_PIRUN_IMAGE:-pi-sandbox}" >/dev/null; then
++        printf 'pi-pirun: terminal prerequisites unavailable; no credential or Pi container created\n' >&2; exit 1
++    fi
++fi
+ source "$PI_PIRUN_SCRIPT_DIR/host-identity.sh"
+ PI_SCOPED_MEMORY_HOST_WORKSPACE="$(pwd -P)"
+ 
+@@ -148,8 +172,12 @@
+     compose --project-name pi-docker
+     --project-directory "$PI_PIRUN_CONFIG_DIR"
+     --env-file /dev/null -f "$PI_PIRUN_CONFIG_DIR/compose.yaml"
+-    run --rm --no-deps --pull never --interactive
+ )
++if [[ "$PI_PIRUN_WEB_TERMINAL" == on ]]; then
++    # compose run has no --log-driver option. Use an opt-in service overlay.
++    docker_args+=(-f "$PI_PIRUN_CONFIG_DIR/compose.terminal.yaml")
++fi
++docker_args+=(run --rm --no-deps --pull never --interactive)
+ if [[ ! -t 0 || ! -t 1 ]]; then
+     docker_args+=(-T)
+ fi
+@@ -271,4 +299,12 @@
+     docker_args+=(-e "PI_RUNTIME_RUN_ID=$runtime_run_id")
+ fi
+ 
++if [[ "$PI_PIRUN_WEB_TERMINAL" == on ]]; then
++    docker_args+=(--label cn.swordfate.pi.runtime-profile=web-terminal-v1)
++    docker_args+=(-e PI_RUNTIME_PROFILE=web-terminal-v1)
++    docker_args+=(-e "PI_PIRUN_WEB_TERMINAL_CONTROL=$PI_PIRUN_WEB_TERMINAL_CONTROL")
++    docker_args+=(-e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
++    printf 'pi-pirun: native terminal mode; ordinary chat is read-only from startup; manual exit/relaunch only\n' >&2
++fi
++
+ "$PI_PIRUN_DOCKER_BIN" "${docker_args[@]}" pi "$@"
+--- a/pi-docker/pi-entrypoint
++++ b/pi-docker/pi-entrypoint
+@@ -12,14 +12,41 @@
+ launch_policy_helper="$runtime_lib/pi_launch_policy.py"
+ supervisor_module="$runtime_lib/pi_supervisor.py"
+ 
+-if [[ -d /run/host-ssh ]]; then
+-    install -d -m 700 "$ssh_dir"
+-    cp -r /run/host-ssh/. "$ssh_dir/"
+-    chmod 700 "$ssh_dir"
+-    find "$ssh_dir" -type f -exec chmod go-rwx {} +
+-fi
++prepare_environment() {
++    if [[ -d /run/host-ssh ]]; then
++        install -d -m 700 "$ssh_dir"
++        cp -r /run/host-ssh/. "$ssh_dir/"
++        chmod 700 "$ssh_dir"
++        find "$ssh_dir" -type f -exec chmod go-rwx {} +
++    fi
++    /usr/bin/python3 "$model_sync_helper"
++}
+ 
+-/usr/bin/python3 "$model_sync_helper"
++case "${PI_RUNTIME_PROFILE:-inherited-tui}" in
++    inherited-tui) ;;
++    web-terminal-v1)
++        if [[ ! -t 0 || ! -t 1 || ! "${PI_RUNTIME_RUN_ID:-}" =~ ^[0-9a-f]{32}$ \
++            || "${PATH:-}" != /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ]] \
++            || ! /usr/bin/python3 "$launch_policy_helper" "$@"; then
++            printf 'pi-entrypoint: terminal startup refused; native TTY/extensions/canonical PATH required\n' >&2; exit 2
++        fi
++        case "${PI_PIRUN_WEB_TERMINAL_CONTROL:-local}" in
++            local|remote) ;;
++            *) printf 'pi-entrypoint: invalid terminal owner\n' >&2; exit 2 ;;
++        esac
++        prepare_environment
++        # Fixed root-owned image assets, independent of shared home/runtime mounts.
++        if ! (cd /usr/local/lib/pi-runtime/terminal && /usr/bin/sha256sum --check inventory.sha256 >/dev/null 2>&1); then
++            printf 'pi-entrypoint: terminal image assets unavailable\n' >&2; exit 2
++        fi
++        exec /usr/bin/python3 -I /usr/local/lib/pi-runtime/terminal/supervisor.py \
++            /usr/local/bin/node /home/node/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js \
++            --extension /opt/pi-web-ui/extensions/mirror-server.ts "$@"
++        ;;
++    *) printf 'pi-entrypoint: unknown runtime profile\n' >&2; exit 2 ;;
++esac
++
++prepare_environment
+ 
+ managed_interactive=1
+ if [[ ! "${PI_RUNTIME_RUN_ID:-}" =~ ^[0-9a-f]{32}$ || ! -t 0 || ! -t 1 ]]; then
+--- /dev/null
++++ b/pi-docker/Dockerfile.terminal
+@@ -0,0 +1,19 @@
++# Explicit derivative only; never replaces the ordinary Dockerfile/image/tag.
++# pi_terminal is a verified build context produced by stage-terminal-image.mjs.
++ARG PI_TERMINAL_BASE
++FROM ${PI_TERMINAL_BASE}
++USER root
++COPY --from=pi_terminal runtime/ /usr/local/lib/pi-runtime/terminal/
++COPY --from=pi_terminal package/ /opt/pi-web-ui/
++COPY pi-entrypoint /usr/local/bin/pi-entrypoint
++RUN mkdir -p /opt/pi-web-ui/node_modules/@earendil-works \
++    && ln -s /home/node/.local/lib/node_modules/@earendil-works/pi-coding-agent /opt/pi-web-ui/node_modules/@earendil-works/pi-coding-agent \
++    && chown -R 0:0 /usr/local/lib/pi-runtime/terminal /opt/pi-web-ui /usr/local/bin/pi-entrypoint \
++    && chmod -R go-w /usr/local/lib/pi-runtime/terminal /opt/pi-web-ui/extensions /opt/pi-web-ui/dist \
++    && chmod 755 /usr/local/bin/pi-entrypoint \
++    && install -d -o 1000 -g 1000 -m 700 /run/pi-runtime \
++    && cd /usr/local/lib/pi-runtime/terminal && sha256sum --check inventory.sha256
++ENV PI_WEB_UI_STATIC_DIR=/opt/pi-web-ui/dist
++LABEL cn.swordfate.pi.terminal-runtime=web-terminal-v1
++USER 1000:1000
++ENTRYPOINT ["/usr/local/bin/pi-entrypoint"]
+--- /dev/null
++++ b/pi-docker/compose.terminal.yaml
+@@ -0,0 +1,8 @@
++# Explicit launcher-only overlay. Never included by ordinary pirun.
++services:
++  pi:
++    logging:
++      driver: none
++    mem_limit: 1g
++    cpus: 2.0
++    pids_limit: 128
+--- /dev/null
++++ b/pi-docker/compose.hub-terminal.yaml
+@@ -0,0 +1,20 @@
++# Source-only opt-in mounts; does not enable a provider or configure the listener.
++# A separately authorized deployment must use the matching initialized volumes.
++services:
++  hub:
++    volumes:
++      - type: volume
++        source: terminal-ipc
++        target: /run/pi-terminal-provider
++        read_only: true
++      - type: volume
++        source: terminal-credentials
++        target: /run/pi-terminal-credentials
++        read_only: true
++volumes:
++  terminal-ipc:
++    external: true
++    name: pi-terminal-provider-ipc
++  terminal-credentials:
++    external: true
++    name: pi-terminal-provider-credentials
+--- /dev/null
++++ b/pi-docker/scripts/pi-terminal-preflight.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/python3
++"""Host-only opt-in checks. Never issue a run or grant target execution."""
++import argparse
++import json
++import os
++from pathlib import Path
++import re
++import runpy
++import subprocess
++import sys
++
++CONFIG_DIR = Path(__file__).resolve().parents[1]
++
++
++def check(workspace, image):
++    # Reuse the ordinary helper's workspace/transport checks without changing its
++    # CLI or credential lifecycle. This source is not installed into Pi images.
++    hub = runpy.run_path(str(Path(__file__).with_name('pi-web-hub-session')))
++    hub['check_workspace'](workspace)
++    if not re.fullmatch('sha256:[0-9a-f]{64}', image):
++        raise ValueError('immutable terminal image required')
++    labels = json.loads(hub['docker']('image', 'inspect', '--format', '{{json .Config.Labels}}', image))
++    if not isinstance(labels, dict) or labels.get('cn.swordfate.pi.terminal-runtime') != 'web-terminal-v1':
++        raise ValueError('image lacks installed terminal runtime')
++    # One outer absolute timeout includes host gatectl startup and fixed exec.
++    result = subprocess.run(['/usr/bin/python3', str(CONFIG_DIR.parent / 'pi-deploy-gate/gatectl'),
++                             'terminal-preflight', '--image', image],
++                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, check=True)
++    reply = json.loads(result.stdout)
++    if (len(result.stdout) > 4096 or not isinstance(reply, dict) or
++            set(reply) != {'v', 'profile', 'image', 'instanceId', 'ready'} or
++            type(reply['v']) is not int or reply['v'] != 1 or reply['profile'] != 'web-terminal-v1' or
++            reply['image'] != image or reply['ready'] is not True or
++            not isinstance(reply['instanceId'], str) or not re.fullmatch('[0-9a-f]{32}', reply['instanceId'])):
++        raise ValueError('invalid preflight reply')
++    state = json.loads(hub['docker']('inspect', '--format', '{{json .State}}',
++                                   os.environ.get('PI_PIRUN_WEB_HUB_CONTAINER', 'pi-web-hub')))
++    if not state.get('Running') or state.get('Health', {}).get('Status') != 'healthy':
++        raise ValueError('Hub unavailable')
++    ready = json.loads(hub['hub_node']('-e',
++        'const c=JSON.parse(require("fs").readFileSync("/hub/private/config.json","utf8"));'
++        'const t=c.terminal; console.log(JSON.stringify({ready:!!(t&&t.port&&t.provider&&'
++        't.provider.socketPath&&t.provider.credentialFile)}));'))
++    if ready != {'ready': True}:
++        raise ValueError('Hub terminal listener/provider not configured')
++
++
++if __name__ == '__main__':
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--workspace', required=True)
++    parser.add_argument('--image', required=True)
++    args = parser.parse_args()
++    try:
++        check(args.workspace, args.image)
++    except Exception:
++        print('Terminal prerequisites unavailable; ordinary chat is read-only from startup in this mode.', file=sys.stderr)
++        sys.exit(1)
+--- /dev/null
++++ b/pi-docker/tests/test_pirun_terminal.py
+@@ -0,0 +1,122 @@
++"""Explicit terminal mode must refuse before credentials/container launch."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import unittest
++from test_pirun_runtime import PirunRuntimeTests, ROOT
++
++
++class TerminalLauncherTests(unittest.TestCase):
++    setUp = PirunRuntimeTests.setUp
++    launch = PirunRuntimeTests.launch
++    capture_tty = PirunRuntimeTests.capture_tty
++    service = PirunRuntimeTests.service
++
++    def prepare(self, **changes):
++        self.env.update(PI_PIRUN_WEB_TERMINAL='on', PI_PIRUN_WEB_HUB='on',
++                        PI_PIRUN_IMAGE='sha256:' + 'a' * 64,
++                        PI_PIRUN_WEB_HUB_RUNS_DIR=str(self.root/'hub-runs'),
++                        PI_TEST_HUB_STATE=str(self.root/'fake-hub'),
++                        PI_PIRUN_DOCKER_BIN=str(self.root/'docker'))
++        transport = self.root/'docker'
++        transport.write_text('''#!/usr/bin/python3
++import json,os,subprocess,sys
++from pathlib import Path
++args=sys.argv[1:]
++if args[:2]==['image','inspect']:
++ print(json.dumps({} if os.environ.get('PI_TEST_IMAGE_MISSING') else {'cn.swordfate.pi.terminal-runtime':'web-terminal-v1'}));sys.exit(0)
++if args[:3]==['exec','-i','pi-deploy-gate']:
++ request=json.load(sys.stdin)
++ if os.environ.get('PI_TEST_PREFLIGHT_FAIL'):sys.exit(1)
++ print(json.dumps(dict(v=1,profile='web-terminal-v1',image=request['image'],instanceId='c'*32,ready=True)));sys.exit(0)
++if args[:6]==['exec','--user','1000:1000','pi-web-hub','node','-e'] and 'terminal' in args[6]:
++ print(json.dumps({'ready':not bool(os.environ.get('PI_TEST_TERMINAL_MISSING'))}));sys.exit(0)
++os.execv(''' + repr(str(ROOT/'tests/fixtures/hub-docker')) + ''', ['hub-docker',*args])
++''')
++        transport.chmod(0o700)
++        self.env.update(changes)
++
++    def tty_failure(self, *args):
++        master, slave = os.openpty()
++        try:
++            result = subprocess.run(['bash',str(ROOT/'scripts/pi-pirun'),*args], cwd=self.workspace,
++                                    env=self.env,stdin=slave,stdout=slave,stderr=subprocess.PIPE,timeout=8)
++            self.assertNotEqual(result.returncode,0)
++            grants=self.root/'fake-hub'
++            self.assertEqual(list(grants.glob('*.json')),[])
++            return result
++        finally:
++            os.close(master);os.close(slave)
++
++    def test_terminal_without_tty_refuses_before_any_grant(self):
++        self.prepare()
++        result=self.launch(check=False)
++        self.assertNotEqual(result.returncode,0)
++        self.assertEqual(list((self.root/'fake-hub').glob('*.json')),[])
++
++    def test_terminal_maintenance_rpc_and_extension_bypass_refuse(self):
++        self.prepare()
++        for args in [('update','pi'),('--mode','rpc'),('--print','hello'),('--no-extensions',),('--no-session',)]:
++            with self.subTest(args=args): self.tty_failure(*args)
++
++    def test_invalid_owner_and_mode_refuse(self):
++        self.prepare(PI_PIRUN_WEB_TERMINAL_CONTROL='automatic')
++        self.tty_failure()
++        self.env.update(PI_PIRUN_WEB_TERMINAL='auto',PI_PIRUN_WEB_TERMINAL_CONTROL='local')
++        self.tty_failure()
++
++    def test_missing_prerequisites_refuse_before_grant(self):
++        self.prepare()
++        for key,value in [('PI_PIRUN_WEB_HUB','off'),('PI_TEST_PREFLIGHT_FAIL','1'),
++                          ('PI_TEST_TERMINAL_MISSING','1'),('PI_TEST_IMAGE_MISSING','1'),('PI_PIRUN_IMAGE','pi-sandbox')]:
++            with self.subTest(key=key):
++                previous=self.env.get(key)
++                self.env[key]=value
++                self.tty_failure()
++                if previous is None:self.env.pop(key)
++                else:self.env[key]=previous
++
++    def test_explicit_terminal_compose_logging_profile_and_default_local_owner(self):
++        self.prepare()
++        captured=self.capture_tty()
++        service=self.service(captured)
++        args=captured['args']
++        self.assertEqual(service['logging']['driver'],'none')
++        self.assertIn(str(ROOT/'compose.terminal.yaml'),args)
++        self.assertIn('PI_RUNTIME_PROFILE=web-terminal-v1',args)
++        self.assertIn('PI_PIRUN_WEB_TERMINAL_CONTROL=local',args)
++        self.assertIn('PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',args)
++        self.assertIn('cn.swordfate.pi.runtime-profile=web-terminal-v1',args)
++        self.assertNotIn('provider.sock',json.dumps(captured))
++        self.assertNotIn('pi-terminal-credentials',json.dumps(captured))
++        self.assertIn('cn.swordfate.pi.lifecycle=1',args)
++        self.assertEqual(args[-1],'pi')
++
++    def test_remote_is_initially_unowned_not_automatic_browser_control(self):
++        self.prepare(PI_PIRUN_WEB_TERMINAL_CONTROL='remote')
++        captured=self.capture_tty()
++        self.assertIn('PI_PIRUN_WEB_TERMINAL_CONTROL=remote',captured['args'])
++
++    def test_source_entrypoint_terminal_never_falls_back_to_pi_on_non_tty(self):
++        self.prepare()
++        result=subprocess.run(['bash',str(ROOT/'pi-entrypoint'),'--version'],env=dict(self.env,
++                              PI_RUNTIME_PROFILE='web-terminal-v1'),capture_output=True,timeout=3)
++        self.assertNotEqual(result.returncode,0)
++        self.assertNotIn(b'command not found',result.stderr)
++
++    def test_terminal_version_source_is_shared_pi_not_image_frozen_copy(self):
++        entry=(ROOT/'pi-entrypoint').read_text()
++        image=(ROOT/'Dockerfile.terminal').read_text()
++        self.assertIn('/usr/local/bin/node /home/node/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js',entry)
++        self.assertNotIn('/opt/pi-terminal-agent',entry+image)
++        self.assertIn('ln -s /home/node/.local/lib/node_modules/@earendil-works/pi-coding-agent',image)
++
++    def test_terminal_dispatch_preserves_ssh_and_models_preparation(self):
++        entry=(ROOT/'pi-entrypoint').read_text()
++        dispatch=entry.index('exec /usr/bin/python3 -I /usr/local/lib/pi-runtime/terminal/supervisor.py')
++        self.assertLess(entry.index('cp -r /run/host-ssh/.'),dispatch)
++        self.assertLess(entry.index('/usr/bin/python3 "$model_sync_helper"'),dispatch)
++
++
++if __name__=='__main__':unittest.main()
+--- a/pi-dockerctl
++++ b/pi-dockerctl
+@@ -47,6 +47,13 @@
+   pi-dockerctl gate runtime-updates
+   pi-dockerctl gate approve --help
+ Pi shortcut: pirun [arguments] is equivalent to pi-dockerctl pi [arguments].
++Explicit native terminal (capable immutable image + trusted Gate/Hub required):
++  PI_PIRUN_WEB_TERMINAL=on PI_PIRUN_IMAGE=sha256:<64hex> pirun
++  PI_PIRUN_WEB_TERMINAL_CONTROL=remote  # initially unowned; separate pairing/acquire
++Ordinary chat is read-only from startup in terminal mode. No RPC/maintenance/
++no-extension fallback, automatic takeover or managed restart. Ctrl+] w yields;
++Ctrl+] l reclaims local input. Exit and relaunch manually. No .env is loaded.
++Terminal provider/Hub overlays and image installation do not authorize activation.
+ EOF
+ }

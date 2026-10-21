@@ -1,0 +1,184 @@
+Task6 raw result excerpts, 2026-10-22. These preserve each result's true scope.
+Full raw local logs are named below; native structured evidence is separately versioned.
+
+Admin focused RED (9 tests; missing route/CLI,10 assertions)
+$ tail -7 /tmp/pi-task6-admin-red.log
+    self.assertEqual(self.request(json.dumps({'image': IMAGE}))[0], 400)
+AssertionError: 404 != 400
+
+----------------------------------------------------------------------
+Ran 9 tests in 3.990s
+
+FAILED (failures=10)
+
+Admin focused GREEN
+$ tail -5 /tmp/pi-task6-admin-green.log
+
+----------------------------------------------------------------------
+Ran 9 tests in 5.587s
+
+OK
+
+Launcher RED (27 incl20ordinary)
+$ tail -5 /tmp/pi-task6-launcher-red.log
+
+----------------------------------------------------------------------
+Ran 27 tests in 8.327s
+
+FAILED (failures=13, errors=1)
+
+Launcher helper GREEN
+$ tail -5 /tmp/pi-task6-launcher-helper-green.log
+----------------------------------------------------------------------
+Ran 27 tests in 5.198s
+
+OK
+
+Version-source fixed-path RED
+$ tail -5 /tmp/pi-task6-version-source-red.log
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+FAILED (failures=1)
+
+Version-source GREEN
+$ tail -5 /tmp/pi-task6-version-source-green.log
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+OK
+
+Preparation-order RED
+$ tail -5 /tmp/pi-task6-preparation-red.log
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+FAILED (failures=1)
+
+Preparation-order GREEN
+$ tail -5 /tmp/pi-task6-preparation-green.log
+
+----------------------------------------------------------------------
+Ran 1 test in 0.001s
+
+OK
+
+Staging actual GREEN; missingmodule/EPERM are historical setup, not behavioral RED
+$ tail -10 /tmp/pi-task6-stage-green.log
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 3390.284355
+
+Full Gate final
+$ tail -5 /tmp/pi-task6-gate-final.log
+.....................................................................................................................................................................................................................................................................................................................................................................................
+----------------------------------------------------------------------
+Ran 373 tests in 104.733s
+
+OK
+
+Full pi-docker final
+$ tail -5 /tmp/pi-task6-pi-docker-final.log
+.......................................................................................s.................................................ss....
+----------------------------------------------------------------------
+Ran 143 tests in 40.194s
+
+OK (skipped=3)
+
+Full Node first result (new fixture integration failures, corrected below; no repeated full run)
+$ tail -10 /tmp/pi-task6-repo-unit-final.log
+  ...
+1..671
+# tests 752
+# suites 0
+# pass 748
+# fail 3
+# cancelled 0
+# skipped 1
+# todo 0
+# duration_ms 57312.332732
+
+Covering package/inventory/staging final
+$ tail -10 /tmp/pi-task6-fixture-focused-green.log
+  ...
+1..22
+# tests 58
+# suites 0
+# pass 58
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 6842.01772
+
+Native BDD final (real TUI exception, actual installed shared-path Pi1.1.0)
+$ cat /tmp/pi-task6-native-iteration5.log
+
+Running 1 test using 1 worker
+
+(node:3134374) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+Task6 isolated pi-task6-29efb1538992: build
+Task6 isolated pi-task6-29efb1538992: build
+Task6 isolated pi-task6-29efb1538992: gate
+Task6 isolated pi-task6-29efb1538992: preflight-passed
+Task6 isolated pi-task6-29efb1538992: native-launch
+  ✓  1 [chromium] › e2e/.features-gen/features/native-terminal.feature.spec.js:6:7 › Installed trusted native Pi terminal through the real Hub and Gate › One installed native child handles explicit remote input and local handoff @native-terminal (19.6s)
+
+  1 passed (20.5s)
+
+just check first format errors (fixed in own files)
+$ tail -10 /tmp/pi-task6-check-final.log
+Checked 317 files in 305ms. No fixes applied.
+Found 5 errors.
+Found 32 warnings.
+Found 7 infos.
+check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Some errors were emitted while running checks.
+  
+
+error: recipe `check` failed on line 8 with exit code 1
+
+just check final (exit0, existing warning/info debt retained)
+$ tail -7 /tmp/pi-task6-check-final2.log
+  
+
+The number of diagnostics exceeds the limit allowed. Use --max-diagnostics to increase it.
+Diagnostics not shown: 19.
+Checked 317 files in 183ms. No fixes applied.
+Found 32 warnings.
+Found 7 infos.
+
+Dist verification
+$ cat /tmp/pi-task6-dist-final.log
+
+> @kkkiio/pi-web-ui@1.0.1 verify:dist
+> node scripts/web-dist.mjs
+
+Source and dist outputs verified (hash consistency only; not trust/authenticity).
+
+Precise patch forward/reverse replay
+$ tail -2 /tmp/pi-task6-patch-replay.log
+patching file pi-dockerctl
+12/12 exact before → forward patch → final hash → reverse patch → preserved baseline; host source unchanged.
+
+Supplemental missing image capability refusal (post-implementation test coverage)
+$ env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests -p test_pirun_terminal.py -k missing_prerequisites -v
+test_missing_prerequisites_refuse_before_grant (test_pirun_terminal.TerminalLauncherTests) ... ok
+Ran 1 test in 0.369s
+OK
+
+Final patch replay after test-only coverage addition
+$ tail -1 /tmp/pi-task6-patch-replay-final.log
+12/12 exact forward/final/reverse;14/14 Task4 and4/4 ordinary preserved;helper final hash only (no original claim);temporary fixture removed.

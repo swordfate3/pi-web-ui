@@ -604,3 +604,12 @@
 - 测试不再睡150ms猜撤权完成，改看明确sink完成状态/事件；首次直接worker partial测试因communicate关闭stdin变EOF，修正测试保留stdin到deadline，不放宽实现。首次静态检查修复两处assignment-in-expression，未改项目lint策略。原始输出用base64保持字节，attach明确screenAvailable:false，无尾部重放/ANSI→HTML/自动terminal reply。
 - 详情见[真实连接验证](validation/pty-transport.md)。没有完整screen snapshot、本机TTY relay、产品adapter屏障、浏览器跨origin/手机验证或真实授权。未提交/push、安装依赖、申请Gate、reload、部署或重启当前Pi。
 - 修复后限定范围独立复审确认两项P2根因消除、无新增必须修复项（只读未执行）；最终Pi1.1/1.3各8/8复跑通过。仍保留异常cleanup抛错/文件系统unlink故障等未验证限制，不将worker退出当作这些路径已回收Pi的证明。正常close与SIGSTOP测试另外核对Pi进程消失。
+
+## 2026-10-22 · Task6 显式可信终端启动与真实原生 Pi 验收
+
+- 集中式 pirun 增加显式默认关闭的 terminal profile、早期失败关闭预检、固定 PATH/profile/label，以及实际 Compose `logging: none` overlay；普通启动参数不变。Gate 仅在现有 root0600 admin 边界提供 controller 批准的只读冻结策略预检（单次2秒/4096字节），未增加 provider wire、Hub/Pi 执行权限、激活或策略修改。
+- 独立镜像通过 release manifest 验证后安装 root-owned broker/client/supervisor/mirror，Pi 自身保持共享安装路径；保留 SSH 复制/权限和模型同步。早期误用镜像冻结 Pi 的候选已纠正，不能把该历史候选称为共享包更新后重新启动可刷新。全局更新仍只报告共享包安装与人工退出重启，不自动托管重启、不宣称当前子进程已更新。
+- 真正 Browser→Hub→Gate→安装原生 Pi1.1.0 TUI 的 Playwright-BDD 通过1/1（20.5s）；这是批准的窄 RPC 例外，原 RPC 测试不变。独立核对实际子进程 PID18/PPID1/start27959636；拒绝零副作用/接受一次、中文组合、custom BETA/96x30手动 resize、本机夺回与重新显式交接、无日志内容与 helper/socket/资源清理均有实际证据。1440/390截图另行打开检查：外层滚动后 Yes/No、导航/footer、mobile panel底部可见；未改CSS。不是物理手机/OS IME/公共网关或个人扩展授权证明。
+- Gate 全套373/373、pi-docker143项（140通过/3未启用真实服务或生产卷测试）通过；首次 Node 全套752项为748通过/3新 staging-script fixture/inventory失败/1显式1GiB压力skip。修正 fixture 后仅重跑覆盖58/58，未假称首次全套绿色，Task7保留最终全套门禁。build/dist、两套types、just check通过；原32warnings/7infos/Vite大chunk/Node模块类型提示保留，新增格式问题已修。
+- [运行指南](trusted-terminal.md)与[Task6精确证据](validation/2026-10-21-task6-terminal-wiring/README.md)记录12个外部文件 delta、真实 before/final哈希与双向回滚复现；重叠 Gate 基于Task4最终版，其他14个Task4文件保留。外部文件本身不在Git。既有 helper 曾短暂编辑后撤回但缺独立原始备份，明确披露且不伪称原始逐字相等。
+- 所有测试使用自有临时工作区、合成无用户凭据输入、隔离命名镜像/容器/卷并精确清理；未读取.env、复用生产卷、retag pi-sandbox、重启/部署现有服务、修改DNS/Caddy/tunnel/password或merge/push。等待controller独立复审；未启动Task7。

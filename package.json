@@ -117,6 +117,7 @@
     "docs/remote-access.md",
     "docs/hub.md",
     "scripts/web-dist.mjs",
+    "scripts/stage-terminal-image.mjs",
     "docs/images/",
     "LICENSE",
     "README.md"

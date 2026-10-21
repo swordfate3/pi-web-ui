@@ -39,6 +39,7 @@ const SOURCE_FILES = [
   "extensions/remote-access/plan.ts",
   "extensions/remote-access/gateway.py",
   "scripts/web-dist.mjs",
+  "scripts/stage-terminal-image.mjs",
   "runtime/terminal/broker.ts",
   "runtime/terminal/protocol.ts",
   "runtime/terminal/supervisor.py",

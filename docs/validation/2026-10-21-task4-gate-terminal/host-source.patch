@@ -1,0 +1,1652 @@
+--- a/pi-deploy-gate/Dockerfile
++++ b/pi-deploy-gate/Dockerfile
+@@ -4,6 +4,10 @@
+ WORKDIR /app
+ COPY gate/ ./gate/
+ COPY policy.json ./policy.json
++COPY terminal-policy.json ./terminal-policy.json
++# Empty dedicated volumes inherit these image-owned metadata on first mount.
++# No runtime chown, setuid, or added capabilities are needed.
++RUN install -d -o 0 -g 1000 -m 2770 /run/pi-terminal-provider /run/pi-terminal-credentials
+ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ # Root here is an explicit trusted-management exception. Ordinary Pi stays node.
+ ENTRYPOINT ["/usr/bin/python3", "-m", "gate.service"]
+--- a/pi-deploy-gate/compose.yaml
++++ b/pi-deploy-gate/compose.yaml
+@@ -29,6 +29,12 @@
+         target: /state
+         volume:
+           nocopy: true
++      - type: volume
++        source: terminal-ipc
++        target: /run/pi-terminal-provider
++      - type: volume
++        source: terminal-credentials
++        target: /run/pi-terminal-credentials
+     healthcheck:
+       test: ["CMD", "/usr/bin/python3", "-c", "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:16182/healthz', timeout=3).read()"]
+       interval: 15s
+@@ -44,3 +50,7 @@
+ volumes:
+   gate-state:
+     name: pi-deploy-gate-state
++  terminal-ipc:
++    name: pi-terminal-provider-ipc
++  terminal-credentials:
++    name: pi-terminal-provider-credentials
+--- a/pi-deploy-gate/terminal-policy.json
++++ b/pi-deploy-gate/terminal-policy.json
+@@ -0,0 +1 @@
++{"enabled": false, "images": []}
+--- a/pi-deploy-gate/gate/engine.py
++++ b/pi-deploy-gate/gate/engine.py
+@@ -162,6 +162,64 @@
+         except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException):
+             raise DockerError('control transport or response failed') from None
+
++    def list_terminal(self, run_id, timeout=3):
++        from .lifecycle_contract import identifier
++        identifier(run_id)
++        # All running matches, not only terminal-labelled ones: duplicates fail closed.
++        filters = {'label': ['cn.swordfate.pi.run-id=' + run_id], 'status': ['running']}
++        return self.call('GET', '/containers/json?all=0&filters=' + quote(json.dumps(filters), safe=''),
++                         limit=1024 * 1024, timeout=timeout)
++
++    def terminal_exec(self, container_id, before_start, timeout=3):
++        """One fixed helper, duplex non-TTY stream. Never the buffered RPC path."""
++        from .lifecycle_contract import CONTAINER
++        if not isinstance(container_id, str) or not CONTAINER.fullmatch(container_id):
++            raise ValueError('immutable container identity required')
++        end = time.monotonic() + min(timeout, 3)
++        def remaining():
++            value = end - time.monotonic()
++            if value <= 0:
++                raise DockerError('terminal transport unavailable')
++            return value
++        body = {'User': '1000:1000', 'Privileged': False, 'AttachStdin': True,
++                'AttachStdout': True, 'AttachStderr': True, 'Tty': False, 'WorkingDir': '/',
++                'Env': ['PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
++                        'PYTHONNOUSERSITE=1', 'PYTHONSAFEPATH=1', 'PYTHONDONTWRITEBYTECODE=1'],
++                'Cmd': ['/usr/bin/python3', '-I', '/usr/local/lib/pi-runtime/terminal/client.py']}
++        created = self.call('POST', '/containers/' + container_id + '/exec', body,
++                            timeout=remaining(), limit=16384)
++        key = created.get('Id') if isinstance(created, dict) else None
++        if not isinstance(key, str) or not CONTAINER.fullmatch(key):
++            raise DockerError('terminal transport unavailable')
++        before_start()
++        sock = socket.socket(socket.AF_UNIX)
++        try:
++            sock.settimeout(remaining())
++            sock.connect(self.path)
++            data = b'{"Detach":false,"Tty":false}'
++            request = ('POST /v1.45/exec/' + key + '/start HTTP/1.1\r\nHost: localhost\r\n'
++                       'Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\n'
++                       'Content-Length: ' + str(len(data)) + '\r\n\r\n').encode() + data
++            sock.settimeout(remaining())
++            sock.sendall(request)
++            # Avoid buffered HTTP read-ahead stealing initial multiplex bytes.
++            headers = bytearray()
++            while not headers.endswith(b'\r\n\r\n'):
++                sock.settimeout(remaining())
++                byte = sock.recv(1)
++                if not byte or len(headers) >= 8192:
++                    raise DockerError('terminal transport unavailable')
++                headers.extend(byte)
++            lines = headers.decode('ascii', 'strict').lower().split('\r\n')
++            if (lines[0].split()[:2] != ['http/1.1', '101'] or
++                    'upgrade: tcp' not in lines or 'connection: upgrade' not in lines):
++                raise DockerError('terminal transport unavailable')
++            sock.setblocking(False)
++            return sock
++        except BaseException:
++            sock.close()
++            raise
++
+     def lifecycle_volume(self, name, timeout=3):
+         if name not in ('pi-user-home', 'pi-home', 'pi-runtime', 'pi-credentials',
+                         'pi-huggingface-cache', 'pi-web-hub-runtime'):
+--- a/pi-deploy-gate/gate/lifecycle.py
++++ b/pi-deploy-gate/gate/lifecycle.py
+@@ -109,16 +109,16 @@
+                             'Mounts': mounts,
+                             'started': item.get('State', {}).get('StartedAt')})
+
+-    def _resolve(self, run, policy, expected=None, deadline=None, expected_hash=None):
++    def _resolve(self, run, policy, expected=None, deadline=None, expected_hash=None, role='restart'):
+         engine = self._engine()
+-        candidates = self._transport(deadline, engine.list_lifecycle, run)
++        candidates = self._transport(deadline, engine.list_terminal if role == 'terminal' else engine.list_lifecycle, run)
+         if not isinstance(candidates, list) or len(candidates) != 1:
+             raise RuntimeError('ambiguous or unavailable target')
+         key = candidates[0].get('Id')
+         from .lifecycle_contract import CONTAINER
+         if not isinstance(key, str) or not CONTAINER.fullmatch(key) or (expected is not None and key != expected):
+             raise RuntimeError('target changed')
+-        item = trusted(self._transport(deadline, engine.inspect, key), run, policy['images'])
++        item = trusted(self._transport(deadline, engine.inspect, key), run, policy['images'], role=role)
+         for mount in item.get('Mounts') or []:
+             if mount.get('Type') == 'volume':
+                 volume = self._transport(deadline, engine.lifecycle_volume, mount['Name'])
+--- a/pi-deploy-gate/gate/lifecycle_contract.py
++++ b/pi-deploy-gate/gate/lifecycle_contract.py
+@@ -105,7 +105,41 @@
+         raise RuntimeError('target changed or busy')
+
+
+-def trusted(item, run_id, images):
++def terminal_profile(item):
++    config = (item or {}).get('Config', {})
++    return ((config.get('Labels') or {}).get('cn.swordfate.pi.runtime-profile') == 'web-terminal-v1' or
++            'PI_RUNTIME_PROFILE=web-terminal-v1' in (config.get('Env') or []))
++
++
++def trusted(item, run_id, images, role='restart'):
++    """Role admission is independent of the common immutable-container checks."""
++    if role not in ('restart', 'terminal', 'inventory'):
++        raise ValueError('invalid trust role')
++    if role == 'restart' and terminal_profile(item):
++        raise RuntimeError('terminal_profile_unaudited')
++    trusted_container(item, run_id, images)
++    config = item['Config']
++    if role == 'terminal' or (role == 'inventory' and terminal_profile(item)):
++        if (item['HostConfig'].get('LogConfig') or {}).get('Type') != 'none':
++            raise RuntimeError('terminal content logging refused')
++        labels = config.get('Labels') or {}
++        env = config.get('Env') or []
++        names = [entry.partition('=')[0] for entry in env]
++        if (labels.get('cn.swordfate.pi.runtime-profile') != 'web-terminal-v1' or
++                'PI_RUNTIME_PROFILE=web-terminal-v1' not in env or
++                'PI_RUNTIME_RUN_ID=' + run_id not in env or len(set(names)) != len(names)):
++            raise RuntimeError('untrusted terminal launch')
++        for entry in env:
++            name, _, value = entry.partition('=')
++            if (name in ('NODE_OPTIONS', 'NODE_PATH', 'BASH_ENV', 'ENV') or
++                    (name == 'PATH' and value != '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')):
++                raise RuntimeError('untrusted terminal loader')
++    elif (config.get('Labels') or {}).get('cn.swordfate.pi.lifecycle') != '1':
++        raise RuntimeError('untrusted lifecycle role')
++    return item
++
++
++def trusted_container(item, run_id, images):
+     """Fail closed on authority mounts or overrides of image-owned control code."""
+     if not isinstance(item, dict):
+         raise RuntimeError('target unavailable')
+@@ -113,7 +147,7 @@
+     labels = config.get('Labels') or {}
+     if (not CONTAINER.fullmatch(item.get('Id', '')) or item.get('Image') not in images or
+             item.get('State', {}).get('Running') is not True or
+-            labels.get('cn.swordfate.pi.run-id') != run_id or labels.get('cn.swordfate.pi.lifecycle') != '1' or
++            labels.get('cn.swordfate.pi.run-id') != run_id or
+             config.get('User') != '1000:1000' or config.get('Entrypoint') != ['/usr/local/bin/pi-entrypoint'] or
+             host.get('Privileged') is not False or host.get('CapAdd') or
+             'ALL' not in (host.get('CapDrop') or []) or
+--- a/pi-deploy-gate/gate/runtime_updates.py
++++ b/pi-deploy-gate/gate/runtime_updates.py
+@@ -6,7 +6,7 @@
+ import time
+
+ from .lifecycle import Deadline
+-from .lifecycle_contract import IMAGE, identifier, snapshot
++from .lifecycle_contract import IMAGE, identifier, snapshot, terminal_profile
+ from .registry import fingerprint
+ from .runtime_install import AUDITED_VERSIONS
+ from .store import ACTIVE, REQUEST_OPEN, _json
+@@ -65,7 +65,7 @@
+                 'resolved_at', 'resolution')
+         result = {k: job[k] for k in keys if k in job}
+         result['targets'] = [
+-            {k: t[k] for k in ('run_id', 'status', 'old_version', 'version', 'restart_id', 'wait_reason') if k in t}
++            {k: t[k] for k in ('run_id', 'status', 'old_version', 'version', 'restart_id', 'wait_reason', 'profile') if k in t}
+             for t in job.get('targets', [])]
+         if job.get('resolved_at'):
+             result['resolved'] = True
+@@ -196,7 +196,8 @@
+             run = identifier((item or {}).get('Config', {}).get('Labels', {}).get('cn.swordfate.pi.run-id'))
+             deadline = Deadline(time, 4)
+             try:
+-                item = life._resolve(run, job['policy'], expected=candidate['Id'], deadline=deadline)
++                item = life._resolve(run, job['policy'], expected=candidate['Id'], deadline=deadline,
++                                     role='terminal' if terminal_profile(item) else 'inventory')
+             except Exception:
+                 latest = life._engine().inspect(candidate['Id'], timeout=3)
+                 if latest is None or latest.get('State', {}).get('Running') is False:
+@@ -205,6 +206,10 @@
+             if not any(m.get('Name') == 'pi-runtime' and m.get('Destination') == '/home/node/.local'
+                        for m in item.get('Mounts') or []):
+                 raise RuntimeError('runtime consumer mount mismatch')
++            if terminal_profile(item):
++                # Explicit inventory-only marker: never a lifecycle snapshot/version.
++                inventory.append((item, {'profile': 'web-terminal-v1'}))
++                continue
+             try:
+                 state = snapshot(life._status(item, deadline), run)
+             except Exception:
+@@ -290,6 +295,8 @@
+         return fingerprint({'state': state, 'target': self.gate.lifecycle._target_hash(item)})
+
+     def _enqueue(self, parent, item, state, targets, target):
++        if terminal_profile(item):
++            raise RuntimeError('terminal_profile_unaudited')
+         life, key = self.gate.lifecycle, secrets.token_hex(16)
+         child = {**{k: state[k] for k in ('run_id', 'runtime_id', 'session_id', 'leaf_id')},
+                  'id': key, 'status': 'queued', 'stage': 'runtime_update_refresh',
+@@ -364,6 +371,12 @@
+                 if state is None:
+                     target.update(status='waiting_for_idle', wait_reason='consumer_not_ready')
+                     continue
++                if terminal_profile(item):
++                    target.update(status='manual_restart_required', profile='web-terminal-v1',
++                                  wait_reason='terminal_profile_unaudited')
++                    for field in ('old_version', 'version', 'restart_id'):
++                        target.pop(field, None)
++                    continue
+                 target.setdefault('old_version', state['version'])
+                 if (target.get('retry_after_state') is not None and
+                         target['retry_after_state'] != self._state_key(item, state)):
+@@ -380,9 +393,11 @@
+                     self._enqueue(job, item, state, targets, target)
+                     return
+                 target.update(status='waiting_for_idle')
+-            complete = all(t['status'] in ('succeeded', 'exited') for t in targets)
+-            self._update(key, targets=targets, status='succeeded' if complete else 'running',
+-                         stage='complete' if complete else 'waiting_for_idle')
++            complete = all(t['status'] in ('succeeded', 'exited', 'manual_restart_required') for t in targets)
++            manual = any(t['status'] == 'manual_restart_required' for t in targets)
++            self._update(key, targets=targets,
++                         status=('manual_restart_required' if manual else 'succeeded') if complete else 'running',
++                         stage=('installed_manual_restart_required' if manual else 'complete') if complete else 'waiting_for_idle')
+         except Exception:
+             self._update(key, targets=targets, status='recovery_required', stage='refresh_requires_inspection')
+
+@@ -406,6 +421,8 @@
+             children = self.gate.lifecycle._jobs()
+         self._engine().quiescent(job)
+         for item, state in self._inventory(job):
++            if terminal_profile(item):
++                continue  # No legacy operation endpoint exists for this role.
+             if state is None:
+                 raise RuntimeError('consumer inspection unavailable')
+             value = self.gate.lifecycle._status(item)
+--- a/pi-deploy-gate/gate/service.py
++++ b/pi-deploy-gate/gate/service.py
+@@ -59,6 +59,7 @@
+         self.worker = None
+         self.policy = policy
+         self.closing = False
++        self.terminal_server = None
+         self.instance_id = secrets.token_hex(16)
+         from .lifecycle import Lifecycle
+         self.lifecycle = Lifecycle(self)
+@@ -71,6 +72,9 @@
+
+     def close(self):
+         self.closing = True
++        if self.terminal_server is not None:
++            self.terminal_server.close()
++            self.terminal_server = None
+         if self.worker:
+             self.worker.join(timeout=540)
+             if self.worker.is_alive():
+@@ -609,6 +613,19 @@
+     return {key: value for key, value in job.items() if key != 'snapshot'}
+
+
++def start_terminal(gate, policy, ipc=Path('/run/pi-terminal-provider'),
++                   credentials=Path('/run/pi-terminal-credentials')):
++    from .terminal_contract import policy as validate_policy
++    from .terminal_provider import TerminalListener
++    policy = validate_policy(policy)
++    if not policy['enabled']:
++        return None
++    if gate.terminal_server is not None:
++        raise RuntimeError('terminal listener already started')
++    gate.terminal_server = TerminalListener(gate, policy, ipc, credentials)
++    return gate.terminal_server
++
++
+ def main():
+     from .router import DeploymentRouter
+     from .engine import Engine
+@@ -616,10 +633,12 @@
+     parser.add_argument('--state', default='/state')
+     parser.add_argument('--policy', default='/app/policy.json')
+     parser.add_argument('--port', type=int, default=16182)
++    parser.add_argument('--terminal-policy', default='/app/terminal-policy.json')
+     args = parser.parse_args()
+     policy = json.loads(Path(args.policy).read_text())
+     gate = Gate(Path(args.state), policy=policy)
+     gate.deployer = DeploymentRouter(gate.store, Engine(), policy, before_cutover=gate.verify_execution)
++    start_terminal(gate, json.loads(Path(args.terminal_policy).read_text()))
+     gate.lifecycle.recover()
+     if not gate.store.upgrade_reservation() and not gate.lifecycle.active() and not gate.runtime_updates.active():
+         gate.deployer.recover()
+--- a/pi-deploy-gate/gate/terminal_contract.py
++++ b/pi-deploy-gate/gate/terminal_contract.py
+@@ -0,0 +1,235 @@
++"""Closed private terminal wire contract. No command/path selection exists here."""
++import base64
++import json
++import unicodedata
++
++from .lifecycle_contract import HEX, IMAGE
++
++FRAME = 65536
++QUEUE = 262144
++SAFE_INTEGER = 2 ** 53 - 1
++
++
++def exact(value, fields):
++    if not isinstance(value, dict) or set(value) != set(fields.split()):
++        raise ValueError('terminal frame refused')
++
++
++def integer(value, low=1, high=SAFE_INTEGER):
++    if type(value) is not int or not low <= value <= high:
++        raise ValueError('terminal integer refused')
++    return value
++
++
++def identity(value):
++    if not isinstance(value, str) or not HEX.fullmatch(value):
++        raise ValueError('terminal identity refused')
++    return value
++
++
++def text(value):
++    if (not isinstance(value, str) or not 1 <= len(value) <= 256 or
++            any(unicodedata.category(c) in ('Cc', 'Cs') for c in value)):
++        raise ValueError('terminal text refused')
++
++
++def target(value):
++    exact(value, 'v runId runtimeId sessionId terminalEpoch profile inputState managedRestartEligible')
++    integer(value['v'], 1, 1)
++    identity(value['runId'])
++    identity(value['terminalEpoch'])
++    text(value['runtimeId'])
++    text(value['sessionId'])
++    if (value['profile'] != 'web-terminal-v1' or value['managedRestartEligible'] is not False or
++            value['inputState'] not in ('local', 'none', 'remote', 'fenced')):
++        raise ValueError('terminal target refused')
++    return value
++
++
++def policy(value):
++    exact(value, 'enabled images')
++    if (type(value['enabled']) is not bool or not isinstance(value['images'], list) or
++            len(value['images']) > 64 or (value['enabled'] and not value['images']) or
++            any(not isinstance(i, str) or not IMAGE.fullmatch(i) for i in value['images'])):
++        raise ValueError('terminal policy refused')
++    return {'enabled': value['enabled'], 'images': sorted(set(value['images']))}
++
++
++def first(value):
++    if not isinstance(value, dict):
++        raise ValueError('terminal frame refused')
++    integer(value.get('v'), 1, 1)
++    if value.get('op') == 'status':
++        exact(value, 'v op token runId')
++        identity(value['runId'])
++    else:
++        exact(value, 'v op token target scope binding')
++        if value['op'] != 'connect' or value['scope'] not in ('read', 'write'):
++            raise ValueError('terminal operation refused')
++        target(value['target'])
++        exact(value['binding'], 'authorizationId connectionId')
++        for entry in value['binding'].values():
++            identity(entry)
++    if not isinstance(value['token'], str) or len(value['token']) != 64:
++        raise ValueError('terminal credential refused')
++    return {k: v for k, v in value.items() if k != 'token'}
++
++
++def encode(value):
++    data = json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode() + b'\n'
++    if len(data) > FRAME:
++        raise ValueError('terminal frame limit')
++    return data
++
++
++def pairs(items):
++    result = {}
++    for key, value in items:
++        if key in result:
++            raise ValueError('duplicate key')
++        result[key] = value
++    return result
++
++
++def nonfinite(_):
++    raise ValueError('nonfinite value')
++
++
++class Lines:
++    def __init__(self):
++        self.pending = bytearray()
++
++    def feed(self, data):
++        frames = []
++        for part in data.split(b'\n')[:-1]:
++            self.pending.extend(part)
++            if len(self.pending) + 1 > FRAME:
++                raise ValueError('terminal frame limit')
++            value = json.loads(self.pending.decode('utf-8', 'strict'), object_pairs_hook=pairs,
++                               parse_constant=nonfinite)
++            if not isinstance(value, dict):
++                raise ValueError('terminal frame refused')
++            frames.append(value)
++            self.pending.clear()
++        self.pending.extend(data.rsplit(b'\n', 1)[-1])
++        if len(self.pending) >= FRAME:
++            raise ValueError('terminal frame limit')
++        return frames
++
++
++class Conversation:
++    """Bounded request correlation and runtime identity/screen envelope validation."""
++    def __init__(self, opening):
++        self.opening, self.ready, self.last_id = opening, None, 0
++        self.pending = {}
++        self.screen = None
++
++    def request(self, value):
++        if self.ready is None or self.opening.get('scope') != 'write':
++            raise ValueError('terminal not writable')
++        key = integer(value.get('id'))
++        if key <= self.last_id or len(self.pending) >= 64:
++            raise ValueError('terminal request quota')
++        kind = value.get('type')
++        if kind in ('acquire', 'release'):
++            exact(value, 'id type')
++        elif kind == 'input':
++            exact(value, 'id v type terminalEpoch leaseId sequence data')
++            integer(value['v'], 1, 1)
++            identity(value['leaseId'])
++            integer(value['sequence'])
++            if (value['terminalEpoch'] != self.ready['terminalEpoch'] or not isinstance(value['data'], str) or
++                    not 1 <= len(value['data'].encode('utf-8', 'strict')) <= 8192):
++                raise ValueError('terminal input refused')
++        elif kind == 'resize':
++            exact(value, 'id type leaseId columns rows')
++            identity(value['leaseId'])
++            integer(value['columns'], 20, 240)
++            integer(value['rows'], 5, 120)
++        else:
++            raise ValueError('terminal action refused')
++        self.pending[key] = kind
++        self.last_id = key
++
++    def same_target(self, value):
++        target(value)
++        expected = self.opening.get('target') or self.ready
++        run = self.opening.get('runId') or expected['runId']
++        if value['runId'] != run or (expected and any(value[k] != expected[k] for k in
++                                                    ('runId', 'runtimeId', 'sessionId', 'terminalEpoch'))):
++            raise ValueError('terminal identity changed')
++
++    def response(self, value):
++        kind = value.get('type')
++        if self.ready is None:
++            if value == {'type': 'error', 'error': 'terminal_backend_unavailable'}:
++                return False
++            exact(value, 'type target')
++            if kind != 'ready':
++                raise ValueError('terminal not ready')
++            self.same_target(value['target'])
++            self.ready = value['target']
++            return True
++        if self.opening['op'] == 'status':
++            raise ValueError('extra status frame')
++        if kind == 'response':
++            exact(value, 'type id result')
++            action = self.pending.pop(integer(value['id']), None)
++            result = value['result']
++            if action is None or not isinstance(result, dict):
++                raise ValueError('unexpected terminal response')
++            valid = []
++            if action == 'acquire':
++                if result.get('ok') is True:
++                    exact(result, 'ok leaseId expiresInMs')
++                    identity(result['leaseId'])
++                    integer(result['expiresInMs'], 30000, 30000)
++                    return True
++                valid = [{'ok': False, 'error': x} for x in ('local_owns_input', 'control_unavailable')]
++            elif action == 'release':
++                valid = [{'ok': True}]
++            elif action == 'input':
++                valid = [{'ok': True, 'delivery': 'written'},
++                         {'ok': False, 'delivery': 'rejected', 'error': 'input_rejected'},
++                         {'ok': False, 'delivery': 'unknown', 'error': 'input_delivery_unknown'}]
++            elif action == 'resize':
++                valid = [{'ok': True}, {'ok': False}] + [{'ok': False, 'error': x} for x in
++                                                       ('resize_rejected', 'resize_unknown')]
++            if type(result.get('ok')) is not bool or result not in valid:
++                raise ValueError('terminal result refused')
++        elif kind == 'screen-start':
++            exact(value, 'type target sequence columns rows bytes chunks')
++            self.same_target(value['target'])
++            integer(value['sequence'], 0)
++            integer(value['columns'], 20, 240)
++            integer(value['rows'], 5, 120)
++            size = integer(value['bytes'], 0, 1048576)
++            chunks = integer(value['chunks'], 0, 52)
++            if self.screen or chunks != (size + 20479) // 20480:
++                raise ValueError('terminal screen refused')
++            self.screen = dict(sequence=value['sequence'], size=size, chunks=chunks, index=0, received=0)
++        elif kind in ('screen-chunk', 'screen-end'):
++            exact(value, 'type terminalEpoch sequence index data' if kind == 'screen-chunk'
++                  else 'type terminalEpoch sequence')
++            screen = self.screen
++            if (not screen or value['terminalEpoch'] != self.ready['terminalEpoch'] or
++                    integer(value['sequence'], 0) != screen['sequence']):
++                raise ValueError('terminal screen identity refused')
++            if kind == 'screen-chunk':
++                if integer(value['index'], 0) != screen['index'] or screen['index'] >= screen['chunks']:
++                    raise ValueError('terminal chunk refused')
++                raw = base64.b64decode(value['data'], validate=True)
++                if (not 1 <= len(raw) <= 20480 or base64.b64encode(raw).decode() != value['data'] or
++                        screen['received'] + len(raw) > screen['size']):
++                    raise ValueError('terminal chunk refused')
++                screen['index'] += 1
++                screen['received'] += len(raw)
++            else:
++                if screen['index'] != screen['chunks'] or screen['received'] != screen['size']:
++                    raise ValueError('incomplete terminal screen')
++                self.screen = None
++        elif value == {'type': 'screen-unavailable'}:
++            self.screen = None
++        else:
++            raise ValueError('terminal output refused')
++        return True
+--- a/pi-deploy-gate/gate/terminal_provider.py
++++ b/pi-deploy-gate/gate/terminal_provider.py
+@@ -0,0 +1,287 @@
++"""Private Gate↔Hub provider. Closing a helper never signals the Pi process."""
++import hmac
++import fcntl
++import os
++from pathlib import Path
++import secrets
++import select
++import socket
++import socketserver
++import stat
++import threading
++import time
++
++from . import terminal_contract as wire
++from .lifecycle import Deadline
++
++
++class Multiplex:
++    def __init__(self):
++        self.pending = bytearray()
++        self.size = None
++
++    def feed(self, data):
++        self.pending.extend(data)
++        output = bytearray()
++        while True:
++            if self.size is None:
++                if len(self.pending) < 8:
++                    break
++                header = self.pending[:8]
++                del self.pending[:8]
++                self.size = int.from_bytes(header[4:], 'big')
++                if header[:4] != b'\x01\0\0\0' or not 1 <= self.size <= wire.FRAME:
++                    raise ValueError('terminal multiplex refused')
++            if len(self.pending) < self.size:
++                break
++            output.extend(self.pending[:self.size])
++            del self.pending[:self.size]
++            self.size = None
++        return output
++
++
++class TerminalProvider:
++    def __init__(self, gate, policy, token):
++        self.gate, self.policy = gate, wire.policy(policy)
++        if (not isinstance(token, str) or len(token) != 64 or
++                any(c not in '0123456789abcdef' for c in token) or
++                token in (gate.token, gate.lifecycle_token)):
++            raise ValueError('independent terminal credential required')
++        self.token = token
++        self.lock = threading.Lock()
++        self.peers, self.bindings, self.runs = set(), set(), {}
++        self.closed = False
++
++    @staticmethod
++    def disconnect(connection):
++        try:
++            connection.shutdown(socket.SHUT_RDWR)
++        except OSError:
++            pass
++        connection.close()
++
++    def close(self):
++        with self.lock:
++            self.closed = True
++            peers = list(self.peers)
++        for peer in peers:
++            self.disconnect(peer)
++
++    def handle(self, connection):
++        helper, binding, run, scope, reserved = None, None, None, None, False
++        with self.lock:
++            if self.closed or not self.policy['enabled'] or len(self.peers) >= 8:
++                self.disconnect(connection)
++                return
++            self.peers.add(connection)
++        try:
++            connection.settimeout(2)
++            end, parser = time.monotonic() + 2, wire.Lines()
++            opening = None
++            while opening is None:
++                remaining = end - time.monotonic()
++                if remaining <= 0:
++                    return
++                connection.settimeout(remaining)
++                data = connection.recv(32768)
++                if not data:
++                    return
++                frames = parser.feed(data)
++                if frames:
++                    if len(frames) != 1 or parser.pending:
++                        return
++                    opening = frames[0]
++            first = wire.first(opening)
++            if not hmac.compare_digest(opening['token'], self.token):
++                return  # No Docker operation before private authentication.
++            opening.clear()
++            run = first.get('runId') or first['target']['runId']
++            if first['op'] == 'connect':
++                binding, scope = first['binding']['connectionId'], first['scope']
++                with self.lock:
++                    slots = self.runs.get(run, [])
++                    if binding in self.bindings or len(slots) >= 2 or (scope == 'write' and 'write' in slots):
++                        return
++                    self.bindings.add(binding)
++                    self.runs.setdefault(run, []).append(scope)
++                    reserved = True
++            life = self.gate.lifecycle
++            item = life._resolve(run, self.policy, deadline=Deadline(time, 4), role='terminal')
++            fingerprint = life._target_hash(item)
++            def inspect_again():
++                if self.closed or self.gate.closing:
++                    raise ValueError('terminal closed')
++                if select.select([connection], [], [], 0)[0] and not connection.recv(1, socket.MSG_PEEK):
++                    raise ValueError('terminal closed')
++                life._resolve(run, self.policy, expected=item['Id'], expected_hash=fingerprint,
++                              deadline=Deadline(time, 4), role='terminal')
++            inspect_again()
++            helper = life._engine().terminal_exec(item['Id'], inspect_again)
++            self.relay(connection, helper, first, inspect_again)
++        except Exception:
++            # No exception strings, diagnostics, credentials or terminal content escape.
++            pass
++        finally:
++            if helper is not None:
++                self.disconnect(helper)
++            self.disconnect(connection)
++            with self.lock:
++                self.peers.discard(connection)
++                if reserved:
++                    self.bindings.discard(binding)
++                    self.runs[run].remove(scope)
++                    if not self.runs[run]:
++                        del self.runs[run]
++
++    def relay(self, peer, helper, opening, inspect_again):
++        peer.setblocking(False)
++        inputs, outputs, mux = wire.Lines(), wire.Lines(), Multiplex()
++        conversation = wire.Conversation(opening)
++        queues = {helper: bytearray(wire.encode(opening)), peer: bytearray()}
++        created = time.monotonic()
++        next_inspect, first_deadline = created + .5, created + 2
++        partial = {peer: None, helper: None}
++        blocked = {peer: None, helper: created}
++        ending = False
++        while not self.closed and not self.gate.closing:
++            now = time.monotonic()
++            if (now - created >= 300 or (conversation.ready is None and now >= first_deadline) or
++                    any(start is not None and now - start >= 2 for start in (*partial.values(), *blocked.values()))):
++                return
++            if ending and not queues[peer]:
++                return
++            if now >= next_inspect:
++                inspect_again()
++                next_inspect = time.monotonic() + .5
++            readable, writable, _ = select.select([] if ending else [peer, helper],
++                                                   [sock for sock, queue in queues.items() if queue], [], .05)
++            # Read first: a peer close cancels queued input before it can be written.
++            for sock in readable:
++                data = sock.recv(32768)
++                if not data:
++                    if sock is helper and not outputs.pending and not mux.pending and mux.size is None:
++                        ending = True
++                        continue
++                    return
++                if sock is peer:
++                    values = inputs.feed(data)
++                    for value in values:
++                        conversation.request(value)
++                        queues[helper].extend(wire.encode(value))
++                    incomplete = bool(inputs.pending)
++                else:
++                    values = outputs.feed(mux.feed(data))
++                    for value in values:
++                        keep = conversation.response(value)
++                        queues[peer].extend(wire.encode(value))
++                        if not keep or opening['op'] == 'status':
++                            ending = True
++                    incomplete = bool(outputs.pending or mux.pending or mux.size is not None)
++                if incomplete:
++                    partial[sock] = partial[sock] or time.monotonic()
++                else:
++                    partial[sock] = None
++            for sock, queue in queues.items():
++                if len(queue) > wire.QUEUE:
++                    return
++                if queue and blocked[sock] is None:
++                    blocked[sock] = time.monotonic()
++            for sock in writable:
++                if sock is helper and ending:
++                    continue
++                try:
++                    count = sock.send(queues[sock])
++                except BlockingIOError:
++                    continue
++                if count <= 0:
++                    return
++                del queues[sock][:count]
++                # Deadline covers the oldest queued batch, not inactivity alone.
++                if not queues[sock]:
++                    blocked[sock] = None
++
++
++def private_parent(path):
++    path = Path(path)
++    if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
++        raise ValueError('unsafe terminal parent')
++    info = path.stat()
++    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 1000 or
++            stat.S_IMODE(info.st_mode) != 0o2770):
++        raise ValueError('unsafe terminal parent')
++    return path
++
++
++def credential(parent):
++    path = parent / 'provider.token'
++    try:
++        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
++    except FileExistsError:
++        pass
++    else:
++        with os.fdopen(fd, 'w') as stream:
++            os.fchmod(stream.fileno(), 0o640)
++            stream.write(secrets.token_hex(32))
++            stream.flush()
++            os.fsync(stream.fileno())
++    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
++    with os.fdopen(fd, 'r') as stream:
++        info = os.fstat(stream.fileno())
++        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0 or
++                info.st_gid != 1000 or stat.S_IMODE(info.st_mode) != 0o640):
++            raise ValueError('unsafe terminal credential')
++        return stream.read(65)
++
++
++class TerminalListener:
++    """Production ownership: image-created setgid parents, no runtime chown/caps."""
++    def __init__(self, gate, policy, ipc, credentials):
++        from .service import LimitedThreads
++        ipc, credentials = private_parent(ipc), private_parent(credentials)
++        self.lease = None
++        self.server = None
++        self.thread = None
++        self.address = ipc / 'provider.sock'
++        self.provider = None
++        try:
++            fd = os.open(ipc / 'provider.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
++            self.lease = os.fdopen(fd, 'r+')
++            info = os.fstat(fd)
++            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
++                raise ValueError('unsafe terminal lock')
++            fcntl.flock(self.lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            self.provider = TerminalProvider(gate, policy, credential(credentials))
++            provider = self.provider
++            class Handler(socketserver.BaseRequestHandler):
++                def handle(self):
++                    provider.handle(self.request)
++            class Server(LimitedThreads, socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
++                capacity = 8
++                def handle_error(self, *_):
++                    pass  # No terminal or credential diagnostics.
++            if self.address.exists() or self.address.is_symlink():
++                info = self.address.lstat()
++                if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0 or info.st_gid != 1000:
++                    raise ValueError('unsafe terminal socket')
++                self.address.unlink()
++            self.server = Server(str(self.address), Handler)
++            os.chmod(self.address, 0o660)
++            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
++            self.thread.start()
++        except BaseException:
++            self.close()
++            raise
++
++    def close(self):
++        if self.provider is not None:
++            self.provider.close()
++        if self.server is not None:
++            if self.thread is not None:
++                self.server.shutdown()
++                self.thread.join(2)
++            self.server.server_close()
++            self.address.unlink(missing_ok=True)
++            self.server = None
++        if self.lease is not None:
++            self.lease.close()
++            self.lease = None
+--- a/pi-deploy-gate/tests/test_terminal_admission.py
++++ b/pi-deploy-gate/tests/test_terminal_admission.py
+@@ -0,0 +1,53 @@
++"""Terminal role must never acquire legacy child restart authority."""
++import copy
++import unittest
++
++import test_lifecycle as lifecycle_tests
++import test_runtime_updates as update_tests
++from test_lifecycle import BODY, RUN
++from test_runtime_updates import KEY
++
++
++def terminal(item):
++    item['HostConfig']['LogConfig'] = {'Type': 'none', 'Config': {}}
++    item['Config']['Labels']['cn.swordfate.pi.runtime-profile'] = 'web-terminal-v1'
++    item['Config']['Env'] = ['PI_RUNTIME_PROFILE=web-terminal-v1', 'PI_RUNTIME_RUN_ID=' + item['Config']['Labels']['cn.swordfate.pi.run-id']]
++    return item
++
++
++class TerminalAdmission(unittest.TestCase):
++    setUp = lifecycle_tests.LifecycleTest.setUp
++    lifecycle = lifecycle_tests.LifecycleTest.lifecycle
++    def test_terminal_cannot_restart_even_with_idle_lifecycle_claim(self):
++        life = self.lifecycle()
++        terminal(self.engine.item)
++        with self.assertRaisesRegex(RuntimeError, 'terminal_profile_unaudited'):
++            life.submit(BODY)
++        self.assertEqual(self.engine.calls, [])
++
++
++class TerminalInventory(unittest.TestCase):
++    setUp = update_tests.RuntimeUpdatesTest.setUp
++    manager = update_tests.RuntimeUpdatesTest.manager
++    pump = update_tests.RuntimeUpdatesTest.pump
++    def test_terminal_install_finishes_without_status_or_refresh_proof(self):
++        manager = self.manager()
++        self.docker.list_terminal = self.docker.list_lifecycle
++        terminal(self.docker.items['2' * 64])
++        # No legacy status socket exists on this consumer.
++        original = self.docker.lifecycle_control
++        def control(cid, request, timeout=None):
++            self.assertNotEqual(cid, '2' * 64, 'terminal must never use control.sock')
++            return original(cid, request, timeout)
++        self.docker.lifecycle_control = control
++        manager.submit({'version': '1.3.0', 'idempotency_key': KEY})
++        self.pump()
++        job = manager.get(KEY)
++        self.assertEqual(job['status'], 'manual_restart_required')
++        self.assertEqual(job['stage'], 'installed_manual_restart_required')
++        self.assertEqual(self.install.starts, 1)
++        self.assertEqual(self.docker.restarts, ['1' * 64])
++        target = next(t for t in job['targets'] if t['run_id'] == '2' * 32)
++        self.assertEqual(target, {'run_id': '2' * 32, 'status': 'manual_restart_required',
++                                 'profile': 'web-terminal-v1', 'wait_reason': 'terminal_profile_unaudited'})
++        self.assertEqual(manager.active(), [])
+--- a/pi-deploy-gate/tests/test_terminal_provider.py
++++ b/pi-deploy-gate/tests/test_terminal_provider.py
+@@ -0,0 +1,393 @@
++"""Real provider and Engine against a controlled Unix Docker HTTP boundary."""
++import copy
++import http.server
++import importlib.util
++import json
++from pathlib import Path
++import socket
++import socketserver
++import struct
++import tempfile
++import threading
++import time
++import unittest
++
++from gate.engine import Engine
++from gate.service import Gate
++from test_lifecycle import FakeEngine, RUN, CID, IMAGE
++from test_terminal_admission import terminal
++
++TARGET = dict(v=1, runId=RUN, runtimeId='runtime', sessionId='session', terminalEpoch='e' * 32,
++              profile='web-terminal-v1', inputState='none', managedRestartEligible=False)
++TOKEN = '7' * 64
++
++
++def line(value):
++    return json.dumps(value, separators=(',', ':')).encode() + b'\n'
++
++
++class DockerServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
++    daemon_threads = True
++
++
++class DockerHandler(http.server.BaseHTTPRequestHandler):
++    protocol_version = 'HTTP/1.1'
++    rbufsize = 0
++
++    def log_message(self, *_):
++        pass
++
++    def do_GET(self):
++        state = self.server.state
++        state['calls'].append(self.path)
++        if self.path.startswith('/v1.45/containers/json?'):
++            value = [{'Id': key} for key in state['ids']]
++        elif self.path == '/v1.45/containers/' + CID + '/json':
++            value = state['item']
++        else:
++            self.send_error(404)
++            return
++        data = json.dumps(value).encode()
++        self.send_response(200)
++        self.send_header('Content-Length', str(len(data)))
++        self.end_headers()
++        self.wfile.write(data)
++
++    def do_POST(self):
++        state = self.server.state
++        value = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
++        state['calls'].append(self.path)
++        if self.path == '/v1.45/containers/' + CID + '/exec':
++            state['execs'].append(value)
++            if state.get('after_create'):
++                state['after_create']()
++            data = line({'Id': 'f' * 64})
++            self.send_response(201)
++            self.send_header('Content-Length', str(len(data)))
++            self.end_headers()
++            self.wfile.write(data)
++            return
++        if self.path != '/v1.45/exec/' + 'f' * 64 + '/start':
++            self.send_error(404)
++            return
++        self.send_response(101)
++        self.send_header('Connection', 'Upgrade')
++        self.send_header('Upgrade', 'tcp')
++        self.end_headers()
++        self.close_connection = True
++        self.connection.settimeout(3)
++        def send(data, kind=1):
++            self.connection.sendall(bytes([kind, 0, 0, 0]) + struct.pack('>I', len(data)) + data)
++        try:
++            first = json.loads(self.rfile.readline(65537))
++            state['frames'].append(first)
++            state['opened'].set()
++            if state.get('raw') is not None:
++                if state.get('fragment'):
++                    for byte in state['raw']:
++                        self.connection.sendall(bytes([byte]))
++                else:
++                    self.connection.sendall(state['raw'])
++                time.sleep(.2)
++                return
++            send(line({'type': 'ready', 'target': TARGET}))
++            if first['op'] == 'status':
++                return
++            if state.get('partial'):
++                send(b'{"type":')
++                time.sleep(2.5)
++                return
++            while True:
++                raw = self.rfile.readline(65537)
++                if not raw:
++                    return
++                frame = json.loads(raw)
++                state['frames'].append(frame)
++                send(line({'type': 'response', 'id': frame['id'], 'result': {'ok': True}}))
++        except (OSError, ValueError):
++            pass
++        finally:
++            state['closed'].set()
++
++
++class ProviderTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        self.root = Path(self.tmp.name)
++        self.gate = Gate(self.root / 'state')
++        self.addCleanup(self.gate.close)
++        self.state = dict(item=terminal(FakeEngine().item), ids=[CID], calls=[], execs=[], frames=[],
++                          opened=threading.Event(), closed=threading.Event())
++
++    def start(self, enabled=True):
++        self.assertIsNotNone(importlib.util.find_spec('gate.terminal_provider'), 'dedicated provider missing')
++        from gate.terminal_provider import TerminalProvider
++        docker = DockerServer(str(self.root / 'docker.sock'), DockerHandler)
++        docker.state = self.state
++        thread = threading.Thread(target=docker.serve_forever, daemon=True)
++        thread.start()
++        self.addCleanup(docker.server_close)
++        self.addCleanup(docker.shutdown)
++        self.gate.lifecycle.engine = Engine(str(self.root / 'docker.sock'))
++        self.provider = TerminalProvider(self.gate, {'enabled': enabled, 'images': [IMAGE]}, TOKEN)
++        self.addCleanup(self.provider.close)
++
++    def peer(self, value):
++        client, server = socket.socketpair()
++        client.settimeout(5)
++        if value is not None:
++            client.sendall(value if isinstance(value, bytes) else line(value))
++        thread = threading.Thread(target=self.provider.handle, args=(server,), daemon=True)
++        thread.start()
++        self.addCleanup(lambda: thread.join(5))
++        self.addCleanup(client.close)
++        return client
++
++    def status(self, **extra):
++        return dict(v=1, op='status', token=TOKEN, runId=RUN, **extra)
++
++    def connect(self):
++        return dict(v=1, op='connect', token=TOKEN, target=TARGET, scope='write',
++                    binding=dict(authorizationId='8' * 32, connectionId='9' * 32))
++
++    def receive(self, peer):
++        data = bytearray()
++        while not data.endswith(b'\n'):
++            try:
++                block = peer.recv(1)
++            except ConnectionResetError:
++                return None
++            if not block:
++                return None
++            data.extend(block)
++        return json.loads(data)
++
++    def test_disabled_and_wrong_credentials_never_contact_docker(self):
++        self.start(False)
++        self.assertIsNone(self.receive(self.peer(self.status())))
++        self.assertEqual(self.state['calls'], [])
++
++    def test_real_lifecycle_token_and_wrong_token_never_contact_docker(self):
++        self.start()
++        for token in (self.gate.lifecycle_token, self.gate.token, '0' * 64):
++            request = self.status()
++            request['token'] = token
++            self.assertIsNone(self.receive(self.peer(request)))
++        self.assertEqual(self.state['calls'], [])
++
++    def test_status_strips_private_token_and_uses_fixed_isolated_exec(self):
++        self.start()
++        peer = self.peer(self.status())
++        self.assertEqual(self.receive(peer), {'type': 'ready', 'target': TARGET})
++        self.assertIsNone(self.receive(peer))
++        self.assertEqual(self.state['frames'], [{'v': 1, 'op': 'status', 'runId': RUN}])
++        body = self.state['execs'][0]
++        self.assertEqual(body['Cmd'], ['/usr/bin/python3', '-I', '/usr/local/lib/pi-runtime/terminal/client.py'])
++        self.assertEqual(body['User'], '1000:1000')
++        self.assertIs(body['Tty'], False)
++        self.assertIs(body['AttachStdin'], True)
++        self.assertNotIn(TOKEN, json.dumps(body))
++
++    def test_unknown_profile_image_duplicate_and_unsafe_runtime_never_exec(self):
++        self.start()
++        original = copy.deepcopy(self.state['item'])
++        changes = [lambda x: x.update(Image='sha256:' + '0' * 64),
++                   lambda x: x['Config']['Labels'].update({'cn.swordfate.pi.runtime-profile': 'inherited-tui'}),
++                   lambda x: x['Config'].update(Entrypoint=['/bin/sh']),
++                   lambda x: x['Config']['Env'].append('NODE_OPTIONS=--require=/workspace/x'),
++                   lambda x: x['Config']['Env'].append('PYTHONPATH=/workspace'),
++                   lambda x: x.update(Mounts=[{'Type': 'bind', 'Source': '/tmp/x', 'Destination': '/usr/local/lib', 'RW': False}])]
++        for change in changes:
++            self.state['item'] = copy.deepcopy(original)
++            change(self.state['item'])
++            self.assertIsNone(self.receive(self.peer(self.status())))
++        self.state['item'] = original
++        self.state['ids'] = [CID, '0' * 64]
++        self.assertIsNone(self.receive(self.peer(self.status())))
++        self.assertEqual(self.state['execs'], [])
++
++    def test_arbitrary_fields_and_nonfinite_or_duplicate_json_keys_are_refused(self):
++        self.start()
++        for field in ('command', 'argv', 'cwd', 'pid', 'container', 'socket', 'env'):
++            self.assertIsNone(self.receive(self.peer(self.status(**{field: 'unsafe'}))))
++        for raw in (b'{"v":1,"v":1}\n', b'{"v":NaN}\n', b'{"v":"\xff"}\n',
++                    b'[' + b' ' * 65536 + b']\n', b'{"v":true}\n'):
++            self.assertIsNone(self.receive(self.peer(raw)))
++        self.assertEqual(self.state['calls'], [])
++
++    def test_connect_release_and_close_end_only_helper(self):
++        self.start()
++        peer = self.peer(self.connect())
++        self.assertEqual(self.receive(peer), {'type': 'ready', 'target': TARGET})
++        peer.sendall(line({'id': 1, 'type': 'release'}))
++        self.assertEqual(self.receive(peer), {'type': 'response', 'id': 1, 'result': {'ok': True}})
++        peer.close()
++        self.assertTrue(self.state['closed'].wait(2))
++        self.assertTrue(self.state['item']['State']['Running'])
++        self.assertFalse(any('/kill' in path or '/stop' in path for path in self.state['calls']))
++
++    def test_stderr_and_malformed_docker_stream_never_relay_diagnostics(self):
++        self.start()
++        for raw in (b'\x02\0\0\0\0\0\0\x06secret', b'\x01\x01\0\0\0\0\0\x01x',
++                    b'\x01\0\0\0\x7f\xff\xff\xff'):
++            self.state['raw'] = raw
++            self.assertIsNone(self.receive(self.peer(self.status())))
++
++    def test_changed_container_identity_revokes_open_connection(self):
++        self.start()
++        peer = self.peer(self.connect())
++        self.assertEqual(self.receive(peer), {'type': 'ready', 'target': TARGET})
++        self.state['item']['State']['StartedAt'] = 'replacement'
++        self.assertIsNone(self.receive(peer))
++        self.assertTrue(self.state['closed'].wait(2))
++
++    def test_duplicate_binding_and_arbitrary_connected_action_refused(self):
++        self.start()
++        first = self.peer(self.connect())
++        self.assertEqual(self.receive(first), {'type': 'ready', 'target': TARGET})
++        self.assertIsNone(self.receive(self.peer(self.connect())))
++        self.assertEqual(len(self.state['execs']), 1)
++        first.sendall(line({'id': 1, 'type': 'exec', 'command': 'sh'}))
++        self.assertIsNone(self.receive(first))
++        self.assertEqual(len(self.state['frames']), 1)
++
++    def test_read_scope_cannot_acquire_or_forward_input(self):
++        self.start()
++        request = self.connect()
++        request['scope'] = 'read'
++        peer = self.peer(request)
++        self.assertEqual(self.receive(peer), {'type': 'ready', 'target': TARGET})
++        peer.sendall(line({'id': 1, 'type': 'acquire'}))
++        self.assertIsNone(self.receive(peer))
++        self.assertEqual(len(self.state['frames']), 1)
++
++    def test_content_logging_and_default_logging_refused_before_exec(self):
++        self.start()
++        for logging in ({'Type': 'json-file', 'Config': {'max-size': '1m'}},
++                        {'Type': 'local', 'Config': {}}, {}, None):
++            self.state['item']['HostConfig']['LogConfig'] = logging
++            self.assertIsNone(self.receive(self.peer(self.status())))
++        self.assertEqual(self.state['execs'], [])
++
++    def test_partial_frame_deadline_and_eight_pending_peer_limit(self):
++        self.start()
++        peers = [self.peer(None) for _ in range(8)]
++        deadline = time.monotonic() + 1
++        while len(self.provider.peers) != 8 and time.monotonic() < deadline:
++            time.sleep(.01)
++        self.assertEqual(len(self.provider.peers), 8)
++        self.assertIsNone(self.receive(self.peer(self.status())))
++        for peer in peers:
++            self.assertIsNone(self.receive(peer))
++        self.assertEqual(self.state['calls'], [])
++
++    def test_fragmented_docker_header_and_json_frames(self):
++        self.start()
++        data = line({'type': 'ready', 'target': TARGET})
++        self.state['raw'] = b'\x01\0\0\0' + struct.pack('>I', len(data)) + data
++        self.state['fragment'] = True
++        self.assertEqual(self.receive(self.peer(self.status())), {'type': 'ready', 'target': TARGET})
++
++    def test_close_revokes_established_stream(self):
++        self.start()
++        peer = self.peer(self.connect())
++        self.assertEqual(self.receive(peer), {'type': 'ready', 'target': TARGET})
++        self.provider.close()
++        self.assertIsNone(self.receive(peer))
++        self.assertTrue(self.state['closed'].wait(2))
++
++    def test_default_service_configuration_creates_no_credentials_or_socket(self):
++        import gate.service as service
++        self.assertTrue(hasattr(service, 'start_terminal'), 'service terminal configuration absent')
++        self.assertIsNone(service.start_terminal(self.gate, {'enabled': False, 'images': []},
++                                               self.root / 'ipc', self.root / 'credentials'))
++        self.assertFalse((self.root / 'ipc').exists())
++        self.assertFalse((self.root / 'credentials').exists())
++
++    def test_service_refuses_unsafe_parents_without_docker_or_secret_creation(self):
++        import gate.service as service
++        self.assertTrue(hasattr(service, 'start_terminal'), 'service terminal configuration absent')
++        ipc, credentials = self.root / 'ipc', self.root / 'credentials'
++        ipc.mkdir()
++        credentials.mkdir()
++        with self.assertRaises(ValueError):
++            service.start_terminal(self.gate, {'enabled': True, 'images': [IMAGE]}, ipc, credentials)
++        self.assertEqual(list(credentials.iterdir()), [])
++        self.assertEqual(self.state['calls'], [])
++
++    def test_partial_runtime_frame_closes_on_absolute_deadline(self):
++        self.start()
++        self.state['partial'] = True
++        peer = self.peer(self.connect())
++        self.assertEqual(self.receive(peer), {'type': 'ready', 'target': TARGET})
++        start = time.monotonic()
++        self.assertIsNone(self.receive(peer))
++        self.assertLess(time.monotonic() - start, 2.4)
++
++    def test_runtime_diagnostics_extra_keys_and_wrong_identity_not_relayed(self):
++        self.start()
++        for frame in ({'type': 'error', 'error': 'sensitive detail'},
++                      {'type': 'ready', 'target': dict(TARGET, runtimeId='changed'), 'token': TOKEN},
++                      {'type': 'ready', 'target': dict(TARGET, runId='0' * 32)},
++                      {'type': 'response', 'id': 1, 'result': {'ok': True}}):
++            data = line(frame)
++            self.state['raw'] = b'\x01\0\0\0' + struct.pack('>I', len(data)) + data
++            self.assertIsNone(self.receive(self.peer(self.status())))
++
++    def test_second_writer_and_third_reader_never_exec(self):
++        self.start()
++        first = self.peer(self.connect())
++        self.assertEqual(self.receive(first), {'type': 'ready', 'target': TARGET})
++        request = self.connect()
++        request['binding']['connectionId'] = '0' * 32
++        self.assertIsNone(self.receive(self.peer(request)))
++        request['scope'] = 'read'
++        reader = self.peer(request)
++        self.assertEqual(self.receive(reader), {'type': 'ready', 'target': TARGET})
++        request['binding']['connectionId'] = '1' * 32
++        self.assertIsNone(self.receive(self.peer(request)))
++        self.assertEqual(len(self.state['execs']), 2)
++
++    def test_sequence_reuse_and_arbitrary_fields_close_before_forwarding(self):
++        self.start()
++        peer = self.peer(self.connect())
++        self.assertEqual(self.receive(peer), {'type': 'ready', 'target': TARGET})
++        peer.sendall(line({'id':1, 'type':'release'}))
++        self.assertEqual(self.receive(peer)['type'], 'response')
++        peer.sendall(line({'id':1, 'type':'release'}))
++        self.assertIsNone(self.receive(peer))
++        self.assertEqual(len(self.state['frames']), 2)
++
++    def test_complete_screen_frames_and_request_results_are_closed(self):
++        from gate.terminal_contract import Conversation
++        conversation = Conversation({k:v for k,v in self.connect().items() if k != 'token'})
++        conversation.response({'type':'ready', 'target':TARGET})
++        conversation.response(dict(type='screen-start', target=TARGET, sequence=0, columns=80,rows=24,bytes=2,chunks=1))
++        conversation.response(dict(type='screen-chunk', terminalEpoch=TARGET['terminalEpoch'],sequence=0,index=0,data='aGk='))
++        conversation.response(dict(type='screen-end', terminalEpoch=TARGET['terminalEpoch'],sequence=0))
++        conversation.request(dict(type='acquire',id=1))
++        conversation.response(dict(type='response',id=1,result=dict(ok=True,leaseId='1'*32,expiresInMs=30000)))
++        conversation.request(dict(type='input',id=2,v=1,terminalEpoch=TARGET['terminalEpoch'],leaseId='1'*32,sequence=1,data='hello'))
++        conversation.response(dict(type='response',id=2,result=dict(ok=True,delivery='written')))
++        conversation.request(dict(type='resize',id=3,leaseId='1'*32,columns=80,rows=24))
++        conversation.response(dict(type='response',id=3,result=dict(ok=False,error='resize_unknown')))
++        for frame in ({'type':'screen-chunk','terminalEpoch':TARGET['terminalEpoch'],'sequence':0,'index':0,'data':'aGk='},
++                      {'type':'response','id':2,'result':{'ok':True,'delivery':'written'}},
++                      {'type':'screen-unavailable','detail':'secret'}):
++            with self.assertRaises(ValueError): conversation.response(frame)
++
++    def test_identity_change_between_exec_create_and_start_never_starts_helper(self):
++        self.start()
++        self.state['after_create'] = lambda: self.state['item']['State'].update(StartedAt='changed')
++        self.assertIsNone(self.receive(self.peer(self.status())))
++        self.assertEqual(len(self.state['execs']), 1)
++        self.assertFalse(any(path.endswith('/start') for path in self.state['calls']))
++
++    def test_active_stream_is_revoked_if_logging_safety_changes(self):
++        self.start()
++        peer = self.peer(self.connect())
++        self.assertEqual(self.receive(peer), {'type':'ready','target':TARGET})
++        self.state['item']['HostConfig']['LogConfig']['Type'] = 'json-file'
++        self.assertIsNone(self.receive(peer))
++        self.assertTrue(self.state['closed'].wait(2))
+--- a/pi-deploy-gate/tests/docker_terminal_provider.py
++++ b/pi-deploy-gate/tests/docker_terminal_provider.py
+@@ -0,0 +1,300 @@
++"""Opt-in real Docker proof. Only this invocation's labelled disposable objects.
++
++No production lookup, volumes, credentials, policy, network, tag reuse or prune.
++Actual client/broker/supervisor + synthetic PTY child/adapter (not real Pi/Hub UI).
++"""
++import io
++import json
++import os
++from pathlib import Path
++import secrets
++import socket
++import sys
++import tarfile
++import tempfile
++import threading
++import time
++from urllib.parse import quote
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++from gate.engine import Engine
++from gate.service import Gate
++from gate.terminal_provider import TerminalProvider
++from gate.terminal_contract import encode
++
++BASE = 'sha256:1a23ab4104c1d806a9cd2370f508ed04d83ea79c48ebdf9da8d99ae904cebae8'
++REPO = Path('/home/fate/gitproject/codex_project_v2/pi-web-ui')
++
++CHILD = r'''
++import json, os, socket, threading
++identity = dict(runId=os.environ['PI_RUNTIME_RUN_ID'], runtimeId='docker-runtime', sessionId='docker-session',
++                terminalEpoch=os.environ['PI_RUNTIME_TERMINAL_EPOCH'])
++latched = False
++server = socket.socket(socket.AF_UNIX)
++server.bind(os.environ['PI_RUNTIME_EXTENSION_SOCKET'])
++os.chmod(os.environ['PI_RUNTIME_EXTENSION_SOCKET'], 0o600)
++server.listen(4)
++def adapter():
++    global latched
++    while True:
++        peer, _ = server.accept()
++        with peer:
++            peer.settimeout(1)
++            data = b''
++            while not data.endswith(b'\n') and len(data) < 65536:
++                part = peer.recv(4096)
++                if not part: break
++                data += part
++            request = json.loads(data)
++            assert request['token'] == os.environ['PI_RUNTIME_CHILD_TOKEN']
++            assert all(identity[k] == v for k, v in request['expected'].items())
++            assert request['action'] in ('terminal-state', 'terminal-prepare')
++            if request['action'] == 'terminal-prepare': latched = True
++            peer.sendall((json.dumps({'ok':True, 'result':dict(identity, adapterInstanceId='a'*32, latched=latched)})+'\n').encode())
++threading.Thread(target=adapter, daemon=True).start()
++print('TASK4_CHILD_READY', flush=True)
++while True:
++    data = input()
++    print('RECEIVED:' + data, flush=True)
++'''
++
++METADATA_GATE = r'''
++import json, os, signal, sys, threading
++from pathlib import Path
++sys.path.insert(0, '/app')
++from gate.service import Gate, start_terminal
++gate = Gate(Path('/tmp/task4-state'))
++assert os.getuid() == 0
++assert int(next(x.split()[1] for x in Path('/proc/self/status').read_text().splitlines() if x.startswith('CapEff:')),16) == 0
++assert start_terminal(gate, json.loads(Path('/app/terminal-policy.json').read_text())) is None
++assert not Path('/run/pi-terminal-credentials/provider.token').exists()
++assert not Path('/run/pi-terminal-provider/provider.sock').exists()
++start_terminal(gate, {'enabled':True, 'images':[sys.argv[1]]})
++done = threading.Event()
++signal.signal(signal.SIGTERM, lambda *_: done.set())
++Path('/tmp/task4-ready').touch()
++done.wait(120)
++gate.close()
++'''
++
++PROBE = r'''
++import json, os, socket, stat, sys
++from pathlib import Path
++token = Path('/run/pi-terminal-credentials/provider.token')
++address = '/run/pi-terminal-provider/provider.sock'
++if sys.argv[1] == 'denied':
++    try: token.read_text()
++    except PermissionError: pass
++    else: raise AssertionError('unrelated UID read credential')
++    with socket.socket(socket.AF_UNIX) as peer:
++        try: peer.connect(address)
++        except PermissionError: pass
++        else: raise AssertionError('unrelated UID connected')
++else:
++    assert os.getuid() == 1000
++    for path in ('/run/pi-terminal-credentials', '/run/pi-terminal-provider'):
++        info = Path(path).stat()
++        assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0,1000,0o2770)
++    info = token.stat()
++    assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0,1000,0o640)
++    info = Path(address).stat()
++    assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0,1000,0o660)
++    credential = token.read_text()
++    assert len(credential) == 64
++    assert not Path('/state').exists()
++    with socket.socket(socket.AF_UNIX) as peer:
++        peer.settimeout(3)
++        peer.connect(address)
++        peer.sendall((json.dumps(dict(v=1,op='status',token=credential,runId='1'*32))+'\n').encode())
++        assert peer.recv(1) == b'' # No Docker engine in this permission-only Gate fixture.
++'''
++
++
++def context(label):
++    original = (ROOT / 'Dockerfile').read_text()
++    dockerfile = original.replace('FROM pi-sandbox:hub-base-7bf9caecf2e0', 'FROM ' + BASE)
++    assert 'FROM ' + BASE in dockerfile
++    dockerfile += '''
++COPY runtime/ /usr/local/lib/pi-runtime/terminal/
++COPY fixture/ /opt/task4/
++COPY pi-entrypoint /usr/local/bin/pi-entrypoint
++RUN chmod 755 /usr/local/bin/pi-entrypoint && install -d -o 1000 -g 1000 -m 700 /run/pi-runtime
++LABEL pi.task4.test="%s"
++''' % label
++    files = {'Dockerfile': dockerfile.encode(), 'terminal-policy.json': (ROOT / 'terminal-policy.json').read_bytes(),
++             'policy.json': b'{}', 'fixture/child.py': CHILD.encode(),
++             'fixture/metadata_gate.py': METADATA_GATE.encode(), 'fixture/probe.py': PROBE.encode(),
++             'pi-entrypoint': b'#!/bin/sh\nexec /usr/bin/python3 -I /usr/local/lib/pi-runtime/terminal/supervisor.py /usr/bin/python3 -I /opt/task4/child.py\n'}
++    for path in (ROOT / 'gate').glob('*.py'):
++        files['gate/' + path.name] = path.read_bytes()
++    for name in ('broker.cjs', 'supervisor.py', 'client.py'):
++        files['runtime/' + name] = (REPO / 'dist/runtime' / name).read_bytes()
++    result = io.BytesIO()
++    with tarfile.open(fileobj=result, mode='w') as archive:
++        for name, data in files.items():
++            info = tarfile.TarInfo(name)
++            info.size, info.mode = len(data), 0o644
++            archive.addfile(info, io.BytesIO(data))
++    return result.getvalue()
++
++
++def receive(peer, deadline):
++    data = bytearray()
++    while not data.endswith(b'\n'):
++        peer.settimeout(max(.01, deadline - time.monotonic()))
++        block = peer.recv(1)
++        if not block:
++            return None
++        data.extend(block)
++        assert len(data) <= 65536
++    return json.loads(data)
++
++
++def main():
++    engine = Engine()
++    info = engine.image_info(BASE)
++    assert info and info['Id'] == BASE and not info['Config'].get('Volumes')
++    prefix = 'pi-task4-' + secrets.token_hex(6)
++    tag, containers, volumes, threads = prefix + ':test', [], [], []
++    image, gate, provider = None, None, None
++    label = {'pi.task4.test': prefix}
++    def create(suffix, body):
++        body['Labels'] = {**body.get('Labels', {}), **label}
++        cid = engine.create(prefix + '-' + suffix, body, timeout=5)
++        containers.append(cid)
++        engine.start(cid, timeout=5)
++        return cid
++    def host(readonly=True):
++        return dict(NetworkMode='none', ReadonlyRootfs=readonly, CapDrop=['ALL'],
++                    SecurityOpt=['no-new-privileges:true'], Memory=268435456, NanoCpus=1000000000,
++                    PidsLimit=64, LogConfig={'Type':'none','Config':{}},
++                    Tmpfs={'/tmp':'rw,nosuid,nodev,noexec,size=32m,mode=1777'})
++    def peer(first):
++        client, server = socket.socketpair()
++        client.sendall(encode(dict(first, token=provider.token)))
++        thread = threading.Thread(target=provider.handle, args=(server,))
++        threads.append(thread)
++        thread.start()
++        return client
++    with tempfile.TemporaryDirectory(prefix='pi-task4-state-') as directory:
++        try:
++            image = engine.build(context(prefix), tag, label)
++            print('Built isolated immutable test image ' + image, flush=True)
++            ipc, creds = prefix + '-ipc', prefix + '-credentials'
++            for name in (ipc, creds):
++                engine.call('POST', '/volumes/create', {'Name': name, 'Labels': label}, timeout=5)
++                volumes.append(name)
++            mounts = [{'Type':'volume', 'Source':source, 'Target':target} for source, target in
++                      ((ipc,'/run/pi-terminal-provider'),(creds,'/run/pi-terminal-credentials'))]
++            gate_host = host()
++            gate_host['Mounts'] = mounts
++            meta = create('metadata-gate', dict(Image=image, User='0:0',
++                Entrypoint=['/usr/bin/python3'], Cmd=['-I','/opt/task4/metadata_gate.py',image], HostConfig=gate_host))
++            # Test readiness via a fixed test-only exec (not a provider operation).
++            deadline = time.monotonic() + 10
++            while True:
++                result = engine.call('POST', '/containers/' + meta + '/exec',
++                    {'Cmd':['/usr/bin/test','-f','/tmp/task4-ready'],'AttachStdout':False,'AttachStderr':False}, timeout=3)
++                engine.call('POST', '/exec/' + result['Id'] + '/start', {'Detach':False,'Tty':False}, timeout=3)
++                done = engine.call('GET','/exec/' + result['Id'] + '/json',timeout=3)
++                if done['ExitCode'] == 0: break
++                assert time.monotonic() < deadline, 'metadata Gate failed startup'
++                time.sleep(.1)
++            for user, mode in (('1000:1000','allowed'),('1001:1001','denied')):
++                hub_host = host()
++                hub_host['Mounts'] = [dict(m, ReadOnly=True) for m in mounts]
++                cid = create(mode, dict(Image=image, User=user, Entrypoint=['/usr/bin/python3'],
++                                        Cmd=['-I','/opt/task4/probe.py',mode], HostConfig=hub_host))
++                result = engine.call('POST','/containers/' + cid + '/wait?condition=not-running', timeout=10)
++                assert result['StatusCode'] == 0, 'metadata probe failed: ' + mode
++                inspected = engine.inspect(cid)
++                assert len(inspected['Mounts']) == 2 and all(not m['RW'] for m in inspected['Mounts'])
++            print('PASS actual cap-drop-ALL Gate UID0; setgid parents 0:1000/2770; socket 0660; token 0640; Hub UID1000 read-only mounts and access; UID1001 denied', flush=True)
++            run = secrets.token_hex(16)
++            body = dict(Image=image, User='1000:1000', Entrypoint=['/usr/local/bin/pi-entrypoint'],
++                        Cmd=[], Tty=True, OpenStdin=True, StdinOnce=False, HostConfig=host(False),
++                        Env=['PI_RUNTIME_PROFILE=web-terminal-v1','PI_RUNTIME_RUN_ID=' + run,
++                             'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
++                             'PI_PIRUN_WEB_TERMINAL_CONTROL=remote','HOME=/tmp/task4-home'],
++                        Labels={'cn.swordfate.pi.run-id':run,'cn.swordfate.pi.runtime-profile':'web-terminal-v1'})
++            cid = create('runtime', body)
++            original = engine.inspect(cid)
++            assert not original['Mounts'] and original['HostConfig']['LogConfig']['Type'] == 'none'
++            assert not original.get('LogPath'), 'terminal Docker content log exists'
++            gate = Gate(Path(directory))
++            gate.lifecycle.engine = engine
++            try:
++                gate.lifecycle._resolve(run, {'images':[image]}, expected=cid, role='terminal')
++            except RuntimeError as error:
++                print('DIAGNOSTIC admission failure: ' + str(error), flush=True)
++                print('DIAGNOSTIC test-image PATH: ' + str([v for v in original['Config'].get('Env', []) if v.startswith('PATH=')]), flush=True)
++                raise
++            provider = TerminalProvider(gate, {'enabled':True,'images':[image]}, secrets.token_hex(32))
++            deadline = time.monotonic() + 10
++            while True:
++                with peer(dict(v=1,op='status',runId=run)) as client:
++                    ready = receive(client, deadline)
++                if ready and ready.get('type') == 'ready': break
++                assert time.monotonic() < deadline, 'actual terminal helper never ready'
++                time.sleep(.1)
++            target = ready['target']
++            assert target['managedRestartEligible'] is False
++            with peer(dict(v=1,op='connect',target=target,scope='write',binding=dict(
++                    authorizationId=secrets.token_hex(16),connectionId=secrets.token_hex(16)))) as client:
++                assert receive(client, time.monotonic()+5)['type'] == 'ready'
++                client.sendall(encode({'id':1,'type':'acquire'}))
++                deadline = time.monotonic()+5
++                while True:
++                    frame = receive(client, deadline)
++                    assert frame is not None, 'acquire stream closed'
++                    if frame.get('type') == 'response' and frame['id'] == 1: break
++                assert frame['result']['ok'] is True
++                lease = frame['result']['leaseId']
++                client.sendall(encode(dict(id=2,v=1,type='input',terminalEpoch=target['terminalEpoch'],
++                                          leaseId=lease,sequence=1,data='TASK4_MARKER\n')))
++                written, rendered, snapshot = False, False, bytearray()
++                import base64
++                while not (written and rendered):
++                    frame = receive(client, deadline)
++                    assert frame is not None, 'input stream closed'
++                    if frame['type'] == 'response' and frame['id'] == 2:
++                        written = frame['result'] == {'ok':True,'delivery':'written'}
++                    elif frame['type'] == 'screen-start': snapshot.clear()
++                    elif frame['type'] == 'screen-chunk': snapshot.extend(base64.b64decode(frame['data']))
++                    elif frame['type'] == 'screen-end': rendered = b'RECEIVED:TASK4_MARKER' in snapshot
++            for thread in threads: thread.join(5)
++            assert not any(thread.is_alive() for thread in threads)
++            after = engine.inspect(cid)
++            assert after['State']['Running'] and after['State']['Pid'] == original['State']['Pid']
++            with peer(dict(v=1,op='status',runId=run)) as client:
++                assert receive(client,time.monotonic()+5)['type'] == 'ready'
++            print('PASS actual Docker fixed helper -> bundled broker/supervisor -> same synthetic PTY child: ready, acquire, written input, complete rendered reply; closing helper preserves container and runtime', flush=True)
++            # Independent Gate refusal even if the caller tries the legacy restart domain.
++            gate.lifecycle.set_policy({'mode':'auto','images':[image]})
++            try:
++                gate.lifecycle.submit(dict(run_id=run,runtime_id=target['runtimeId'],session_id=target['sessionId'],
++                                           leaf_id=None,idempotency_key=secrets.token_hex(16)))
++            except RuntimeError: pass
++            else: raise AssertionError('terminal restart admitted')
++            print('PASS terminal runtime is not a legacy restart target; no provider token/IPC mounts on Pi; no terminal Docker logging', flush=True)
++        finally:
++            if provider: provider.close()
++            for thread in threads: thread.join(8)
++            assert not any(thread.is_alive() for thread in threads), 'owned provider thread remains'
++            if gate: gate.close()
++            for cid in reversed(containers):
++                item = engine.inspect(cid, timeout=5)
++                assert item['Config']['Labels'].get('pi.task4.test') == prefix
++                engine.remove(cid, timeout=10)
++            for name in volumes:
++                info = engine.call('GET','/volumes/' + name,timeout=5)
++                assert info['Labels'].get('pi.task4.test') == prefix
++                engine.call('DELETE','/volumes/' + name,timeout=10)
++            if image:
++                engine.call('DELETE','/images/' + quote(tag,safe=''),timeout=10)
++            print('CLEANUP exact owned containers/volumes/test tag removed; no background sessions', flush=True)
++
++
++if __name__ == '__main__':
++    main()
+--- a/pi-docker/runtime/pi_supervisor.py
++++ b/pi-docker/runtime/pi_supervisor.py
+@@ -168,6 +168,7 @@
+         if not child_argv:
+             raise ProtocolError
+         self.run_id = run_id
++        self.terminal_profile = os.environ.get('PI_RUNTIME_PROFILE') == 'web-terminal-v1'
+         self.runtime_dir = Path(os.environ.get("PI_RUNTIME_DIR", DEFAULT_RUNTIME_DIR))
+         self.control_socket = self.runtime_dir / "control.sock"
+         self.extension_socket = self.runtime_dir / "extension.sock"
+@@ -359,6 +360,8 @@
+         return bounded_text(lines[0], limit=256)  # type: ignore[return-value]
+
+     def validate_restart_request(self, request: Any) -> str:
++        if self.terminal_profile:
++            raise ProtocolError('terminal_profile_unaudited')
+         if not isinstance(request, dict) or set(request) != RESTART_KEYS:
+             raise ProtocolError
+         if request.get("action") != "restart":
+@@ -374,6 +377,8 @@
+         return operation_id
+
+     def check_restart(self, request: dict[str, Any]) -> tuple[dict[str, Any], str, list[str]]:
++        if self.terminal_profile:
++            raise ProtocolError('terminal_profile_unaudited')
+         # Refuse unknown, ambiguous, or equals-form argv before preparing or
+         # sending any signal to the current child.
+         restart_prefix(self.original_argv)
+--- a/pi-docker/tests/test_pi_supervisor.py
++++ b/pi-docker/tests/test_pi_supervisor.py
+@@ -281,6 +281,15 @@
+
+
+ class PiSupervisorTests(unittest.TestCase):
++    def test_terminal_profile_refuses_restart_before_extension_prepare(self):
++        harness = SupervisorHarness(self)
++        harness.env['PI_RUNTIME_PROFILE'] = 'web-terminal-v1'
++        harness.start()
++        _, response = harness.restart_request()
++        self.assertFalse(response['ok'])
++        self.assertEqual(len(harness.spawns()), 1)
++        self.assertFalse(harness.signal_log.exists())
++
+     def test_normal_child_exit_is_returned_without_respawn(self):
+         harness = SupervisorHarness(self, normal_exit=True, normal_exit_code=23)
+         command = [

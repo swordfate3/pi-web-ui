@@ -1,0 +1,103 @@
+Task 4 observed execution logs (2026-10-21)
+Failures are retained, not relabelled as passing.
+
+=== /tmp/pi-task4-service-red.log ===
+....F......F...
+======================================================================
+FAIL: test_default_service_configuration_creates_no_credentials_or_socket (test_terminal_provider.ProviderTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/test_terminal_provider.py", line 288, in test_default_service_configuration_creates_no_credentials_or_socket
+    self.assertTrue(hasattr(service, 'start_terminal'), 'service terminal configuration absent')
+AssertionError: False is not true : service terminal configuration absent
+
+======================================================================
+FAIL: test_service_refuses_unsafe_parents_without_docker_or_secret_creation (test_terminal_provider.ProviderTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/test_terminal_provider.py", line 296, in test_service_refuses_unsafe_parents_without_docker_or_secret_creation
+    self.assertTrue(hasattr(service, 'start_terminal'), 'service terminal configuration absent')
+AssertionError: False is not true : service terminal configuration absent
+
+----------------------------------------------------------------------
+Ran 15 tests in 9.699s
+
+FAILED (failures=2)
+
+=== /tmp/pi-task4-service-green.log ===
+...............
+----------------------------------------------------------------------
+Ran 15 tests in 9.692s
+
+OK
+
+=== /tmp/pi-task4-logging-red.log ===
+F
+======================================================================
+FAIL: test_content_logging_and_default_logging_refused_before_exec (test_terminal_provider.ProviderTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/test_terminal_provider.py", line 264, in test_content_logging_and_default_logging_refused_before_exec
+    self.assertIsNone(self.receive(self.peer(self.status())))
+AssertionError: {'type': 'ready', 'target': {'v': 1, 'runId': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'runtimeId': 'runtime', 'sessionId': 'session', 'terminalEpoch': 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'profile': 'web-terminal-v1', 'inputState': 'none', 'managedRestartEligible': False}} is not None
+
+----------------------------------------------------------------------
+Ran 1 test in 0.561s
+
+FAILED (failures=1)
+
+=== /tmp/pi-task4-logging-green.log ===
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.560s
+
+OK
+
+=== /tmp/pi-task4-provider-final.log ===
+.......................
+----------------------------------------------------------------------
+Ran 23 tests in 16.115s
+
+OK
+
+=== /tmp/pi-task4-real-docker.log ===
+Built isolated immutable test image sha256:bd8b3d046547e4a66d4a0c1b0ad1fba98bb1d3830172dd5e06631bff40b57994
+PASS actual cap-drop-ALL Gate UID0; setgid parents 0:1000/2770; socket 0660; token 0640; Hub UID1000 read-only mounts and access; UID1001 denied
+CLEANUP exact owned containers/volumes/test tag removed; no background sessions
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/docker_terminal_provider.py", line 293, in <module>
+    main()
+  File "/home/fate/docker_files/pi-deploy-gate/tests/docker_terminal_provider.py", line 232, in main
+    assert time.monotonic() < deadline, 'actual terminal helper never ready'
+AssertionError: actual terminal helper never ready
+
+=== /tmp/pi-task4-real-docker-diagnostic.log ===
+Built isolated immutable test image sha256:4f893eb4da7a2f7ad919ae1b520ff777a323fba583fe5c069c8020206f9cb38d
+PASS actual cap-drop-ALL Gate UID0; setgid parents 0:1000/2770; socket 0660; token 0640; Hub UID1000 read-only mounts and access; UID1001 denied
+DIAGNOSTIC admission failure: untrusted terminal loader
+DIAGNOSTIC test-image PATH: ['PATH=/opt/huggingface/bin:/home/node/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin']
+CLEANUP exact owned containers/volumes/test tag removed; no background sessions
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/docker_terminal_provider.py", line 299, in <module>
+    main()
+  File "/home/fate/docker_files/pi-deploy-gate/tests/docker_terminal_provider.py", line 227, in main
+    gate.lifecycle._resolve(run, {'images':[image]}, expected=cid, role='terminal')
+  File "/home/fate/docker_files/pi-deploy-gate/gate/lifecycle.py", line 121, in _resolve
+    item = trusted(self._transport(deadline, engine.inspect, key), run, policy['images'], role=role)
+  File "/home/fate/docker_files/pi-deploy-gate/gate/lifecycle_contract.py", line 136, in trusted
+    raise RuntimeError('untrusted terminal loader')
+RuntimeError: untrusted terminal loader
+
+=== /tmp/pi-task4-real-docker-fixed-path.log ===
+Built isolated immutable test image sha256:53b47fcdaf050c58a12856ed7ddcb78a963c869dd38084ba2fdc6bb852c7fc4c
+PASS actual cap-drop-ALL Gate UID0; setgid parents 0:1000/2770; socket 0660; token 0640; Hub UID1000 read-only mounts and access; UID1001 denied
+PASS actual Docker fixed helper -> bundled broker/supervisor -> same synthetic PTY child: ready, acquire, written input, complete rendered reply; closing helper preserves container and runtime
+PASS terminal runtime is not a legacy restart target; no provider token/IPC mounts on Pi; no terminal Docker logging
+CLEANUP exact owned containers/volumes/test tag removed; no background sessions
+
+=== /tmp/pi-task4-gate-full.log ===
+......................................................................................................................................................................................................................................................................................................................................................................
+----------------------------------------------------------------------
+Ran 358 tests in 78.327s
+
+OK

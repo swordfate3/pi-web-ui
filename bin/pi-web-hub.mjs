@@ -4,16 +4,23 @@ import path from "node:path";
 import { initializeHub, issueSession, readHubConfig, revokeSession } from "../hub/config.ts";
 import { issueManagementCode, revokeManagement } from "../hub/management.ts";
 import { startHub } from "../hub/server.ts";
+import { issueTerminalCode, revokeTerminal } from "../hub/terminal-auth.ts";
 
 const help = `Pi Web Hub — independent multi-session portal
 
   pi-web-hub init [--port 16180] [--public-url https://pi.example.com/]
     [--management-port 16181] [--management-public-url https://admin.example.com/]
+    [--terminal-port 16182] [--terminal-public-url https://terminal.example.com/]
   pi-web-hub serve
   pi-web-hub issue --label "Project A" --output /private/session-a.json [--backend-host 127.0.0.1]
   pi-web-hub revoke --run-id <session-capability-id>
   pi-web-hub pair                     Generate a single-use management code (10 minutes)
   pi-web-hub revoke-management        Revoke all browser management sessions
+  pi-web-hub pair-terminal --run-id <id> --runtime-id <id> --session-id <id>
+    --terminal-epoch <id> --access <read|write>  Generate a scoped terminal code (10 minutes)
+  pi-web-hub revoke-terminal          Revoke all browser terminal sessions
+
+Terminal auth is opt-in; terminal backend/PTY is not available in this build.
 
 All commands accept --config <file> (default ~/.pi/web-hub/config.json).
 The hub never launches agents or deploys SSH/TLS/login. See docs/hub.md.
@@ -28,12 +35,25 @@ async function main(args) {
     return;
   }
   const commands = new Map([
-    ["init", ["--config", "--port", "--public-url", "--management-port", "--management-public-url"]],
+    [
+      "init",
+      [
+        "--config",
+        "--port",
+        "--public-url",
+        "--management-port",
+        "--management-public-url",
+        "--terminal-port",
+        "--terminal-public-url",
+      ],
+    ],
     ["serve", ["--config"]],
     ["issue", ["--config", "--label", "--output", "--backend-host"]],
     ["revoke", ["--config", "--run-id"]],
     ["pair", ["--config"]],
     ["revoke-management", ["--config"]],
+    ["pair-terminal", ["--config", "--run-id", "--runtime-id", "--session-id", "--terminal-epoch", "--access"]],
+    ["revoke-terminal", ["--config"]],
   ]);
   const permitted = commands.get(command);
   if (!permitted) throw new Error("Unknown hub command; use --help");
@@ -71,12 +91,48 @@ async function main(args) {
         publicUrl,
       );
     }
-    initializeHub(configFile, { port, ...(publicUrl ? { publicUrl } : {}), ...(management ? { management } : {}) });
+    let terminal;
+    if (options.has("--terminal-public-url") && !options.has("--terminal-port"))
+      throw new Error("Terminal port required");
+    if (options.has("--terminal-port")) {
+      const { terminalConfig } = await import("../hub/config.ts");
+      terminal = terminalConfig(
+        {
+          port: Number(options.get("--terminal-port")),
+          ...(options.has("--terminal-public-url") ? { publicUrl: options.get("--terminal-public-url") } : {}),
+        },
+        port,
+        publicUrl,
+        management,
+      );
+    }
+    initializeHub(configFile, {
+      port,
+      ...(publicUrl ? { publicUrl } : {}),
+      ...(management ? { management } : {}),
+      ...(terminal ? { terminal } : {}),
+    });
     process.stdout.write(`${JSON.stringify({ configured: true, configFile })}\n`);
     return;
   }
   const config = readHubConfig(configFile);
-  if (command === "pair") {
+  if (command === "pair-terminal") {
+    // An administrator selects an exact child; never derive authority from chat.
+    process.stdout.write(
+      `${JSON.stringify(
+        issueTerminalCode(config, {
+          runId: options.get("--run-id"),
+          runtimeId: options.get("--runtime-id"),
+          sessionId: options.get("--session-id"),
+          terminalEpoch: options.get("--terminal-epoch"),
+          access: options.get("--access"),
+        }),
+      )}\n`,
+    );
+  } else if (command === "revoke-terminal") {
+    revokeTerminal(config);
+    process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
+  } else if (command === "pair") {
     // Explicit trusted-terminal operation, never called by the HTTP server or model tools.
     process.stdout.write(`${JSON.stringify(issueManagementCode(config))}\n`);
   } else if (command === "revoke-management") {
@@ -100,7 +156,7 @@ async function main(args) {
   } else if (command === "serve") {
     const hub = await startHub(config);
     process.stdout.write(
-      `${JSON.stringify({ localUrl: hub.url, portalUrl: `${config.publicUrl ?? hub.url}sessions/`, socketPath: hub.socketPath, ...(hub.managementUrl ? { managementUrl: hub.managementUrl } : {}) })}\n`,
+      `${JSON.stringify({ localUrl: hub.url, portalUrl: `${config.publicUrl ?? hub.url}sessions/`, socketPath: hub.socketPath, ...(hub.managementUrl ? { managementUrl: hub.managementUrl } : {}), ...(hub.terminalUrl ? { terminalUrl: hub.terminalUrl } : {}) })}\n`,
     );
     let closing = false;
     const stop = () => {

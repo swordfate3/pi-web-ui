@@ -103,10 +103,10 @@ function lifecycleConfig(value) {
 		credentialFile: v.credentialFile
 	};
 }
-var hex$4, text$1, GateLifecycle;
+var hex$5, text$1, GateLifecycle;
 var init_lifecycle = __esmMin((() => {
 	init_config();
-	hex$4 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+	hex$5 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
 	text$1 = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
 	GateLifecycle = class {
 		config;
@@ -162,7 +162,7 @@ var init_lifecycle = __esmMin((() => {
 			});
 		}
 		async target(runId) {
-			if (!hex$4(runId)) throw new Error("Invalid lifecycle identity");
+			if (!hex$5(runId)) throw new Error("Invalid lifecycle identity");
 			const value = await this.request("GET", `/v1/pi-lifecycle/runs/${runId}`);
 			if (value.managed === false) return { managed: false };
 			if (value.managed !== true || value.run_id !== runId || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id) || !text$1(value.version) || typeof value.idle !== "boolean" || typeof value.pending !== "boolean" || typeof value.busy !== "boolean" || ![
@@ -184,7 +184,7 @@ var init_lifecycle = __esmMin((() => {
 			};
 		}
 		job(value) {
-			if (!hex$4(value.id) || !hex$4(value.run_id) || typeof value.status !== "string" || ![
+			if (!hex$5(value.id) || !hex$5(value.run_id) || typeof value.status !== "string" || ![
 				"pending",
 				"queued",
 				"running",
@@ -223,13 +223,13 @@ var init_lifecycle = __esmMin((() => {
 			return result;
 		}
 		async restart(value) {
-			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$4(value.run_id) || !hex$4(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
+			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$5(value.run_id) || !hex$5(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
 			const result = this.job(await this.request("POST", "/v1/pi-lifecycle/restarts", value));
 			if (result.run_id !== value.run_id) throw new Error("Lifecycle target changed");
 			return result;
 		}
 		async operation(id) {
-			if (!hex$4(id)) throw new Error("Invalid lifecycle identity");
+			if (!hex$5(id)) throw new Error("Invalid lifecycle identity");
 			const job = this.job(await this.request("GET", `/v1/pi-lifecycle/restarts/${id}`));
 			if (job.id !== id) throw new Error("Lifecycle operation changed");
 			return job;
@@ -398,7 +398,7 @@ var init_state_budget = __esmMin((() => {
 			if (this.totals.activeGrants > 512 || this.totals.logicalBytes > 8388608) throw new StateBudgetError();
 		}
 		destination(relative) {
-			if (!/^(?:grants\/[a-f0-9]{32}\.json|generations\/[a-f0-9]{32}\.json|bounded\/[a-f0-9]{32}\.json|restarts\/[a-f0-9]{32}(?:\.started|\.verified)?\.json|management\.json|registry\.json)$/.test(relative)) throw new Error("Invalid Hub state destination");
+			if (!/^(?:grants\/[a-f0-9]{32}\.json|generations\/[a-f0-9]{32}\.json|bounded\/[a-f0-9]{32}\.json|restarts\/[a-f0-9]{32}(?:\.started|\.verified)?\.json|management\.json|terminal-auth\.json|registry\.json)$/.test(relative)) throw new Error("Invalid Hub state destination");
 			const file = path.join(this.root, relative);
 			privateStateDirectory(path.dirname(file));
 			return file;
@@ -474,7 +474,8 @@ var config_exports = /* @__PURE__ */ __exportAll({
 	readGrant: () => readGrant,
 	readHubConfig: () => readHubConfig,
 	readPrivateJson: () => readPrivateJson,
-	revokeSession: () => revokeSession
+	revokeSession: () => revokeSession,
+	terminalConfig: () => terminalConfig
 });
 function privateDirectory(directory) {
 	privateStateDirectory(directory);
@@ -516,6 +517,7 @@ function readHubConfig(file) {
 	const lifecycle = value.lifecycle === void 0 ? void 0 : lifecycleConfig(value.lifecycle);
 	const runtimeUpdates = value.runtimeUpdates === void 0 ? void 0 : lifecycleConfig(value.runtimeUpdates);
 	const management = value.management === void 0 ? void 0 : managementConfig(value.management, port, publicUrl);
+	const terminal = value.terminal === void 0 ? void 0 : terminalConfig(value.terminal, port, publicUrl, management);
 	return {
 		stateDir,
 		runtimeDir,
@@ -526,7 +528,20 @@ function readHubConfig(file) {
 		publicUrl,
 		...lifecycle ? { lifecycle } : {},
 		...runtimeUpdates ? { runtimeUpdates } : {},
-		...management ? { management } : {}
+		...management ? { management } : {},
+		...terminal ? { terminal } : {}
+	};
+}
+/** Separate listener and authorization domain; no terminal backend is implied. */
+function terminalConfig(value, chatPort, chatPublicUrl, management) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid terminal configuration");
+	const v = value;
+	if (Object.keys(v).some((key) => !["port", "publicUrl"].includes(key)) || !Number.isInteger(v.port) || Number(v.port) < 0 || Number(v.port) > 65535 || v.port !== 0 && (v.port === chatPort || v.port === management?.port)) throw new Error("Terminal requires a distinct port");
+	const publicUrl = v.publicUrl === void 0 ? void 0 : validatedPublicUrl(v.publicUrl);
+	if (publicUrl && (!chatPublicUrl || !publicUrl.startsWith("https:") || new URL(publicUrl).pathname !== "/" || [chatPublicUrl, management?.publicUrl].some((other) => other && new URL(other).origin === new URL(publicUrl).origin))) throw new Error("Terminal requires a distinct canonical HTTPS origin");
+	return {
+		port: Number(v.port),
+		...publicUrl ? { publicUrl } : {}
 	};
 }
 function managementConfig(value, chatPort, chatPublicUrl) {
@@ -629,18 +644,18 @@ function gatewayIdentity(config, request) {
 //#region hub/management.ts
 init_config();
 init_state_budget();
-var digest = (value) => createHash("sha256").update(value).digest("hex");
-var hex$3 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
-var equal$1 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-var stateFile = (config) => path.join(config.stateDir, "management.json");
-function readState(config) {
-	const file = stateFile(config);
+var digest$1 = (value) => createHash("sha256").update(value).digest("hex");
+var hex$4 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var equal$2 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+var stateFile$1 = (config) => path.join(config.stateDir, "management.json");
+function readState$1(config) {
+	const file = stateFile$1(config);
 	if (!existsSync(file)) return void 0;
 	const value = readPrivateJson(file);
-	if (!hex$3(value.epoch, 64) || value.pairHash !== null && !hex$3(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
+	if (!hex$4(value.epoch, 64) || value.pairHash !== null && !hex$4(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
 	return value;
 }
-function saveState(writer, value, security = false) {
+function saveState$1(writer, value, security = false) {
 	writer.write("management.json", value, { security });
 }
 /** Trusted CLI only: return a short-lived code to its administrator's terminal. */
@@ -648,11 +663,11 @@ function issueManagementCode(config, now = Date.now()) {
 	if (config.management?.gateway) throw new Error("Management uses the configured gateway login, not pairing codes");
 	return withStateWriter(config, (writer) => {
 		const code = randomBytes(16).toString("hex");
-		const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
+		const epoch = readState$1(config)?.epoch ?? randomBytes(32).toString("hex");
 		const expires = now + 6e5;
-		saveState(writer, {
+		saveState$1(writer, {
 			epoch,
-			pairHash: digest(code),
+			pairHash: digest$1(code),
 			expires,
 			failures: 0
 		});
@@ -663,7 +678,7 @@ function issueManagementCode(config, now = Date.now()) {
 	});
 }
 function revokeManagement(config) {
-	withStateWriter(config, (writer) => saveState(writer, {
+	withStateWriter(config, (writer) => saveState$1(writer, {
 		epoch: randomBytes(32).toString("hex"),
 		pairHash: null,
 		expires: 0,
@@ -687,12 +702,12 @@ var HubManagement = class {
 		const values = (request.headers.cookie ?? "").split(";").map((item) => item.trim()).filter((item) => item.startsWith(`${this.cookieName}=`));
 		if (values.length !== 1) return void 0;
 		const token = values[0].slice(this.cookieName.length + 1);
-		if (!hex$3(token, 64)) return void 0;
-		const key = digest(token);
+		if (!hex$4(token, 64)) return void 0;
+		const key = digest$1(token);
 		const session = this.sessions.get(key);
 		let state;
 		try {
-			state = readState(this.config);
+			state = readState$1(this.config);
 		} catch {
 			return;
 		}
@@ -716,7 +731,7 @@ var HubManagement = class {
 	authorize(request, write = false) {
 		const session = this.session(request);
 		const csrf = request.headers["x-pi-hub-csrf"];
-		if (!session || write && (typeof csrf !== "string" || !hex$3(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Management authorization required");
+		if (!session || write && (typeof csrf !== "string" || !hex$4(csrf, 64) || !equal$2(csrf, session.csrf))) throw new Error("Management authorization required");
 		return session;
 	}
 	revalidate(request, expected, write = false) {
@@ -726,16 +741,16 @@ var HubManagement = class {
 	unlock(code) {
 		if (this.config.management?.gateway) throw new Error("Gateway login required");
 		return withStateWriter(this.config, (writer) => {
-			const state = readState(this.config);
+			const state = readState$1(this.config);
 			if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10) throw new Error("Management unlock rejected");
-			if (!hex$3(code, 32) || !equal$1(digest(code), state.pairHash)) {
-				saveState(writer, {
+			if (!hex$4(code, 32) || !equal$2(digest$1(code), state.pairHash)) {
+				saveState$1(writer, {
 					...state,
 					failures: state.failures + 1
 				}, true);
 				throw new Error("Management unlock rejected");
 			}
-			saveState(writer, {
+			saveState$1(writer, {
 				...state,
 				pairHash: null,
 				expires: 0
@@ -747,7 +762,7 @@ var HubManagement = class {
 		const identity = gatewayIdentity(this.config, request);
 		if (!identity) throw new Error("Verified gateway login required");
 		return withStateWriter(this.config, (writer) => {
-			let state = readState(this.config);
+			let state = readState$1(this.config);
 			if (!state) {
 				state = {
 					epoch: randomBytes(32).toString("hex"),
@@ -755,7 +770,7 @@ var HubManagement = class {
 					expires: 0,
 					failures: 0
 				};
-				saveState(writer, state);
+				saveState$1(writer, state);
 			}
 			return this.createSession(state, identity);
 		});
@@ -766,7 +781,7 @@ var HubManagement = class {
 		const token = randomBytes(32).toString("hex");
 		const csrf = randomBytes(32).toString("hex");
 		const expires = this.now() + 18e5;
-		this.sessions.set(digest(token), {
+		this.sessions.set(digest$1(token), {
 			epoch: state.epoch,
 			expires,
 			csrf,
@@ -934,7 +949,7 @@ function proxySessionResponse(request, response, upstream, resource) {
 //#region hub/bounded-registry.ts
 init_config();
 var ZERO = "0000000000000000";
-var hex$2 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var hex$3 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
 var RegistryError = class extends Error {
 	code;
 	constructor(code = "ENDED_GENERATION") {
@@ -943,7 +958,7 @@ var RegistryError = class extends Error {
 	}
 };
 var relative = (runId) => {
-	if (!hex$2(runId, 32)) throw new RegistryError("AUTH_FAILED");
+	if (!hex$3(runId, 32)) throw new RegistryError("AUTH_FAILED");
 	return `bounded/${runId}.json`;
 };
 var hasBoundedRecord = (config, runId) => existsSync(path.join(config.stateDir, relative(runId)));
@@ -957,10 +972,10 @@ function boundedRecord(config, runId, boot) {
 		revision: 0
 	};
 	const value = readPrivateJson(file);
-	if (value.schema !== 2 || value.run_id !== runId || !hex$2(value.boot, 32) || !hex$2(value.slot, 16) || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new RegistryError("STATE_UNAVAILABLE");
+	if (value.schema !== 2 || value.run_id !== runId || !hex$3(value.boot, 32) || !hex$3(value.slot, 16) || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new RegistryError("STATE_UNAVAILABLE");
 	for (const tuple of [value.current, value.pending]) {
 		if (tuple === void 0) continue;
-		if (!isBoundedGeneration(tuple.generation) || !tuple.generation.startsWith(`b2-${value.boot}-`) || tuple.generation.split("-")[2] > value.slot || !hex$2(tuple.request_id, 32) || !Number.isInteger(tuple.port) || tuple.port < 1 || tuple.port > 65535 || !Number.isSafeInteger(tuple.expires)) throw new RegistryError("STATE_UNAVAILABLE");
+		if (!isBoundedGeneration(tuple.generation) || !tuple.generation.startsWith(`b2-${value.boot}-`) || tuple.generation.split("-")[2] > value.slot || !hex$3(tuple.request_id, 32) || !Number.isInteger(tuple.port) || tuple.port < 1 || tuple.port > 65535 || !Number.isSafeInteger(tuple.expires)) throw new RegistryError("STATE_UNAVAILABLE");
 	}
 	return value.boot === boot ? value : {
 		schema: 2,
@@ -976,7 +991,7 @@ function saveBounded(writer, record, security = false) {
 	writer.write(relative(record.run_id), record, { security });
 }
 function issueBounded(writer, record, value, live) {
-	if (value.boot !== record.boot || !hex$2(value.slot, 16) || !hex$2(value.request_id, 32) || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new RegistryError("ISSUANCE_STALE");
+	if (value.boot !== record.boot || !hex$3(value.slot, 16) || !hex$3(value.request_id, 32) || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new RegistryError("ISSUANCE_STALE");
 	const now = Date.now();
 	const result = (tuple) => ({
 		generation: tuple.generation,
@@ -1608,7 +1623,7 @@ var portalCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkM
 init_config();
 init_lifecycle();
 var runtimeVersion = (value) => typeof value === "string" && value.length <= 64 && value.trim() === value && /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value);
-var hex$1 = (value) => typeof value === "string" && value.length === 32 && /^[a-f0-9]{32}$/.test(value);
+var hex$2 = (value) => typeof value === "string" && value.length === 32 && /^[a-f0-9]{32}$/.test(value);
 var word = (value) => typeof value === "string" && value.trim() === value && /^[a-z_]{1,64}$/.test(value);
 var object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 var states = [
@@ -1630,9 +1645,9 @@ var RuntimeUpdateError = class extends Error {
 	}
 };
 function job(value) {
-	if (!object(value) || !hex$1(value.id) || !runtimeVersion(value.version) || !states.includes(value.status) || !word(value.stage) || !Array.isArray(value.targets)) throw new RuntimeUpdateError();
+	if (!object(value) || !hex$2(value.id) || !runtimeVersion(value.version) || !states.includes(value.status) || !word(value.stage) || !Array.isArray(value.targets)) throw new RuntimeUpdateError();
 	const targets = value.targets.map((target) => {
-		if (!object(target) || !hex$1(target.run_id) || !word(target.status)) throw new RuntimeUpdateError();
+		if (!object(target) || !hex$2(target.run_id) || !word(target.status)) throw new RuntimeUpdateError();
 		const result = {
 			run_id: target.run_id,
 			status: target.status
@@ -1747,7 +1762,7 @@ var GateRuntimeUpdates = class {
 		};
 	}
 	async submit(version, id) {
-		if (!runtimeVersion(version) || !hex$1(id)) throw new RuntimeUpdateError(400);
+		if (!runtimeVersion(version) || !hex$2(id)) throw new RuntimeUpdateError(400);
 		const result = job(await this.request("POST", "/v1/runtime-updates", {
 			version,
 			idempotency_key: id
@@ -1756,7 +1771,7 @@ var GateRuntimeUpdates = class {
 		return result;
 	}
 	async operation(id) {
-		if (!hex$1(id)) throw new RuntimeUpdateError(400);
+		if (!hex$2(id)) throw new RuntimeUpdateError(400);
 		const result = job(await this.request("GET", `/v1/runtime-updates/${id}`));
 		if (result.id !== id) throw new RuntimeUpdateError();
 		return result;
@@ -1767,7 +1782,7 @@ var GateRuntimeUpdates = class {
 init_config();
 init_lifecycle();
 init_state_budget();
-var hex = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+var hex$1 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
 var text = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
 async function body(request) {
 	if (request.headers["content-type"]?.split(";")[0].trim() !== "application/json") throw new Error();
@@ -1808,12 +1823,12 @@ function createRestartApi(config, hooks) {
 	const receipts = path.join(config.stateDir, "restarts");
 	if (provider) privateDirectory(receipts);
 	const file = (id) => {
-		if (!hex(id)) throw new Error();
+		if (!hex$1(id)) throw new Error();
 		return path.join(receipts, `${id}.json`);
 	};
 	const read = (id) => {
 		const value = readPrivateJson(file(id));
-		if (value.id !== id || !hex(value.run_id) || !isHubGeneration(value.generation) || value.idempotency_key !== id || !text(value.runtime_id) || !text(value.session_id) || value.leaf_id !== null && !text(value.leaf_id)) throw new Error();
+		if (value.id !== id || !hex$1(value.run_id) || !isHubGeneration(value.generation) || value.idempotency_key !== id || !text(value.runtime_id) || !text(value.session_id) || value.leaf_id !== null && !text(value.leaf_id)) throw new Error();
 		return value;
 	};
 	const save = (value, publish) => withStateWriter(config, (writer) => {
@@ -2007,7 +2022,7 @@ function createRestartApi(config, hooks) {
 								return true;
 							}
 							revalidate();
-							if (Object.keys(value).sort().join(",") !== "idempotencyKey,version" || !runtimeVersion(value.version) || !hex(value.idempotencyKey)) {
+							if (Object.keys(value).sort().join(",") !== "idempotencyKey,version" || !runtimeVersion(value.version) || !hex$1(value.idempotencyKey)) {
 								reply(400, { error: "Exact stable Pi version and idempotency identity required" });
 								return true;
 							}
@@ -2059,7 +2074,7 @@ function createRestartApi(config, hooks) {
 				if (request.method === "POST" && pathname === "/api/management/restarts") {
 					const value = await body(request);
 					revalidate();
-					if (Object.keys(value).sort().join(",") !== "generation,idempotencyKey,leafId,runtimeId,sessionId" || !isHubGeneration(value.generation) || !hex(value.idempotencyKey) || !text(value.runtimeId) || !text(value.sessionId) || value.leafId !== null && !text(value.leafId)) {
+					if (Object.keys(value).sort().join(",") !== "generation,idempotencyKey,leafId,runtimeId,sessionId" || !isHubGeneration(value.generation) || !hex$1(value.idempotencyKey) || !text(value.runtimeId) || !text(value.sessionId) || value.leafId !== null && !text(value.leafId)) {
 						reply(400, { error: "Invalid restart request" });
 						return true;
 					}
@@ -2120,6 +2135,354 @@ function createRestartApi(config, hooks) {
 				reply(phase === "authorization" ? 401 : 409, { error: phase === "authorization" ? "Management authorization required" : "Restart unavailable or outcome unknown; refresh status before retrying" });
 			}
 			return true;
+		}
+	};
+}
+//#endregion
+//#region hub/terminal-contract.ts
+function record(value, keys) {
+	return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === keys;
+}
+function terminalId(value) {
+	return typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
+}
+function identityText(value) {
+	return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\p{Cc}\p{Cs}]/u.test(value);
+}
+function parseTerminalTarget(value) {
+	if (!record(value, "inputState,managedRestartEligible,profile,runId,runtimeId,sessionId,terminalEpoch,v") || value.v !== 1 || !terminalId(value.runId) || !identityText(value.runtimeId) || !identityText(value.sessionId) || !terminalId(value.terminalEpoch) || value.profile !== "web-terminal-v1" || value.managedRestartEligible !== false || ![
+		"local",
+		"none",
+		"remote",
+		"fenced"
+	].includes(value.inputState)) throw new Error("Invalid terminal target");
+	return {
+		v: 1,
+		runId: value.runId,
+		runtimeId: value.runtimeId,
+		sessionId: value.sessionId,
+		terminalEpoch: value.terminalEpoch,
+		profile: "web-terminal-v1",
+		inputState: value.inputState,
+		managedRestartEligible: false
+	};
+}
+function sameTerminal(left, right) {
+	return left.runId === right.runId && left.runtimeId === right.runtimeId && left.sessionId === right.sessionId && left.terminalEpoch === right.terminalEpoch;
+}
+//#endregion
+//#region hub/terminal-auth.ts
+init_config();
+init_state_budget();
+var digest = (value) => createHash("sha256").update(value).digest("hex");
+var hex = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var equal$1 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+var stateFile = (config) => path.join(config.stateDir, "terminal-auth.json");
+function parseTerminalScope(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "access,runId,runtimeId,sessionId,terminalEpoch") throw new Error("Invalid terminal scope");
+	const v = value;
+	if (v.access !== "read" && v.access !== "write") throw new Error("Invalid terminal scope");
+	const target = parseTerminalTarget({
+		v: 1,
+		runId: v.runId,
+		runtimeId: v.runtimeId,
+		sessionId: v.sessionId,
+		terminalEpoch: v.terminalEpoch,
+		profile: "web-terminal-v1",
+		inputState: "none",
+		managedRestartEligible: false
+	});
+	return {
+		runId: target.runId,
+		runtimeId: target.runtimeId,
+		sessionId: target.sessionId,
+		terminalEpoch: target.terminalEpoch,
+		access: v.access
+	};
+}
+function readState(config) {
+	if (!existsSync(stateFile(config))) return void 0;
+	const v = readPrivateJson(stateFile(config));
+	if (!v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).sort().join(",") !== "epoch,expires,failures,pairHash,scope" || !hex(v.epoch, 64) || v.pairHash !== null && !hex(v.pairHash, 64) || !Number.isSafeInteger(v.expires) || v.expires < 0 || !Number.isInteger(v.failures) || v.failures < 0 || v.failures > 10 || v.pairHash !== null && v.scope === null) throw new Error("Terminal authorization unavailable");
+	return {
+		...v,
+		scope: v.scope === null ? null : parseTerminalScope(v.scope)
+	};
+}
+function saveState(writer, value, security = false) {
+	writer.write("terminal-auth.json", value, { security });
+}
+/** Trusted CLI only. Scope names a child, but does not prove that it is live. */
+function issueTerminalCode(config, value, now = Date.now()) {
+	if (!config.terminal) throw new Error("Terminal listener is disabled");
+	const scope = parseTerminalScope(value);
+	if (readGrant(config, scope.runId).revoked) throw new Error("Terminal run revoked");
+	const code = randomBytes(16).toString("hex");
+	return withStateWriter(config, (writer) => {
+		if (readGrant(config, scope.runId).revoked) throw new Error("Terminal run revoked");
+		const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
+		const expiresAt = now + 6e5;
+		saveState(writer, {
+			epoch,
+			pairHash: digest(code),
+			expires: expiresAt,
+			failures: 0,
+			scope
+		});
+		return {
+			code,
+			expiresAt
+		};
+	});
+}
+function revokeTerminal(config) {
+	withStateWriter(config, (writer) => {
+		saveState(writer, {
+			epoch: randomBytes(32).toString("hex"),
+			pairHash: null,
+			expires: 0,
+			failures: 0,
+			scope: null
+		}, true);
+	});
+}
+/** Independent of management/chat auth. Caller MUST enforce terminal Host/Origin. */
+var HubTerminalAuth = class {
+	sessions = /* @__PURE__ */ new Map();
+	config;
+	now;
+	secure;
+	cookieName;
+	constructor(config, now = Date.now) {
+		if (!config.terminal) throw new Error("Terminal listener is disabled");
+		this.config = config;
+		this.now = now;
+		this.secure = !!config.terminal.publicUrl;
+		this.cookieName = this.secure ? "__Host-pi-hub-terminal" : "pi_hub_terminal_local";
+	}
+	session(request) {
+		const values = (request.headers.cookie ?? "").split(";").map((item) => item.trim()).filter((item) => item.startsWith(`${this.cookieName}=`));
+		if (values.length !== 1) return void 0;
+		const token = values[0].slice(this.cookieName.length + 1);
+		if (!hex(token, 64)) return void 0;
+		const key = digest(token);
+		const session = this.sessions.get(key);
+		if (!session) return void 0;
+		try {
+			const state = readState(this.config);
+			if (session.expires <= this.now() || !state || session.epoch !== state.epoch || readGrant(this.config, session.scope.runId).revoked) throw new Error();
+		} catch {
+			this.sessions.delete(key);
+			return;
+		}
+		return {
+			key,
+			...session,
+			scope: { ...session.scope }
+		};
+	}
+	status(request) {
+		const session = this.session(request);
+		return session ? {
+			authorized: true,
+			csrf: session.csrf,
+			expiresAt: session.expires,
+			scope: session.scope
+		} : { authorized: false };
+	}
+	authorize(request, requireCsrf = false, access = "read") {
+		const session = this.session(request);
+		const csrf = request.headers["x-pi-hub-terminal-csrf"];
+		if (!session || access === "write" && session.scope.access !== "write" || requireCsrf && (!hex(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Terminal authorization required");
+		return session;
+	}
+	/** Target check is mandatory before any future provider/PTY operation. */
+	authorizeTarget(request, expected, requireCsrf = true, access = "read") {
+		const session = this.authorize(request, requireCsrf, access);
+		if (!sameTerminal(session.scope, expected)) throw new Error("Terminal target authorization required");
+		return session;
+	}
+	revalidate(request, expected, requireCsrf = false, access = "read") {
+		const current = this.authorize(request, requireCsrf, access);
+		if (current.key !== expected.key || current.epoch !== expected.epoch || current.expires !== expected.expires) throw new Error("Terminal authorization changed");
+	}
+	unlock(code) {
+		return withStateWriter(this.config, (writer) => this.unlockLocked(writer, code));
+	}
+	unlockLocked(writer, code) {
+		const state = readState(this.config);
+		if (!state?.scope || !state.pairHash || state.expires <= this.now() || state.failures >= 10) throw new Error("Terminal unlock rejected");
+		if (!hex(code, 32) || !equal$1(digest(code), state.pairHash)) {
+			saveState(writer, {
+				...state,
+				failures: state.failures + 1
+			}, true);
+			throw new Error("Terminal unlock rejected");
+		}
+		if (readGrant(this.config, state.scope.runId).revoked) throw new Error("Terminal unlock rejected");
+		for (const [key, session] of this.sessions) try {
+			if (session.expires <= this.now() || session.epoch !== state.epoch || readGrant(this.config, session.scope.runId).revoked) this.sessions.delete(key);
+		} catch {
+			this.sessions.delete(key);
+		}
+		if (this.sessions.size >= 64) throw new Error("Terminal unlock rejected");
+		saveState(writer, {
+			...state,
+			pairHash: null,
+			expires: 0,
+			scope: null
+		});
+		const token = randomBytes(32).toString("hex");
+		const session = {
+			epoch: state.epoch,
+			expires: this.now() + 18e5,
+			csrf: randomBytes(32).toString("hex"),
+			authorizationId: randomBytes(16).toString("hex"),
+			scope: { ...state.scope }
+		};
+		this.sessions.set(digest(token), session);
+		return {
+			csrf: session.csrf,
+			expiresAt: session.expires,
+			cookie: this.cookie(token, 1800)
+		};
+	}
+	logout(request) {
+		return withStateWriter(this.config, () => {
+			const session = this.authorize(request, true);
+			this.sessions.delete(session.key);
+			return this.cookie("", 0);
+		});
+	}
+	close() {
+		this.sessions.clear();
+	}
+	cookie(token, maxAge) {
+		return `${this.cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${this.secure ? "; Secure" : ""}`;
+	}
+};
+//#endregion
+//#region hub/terminal-server.ts
+/** Real, opt-in Hub listener; no proxy, terminal stream, PTY or write API yet. */
+async function startTerminalServer(config, otherOrigins) {
+	if (!config.terminal) throw new Error("Terminal listener is disabled");
+	const terminal = config.terminal;
+	const auth = new HubTerminalAuth(config);
+	const connections = /* @__PURE__ */ new Set();
+	let url = "";
+	let closed = false;
+	const allowed = (request, write) => {
+		const origins = new Set([new URL(url).origin, ...terminal.publicUrl ? [new URL(terminal.publicUrl).origin] : []]);
+		const origin = request.headers.origin;
+		const host = request.headers.host;
+		const matched = [...origins].find((candidate) => new URL(candidate).host === host);
+		return !!matched && request.headers["sec-fetch-site"] !== "cross-site" && (origin === void 0 ? !write : origin === matched);
+	};
+	const respond = (res, status, value) => {
+		if (!res.destroyed) res.writeHead(status, { "Content-Type": "application/json" }).end(value === void 0 ? void 0 : JSON.stringify(value));
+	};
+	const handle = async (req, res) => {
+		res.setHeader("Cache-Control", "no-store");
+		res.setHeader("Referrer-Policy", "no-referrer");
+		res.setHeader("X-Content-Type-Options", "nosniff");
+		res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+		res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+		res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+		if (closed || !allowed(req, req.method !== "GET") || req.headers["service-worker"] !== void 0) {
+			respond(res, 403);
+			return;
+		}
+		const route = req.url;
+		if (req.method === "GET" && route === "/api/terminal/status") {
+			respond(res, 200, {
+				...auth.status(req),
+				available: false,
+				reason: "terminal_backend_unavailable"
+			});
+			return;
+		}
+		if (req.method !== "POST" || !["/api/terminal/unlock", "/api/terminal/logout"].includes(route ?? "")) {
+			respond(res, 404);
+			return;
+		}
+		if (req.headers["content-type"] !== "application/json" || req.headers["transfer-encoding"] !== void 0 || !/^[0-9]{1,4}$/.test(req.headers["content-length"] ?? "") || Number(req.headers["content-length"]) > 1024) {
+			res.setHeader("Connection", "close");
+			respond(res, 413);
+			return;
+		}
+		const timer = setTimeout(() => req.destroy(), 2e3);
+		try {
+			let body = "";
+			for await (const chunk of req) {
+				body += chunk.toString("utf8");
+				if (Buffer.byteLength(body) > 1024) throw new Error();
+			}
+			if (closed || !allowed(req, true)) throw new Error();
+			const data = JSON.parse(body);
+			if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error();
+			if (route === "/api/terminal/unlock") {
+				if (Object.keys(data).join(",") !== "code") throw new Error();
+				const result = auth.unlock(data.code);
+				res.setHeader("Set-Cookie", result.cookie);
+				respond(res, 200, {
+					csrf: result.csrf,
+					expiresAt: result.expiresAt
+				});
+			} else {
+				if (Object.keys(data).length !== 0) throw new Error();
+				res.setHeader("Set-Cookie", auth.logout(req));
+				respond(res, 200, { authorized: false });
+			}
+		} catch {
+			respond(res, 403);
+		} finally {
+			clearTimeout(timer);
+		}
+	};
+	const server = http.createServer({
+		maxHeaderSize: 8192,
+		headersTimeout: 5e3,
+		requestTimeout: 5e3
+	}, (req, res) => {
+		handle(req, res).catch(() => respond(res, 403));
+	});
+	server.maxConnections = 32;
+	server.on("connection", (socket) => {
+		connections.add(socket);
+		socket.on("error", () => socket.destroy());
+		socket.once("close", () => connections.delete(socket));
+	});
+	server.on("clientError", (_error, socket) => socket.destroy());
+	server.on("upgrade", (_request, socket) => socket.destroy());
+	server.on("connect", (_request, socket) => socket.destroy());
+	try {
+		await new Promise((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(terminal.port, "127.0.0.1", () => {
+				server.off("error", reject);
+				resolve();
+			});
+		});
+		url = `http://127.0.0.1:${server.address().port}/`;
+		const forbidden = new Set(otherOrigins.map((origin) => new URL(origin).origin));
+		if ([url, terminal.publicUrl].some((origin) => origin && forbidden.has(new URL(origin).origin))) throw new Error("Terminal origin must differ from chat and management");
+	} catch (error) {
+		closed = true;
+		auth.close();
+		for (const socket of connections) socket.destroy();
+		await new Promise((resolve) => server.close(() => resolve()));
+		throw error;
+	}
+	let closing;
+	return {
+		url,
+		close() {
+			if (closing) return closing;
+			closed = true;
+			auth.close();
+			for (const socket of connections) socket.destroy();
+			closing = new Promise((resolve) => server.close(() => resolve()));
+			return closing;
 		}
 	};
 }
@@ -2380,7 +2743,7 @@ function captureHubMetadata(moduleUrl = import.meta.url) {
 	{
 		const embedded = {
 			"version": "1.0.1",
-			"build": "78a16b453e59a01ca861127b1a45b6499723f7b98f1dae8afeac6f06cee6eeda"
+			"build": "46903a9c3574e3164feae5b1fbcd1414ebb0f2435a6b6b313db082a18204bb02"
 		};
 		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
 			version: embedded.version,
@@ -2626,6 +2989,7 @@ function boundedDeflateOffer(header) {
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 async function startHub(config, options = {}) {
 	if (config.management) managementConfig(config.management, config.port, config.publicUrl);
+	if (config.terminal) terminalConfig(config.terminal, config.port, config.publicUrl, config.management);
 	const serving = acquireStateLock(config, ".serving.lock");
 	config = {
 		...config,
@@ -2726,6 +3090,7 @@ async function startLockedHub(config, options) {
 	const versionStatus = createVersionStatus(options.versions);
 	let url = "";
 	let managementUrl;
+	let terminalServer;
 	const restarting = /* @__PURE__ */ new Map();
 	const activateRestart = (generation) => {
 		const restart = restarting.get(generation);
@@ -3488,12 +3853,23 @@ async function startLockedHub(config, options) {
 			const chatOrigins = [new URL(url).origin, ...config.publicUrl ? [new URL(config.publicUrl).origin] : []];
 			if ([managementUrl, config.management.publicUrl].some((value) => value && chatOrigins.includes(new URL(value).origin))) throw new Error("Management origin must differ from chat origin");
 		}
+		if (config.terminal) terminalServer = await startTerminalServer(config, [
+			url,
+			config.publicUrl,
+			managementUrl,
+			config.management?.publicUrl
+		].filter((value) => !!value));
 	} catch (error) {
 		stopped = true;
+		versionStatus.close();
+		await terminalServer?.close();
 		for (const peer of peers) peer.destroy();
-		registry.close();
-		server.close();
-		managementServer?.close();
+		for (const connection of connections) connection.destroy();
+		await Promise.all([
+			new Promise((resolve) => registry.close(() => resolve())),
+			new Promise((resolve) => server.close(() => resolve())),
+			...managementServer ? [new Promise((resolve) => managementServer.close(() => resolve()))] : []
+		]);
 		throw error;
 	}
 	const sweep = setInterval(() => {
@@ -3506,6 +3882,7 @@ async function startLockedHub(config, options) {
 	return {
 		url,
 		...managementUrl ? { managementUrl } : {},
+		...terminalServer ? { terminalUrl: terminalServer.url } : {},
 		socketPath: config.socketPath,
 		close() {
 			if (closing) return closing;
@@ -3523,6 +3900,7 @@ async function startLockedHub(config, options) {
 				new Promise((resolve) => registry.close(() => resolve())),
 				new Promise((resolve) => wss.close(() => resolve())),
 				...managementServer ? [new Promise((resolve) => managementServer.close(() => resolve()))] : [],
+				...terminalServer ? [terminalServer.close()] : [],
 				pending
 			]).then(() => {});
 			return closing;
@@ -3536,11 +3914,17 @@ var help = `Pi Web Hub — independent multi-session portal
 
   pi-web-hub init [--port 16180] [--public-url https://pi.example.com/]
     [--management-port 16181] [--management-public-url https://admin.example.com/]
+    [--terminal-port 16182] [--terminal-public-url https://terminal.example.com/]
   pi-web-hub serve
   pi-web-hub issue --label "Project A" --output /private/session-a.json [--backend-host 127.0.0.1]
   pi-web-hub revoke --run-id <session-capability-id>
   pi-web-hub pair                     Generate a single-use management code (10 minutes)
   pi-web-hub revoke-management        Revoke all browser management sessions
+  pi-web-hub pair-terminal --run-id <id> --runtime-id <id> --session-id <id>
+    --terminal-epoch <id> --access <read|write>  Generate a scoped terminal code (10 minutes)
+  pi-web-hub revoke-terminal          Revoke all browser terminal sessions
+
+Terminal auth is opt-in; terminal backend/PTY is not available in this build.
 
 All commands accept --config <file> (default ~/.pi/web-hub/config.json).
 The hub never launches agents or deploys SSH/TLS/login. See docs/hub.md.
@@ -3559,7 +3943,9 @@ async function main(args) {
 			"--port",
 			"--public-url",
 			"--management-port",
-			"--management-public-url"
+			"--management-public-url",
+			"--terminal-port",
+			"--terminal-public-url"
 		]],
 		["serve", ["--config"]],
 		["issue", [
@@ -3570,7 +3956,16 @@ async function main(args) {
 		]],
 		["revoke", ["--config", "--run-id"]],
 		["pair", ["--config"]],
-		["revoke-management", ["--config"]]
+		["revoke-management", ["--config"]],
+		["pair-terminal", [
+			"--config",
+			"--run-id",
+			"--runtime-id",
+			"--session-id",
+			"--terminal-epoch",
+			"--access"
+		]],
+		["revoke-terminal", ["--config"]]
 	]).get(command);
 	if (!permitted) throw new Error("Unknown hub command; use --help");
 	const options = /* @__PURE__ */ new Map();
@@ -3598,10 +3993,20 @@ async function main(args) {
 				...options.has("--management-public-url") ? { publicUrl: options.get("--management-public-url") } : {}
 			}, port, publicUrl);
 		}
+		let terminal;
+		if (options.has("--terminal-public-url") && !options.has("--terminal-port")) throw new Error("Terminal port required");
+		if (options.has("--terminal-port")) {
+			const { terminalConfig } = await Promise.resolve().then(() => (init_config(), config_exports));
+			terminal = terminalConfig({
+				port: Number(options.get("--terminal-port")),
+				...options.has("--terminal-public-url") ? { publicUrl: options.get("--terminal-public-url") } : {}
+			}, port, publicUrl, management);
+		}
 		initializeHub(configFile, {
 			port,
 			...publicUrl ? { publicUrl } : {},
-			...management ? { management } : {}
+			...management ? { management } : {},
+			...terminal ? { terminal } : {}
 		});
 		process.stdout.write(`${JSON.stringify({
 			configured: true,
@@ -3610,7 +4015,17 @@ async function main(args) {
 		return;
 	}
 	const config = readHubConfig(configFile);
-	if (command === "pair") process.stdout.write(`${JSON.stringify(issueManagementCode(config))}\n`);
+	if (command === "pair-terminal") process.stdout.write(`${JSON.stringify(issueTerminalCode(config, {
+		runId: options.get("--run-id"),
+		runtimeId: options.get("--runtime-id"),
+		sessionId: options.get("--session-id"),
+		terminalEpoch: options.get("--terminal-epoch"),
+		access: options.get("--access")
+	}))}\n`);
+	else if (command === "revoke-terminal") {
+		revokeTerminal(config);
+		process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
+	} else if (command === "pair") process.stdout.write(`${JSON.stringify(issueManagementCode(config))}\n`);
 	else if (command === "revoke-management") {
 		revokeManagement(config);
 		process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
@@ -3636,7 +4051,8 @@ async function main(args) {
 			localUrl: hub.url,
 			portalUrl: `${config.publicUrl ?? hub.url}sessions/`,
 			socketPath: hub.socketPath,
-			...hub.managementUrl ? { managementUrl: hub.managementUrl } : {}
+			...hub.managementUrl ? { managementUrl: hub.managementUrl } : {},
+			...hub.terminalUrl ? { terminalUrl: hub.terminalUrl } : {}
 		})}\n`);
 		let closing = false;
 		const stop = () => {

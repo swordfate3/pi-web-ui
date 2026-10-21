@@ -179,3 +179,14 @@ Rejected for live UI. Session entries are useful for reconnect and history, but 
 - Mirror Server still needs either explicit channel subscriptions for legacy extension events or one shared Pi Web UI event channel for future extensions.
 - The Web UI must tolerate unknown event types and ignore events it does not understand.
 - Reconnect behavior depends on event replay, session entries, explicit query methods, or extension snapshot events. This is handled per feature, not by a generic context item cache in Mirror Server.
+
+## Public terminal-prompt lifecycle metadata
+
+`ui_prompt_start` / `ui_prompt_end` (Pi 1.1 and 1.3) are forwarded as
+`{kind,title?,sessionId,runtimeId}` only. The bridge keeps one transient outer-prompt
+metadata record for `state_sync.terminalPrompt`; session start, shutdown and server
+stop clear it. This reconnect projection contains no body, choices or resolver and
+is not persisted. The browser renders a terminal-required banner, not a confirmation
+UI. Ordinary RPC `extension_ui_request` is not a `pi.on` event and is not intercepted.
+Web `extension_ui_response` requests return an unsupported error; there is no trusted
+approval channel on the chat origin. See [terminal prompt boundaries](../terminal-prompts.md).

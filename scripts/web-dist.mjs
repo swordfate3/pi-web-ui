@@ -29,6 +29,7 @@ const SOURCE_FILES = [
   "extensions/history-envelope.ts",
   "extensions/hub-generation.ts",
   "extensions/live-transport.ts",
+  "extensions/terminal-prompt.ts",
   "extensions/message-revision.ts",
   "extensions/message-versions.ts",
   "extensions/session-usage.ts",

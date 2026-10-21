@@ -15,6 +15,10 @@ export function dispatchPiEvent(store: PiWebUiStore, data: WsEvent) {
 
   const event = { type: data.event, ...payload } as RpcEvent;
   switch (event.type) {
+    case "ui_prompt_start":
+    case "ui_prompt_end":
+      store.applyTerminalPrompt(payload, data.event === "ui_prompt_start");
+      break;
     case "transport_omitted":
       store.applyTransportOmitted(payload);
       break;

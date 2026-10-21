@@ -21,6 +21,7 @@ import { initializeHub, issueSession, readGrant, readHubConfig, revokeSession } 
 import { issueManagementCode, revokeManagement } from "../hub/management.ts";
 import { startHub } from "../hub/server.ts";
 import { storageDiagnostics, withStateWriter } from "../hub/state-budget.ts";
+import { issueTerminalCode } from "../hub/terminal-auth.ts";
 
 function fixture(t: test.TestContext) {
   const dir = mkdtempSync(path.join(tmpdir(), "bounded-state-"));
@@ -53,6 +54,20 @@ test("pre-existing 513 active grants reject ordinary writes and startup without 
   assert.equal(storageDiagnostics(f.config).activeGrants, 513);
   assert.equal(storageDiagnostics(f.config).overBudget, true);
   assert.throws(() => issueManagementCode(f.config), /quota/);
+  assert.throws(
+    () =>
+      issueTerminalCode(
+        { ...f.config, terminal: { port: 0 } },
+        {
+          runId: f.credential.run_id,
+          runtimeId: "runtime",
+          sessionId: "session",
+          terminalEpoch: "a".repeat(32),
+          access: "read",
+        },
+      ),
+    /quota/,
+  );
   assert.throws(
     () =>
       withStateWriter(f.config, (writer) =>

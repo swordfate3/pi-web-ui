@@ -42,6 +42,7 @@ import {
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
 import { captureSoftwareMetadata } from "./software-metadata.ts";
+import { TERMINAL_UI_REQUIRED, TerminalPromptState } from "./terminal-prompt.ts";
 import { serveWorkspaceUpload, WorkspaceUploads } from "./workspace-uploads.ts";
 
 type BrowserImage = {
@@ -343,6 +344,7 @@ export default function (pi: ExtensionAPI) {
   let wss: WebSocketServer | null = null;
   let heartbeatTimer: NodeJS.Timeout | null = null;
   const clients = new Set<WebSocket>();
+  const terminalPrompt = new TerminalPromptState();
 
   // Store latest context reference for use in command handlers
   let latestCtx: ExtensionContext | null = null;
@@ -906,6 +908,7 @@ export default function (pi: ExtensionAPI) {
     // Fence synchronously, before any server-close or child-process await.
     listenController?.abort();
     listenController = null;
+    terminalPrompt.clear();
     const closingRegistration = registration;
     registration = null;
     const unregistered = closingRegistration?.stop();
@@ -1298,6 +1301,21 @@ export default function (pi: ExtensionAPI) {
     broadcast({ type: "event", event: "session_tree", payload });
   });
 
+  // Public Pi 1.1/1.3 events: metadata only, not RPC dialog interception.
+  for (const eventType of ["ui_prompt_start", "ui_prompt_end"] as const) {
+    pi.on(eventType as Parameters<ExtensionAPI["on"]>[0], async (event: unknown, ctx: ExtensionContext) => {
+      latestCtx = ctx;
+      if (!runtimeActive || runtimeStopping) return;
+      const prompt = terminalPrompt.observe(event, eventType === "ui_prompt_start");
+      if (!prompt) return;
+      broadcast({
+        type: "event",
+        event: eventType,
+        payload: { ...prompt, sessionId: ctx.sessionManager.getSessionId(), runtimeId },
+      });
+    });
+  }
+
   // Forward arch-mode state changes from other extensions to browser clients
   (pi as ExtensionAPIWithEvents).events?.on?.("arch:state-changed", (payload: unknown) => {
     broadcast({
@@ -1321,6 +1339,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
+    terminalPrompt.clear();
     runtimeActive = true;
     runtimeStopping = false;
     if (!runtimeControl) {
@@ -1550,6 +1569,7 @@ export default function (pi: ExtensionAPI) {
         sessionFile,
         sessionId: ctx.sessionManager.getSessionId(),
         runtimeId,
+        terminalPrompt: terminalPrompt.snapshot(),
         isStreaming: !ctx.isIdle(),
         contextUsage,
       },
@@ -2606,7 +2626,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         case "extension_ui_response": {
-          sendTo(ws, success());
+          sendTo(ws, error(TERMINAL_UI_REQUIRED));
           break;
         }
 
@@ -3366,6 +3386,7 @@ export default function (pi: ExtensionAPI) {
   // Cleanup on shutdown
   // ═══════════════════════════════════════
   pi.on("session_shutdown", async (event) => {
+    terminalPrompt.clear();
     runtimeStopping = true;
     if (event.reason !== "quit" && runtimeControl?.prepared) taintRuntimeInput();
     await runtimeControl?.close(event.reason === "quit");

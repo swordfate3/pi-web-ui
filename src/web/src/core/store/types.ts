@@ -22,6 +22,7 @@ import type {
   SessionTreeNode,
   StateSyncPayload,
   SystemTone,
+  TerminalPrompt,
   ThemeMode,
   Usage,
   UsageStatsResult,
@@ -168,6 +169,8 @@ export type RightPanelSlice = {
 };
 
 export type DialogSlice = {
+  terminalPrompt: TerminalPrompt | null;
+  applyTerminalPrompt: (payload: Record<string, unknown>, started: boolean) => void;
   dialog: ExtensionDialog | null;
   setDialog: (dialog: ExtensionDialog | null) => void;
   respondDialog: (response: Record<string, unknown>) => void;

@@ -19,7 +19,7 @@ export const createConnectionSlice: StoreSlice<ConnectionSlice> = (set, get) => 
 
   setConnection: (connection) => {
     if (connection !== "connected") get().closeEntryDetail?.();
-    set({ connection });
+    set({ connection, ...(connection !== "connected" ? { terminalPrompt: null, dialog: null } : {}) });
   },
   getWebConnection: async () => (await get().send("get_web_connection")) as WebConnectionInfo,
   setError: (error) => set({ error }),

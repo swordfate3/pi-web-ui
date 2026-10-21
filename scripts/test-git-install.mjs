@@ -105,10 +105,10 @@ async function packageCount(dir) {
   await walk(dir);
   return count;
 }
-async function assertHubLifecycle(installed, label) {
+export async function assertHubLifecycle(installed, label, testRoot) {
   const pkg = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
   const cli = path.join(installed, pkg.bin["pi-web-hub"]);
-  const privateRoot = path.join(root, `hub-${label}`);
+  const privateRoot = path.join(testRoot, `hub-${label}`);
   await mkdir(privateRoot, { mode: 0o700 });
   const config = path.join(privateRoot, "config.json");
   checked(process.execPath, [cli, "init", "--config", config, "--port", "0"], { cwd: privateRoot, env: safeEnv() });
@@ -117,7 +117,9 @@ async function assertHubLifecycle(installed, label) {
   const credential = JSON.parse(await readFile(credentialFile, "utf8"));
   assert.ok(!`${issued.stdout}${issued.stderr}`.includes(credential.token), "CLI must not print session token");
   assert.equal((await stat(credentialFile)).mode & 0o077, 0);
-  const child = spawn(process.execPath, [cli, "serve", "--config", config], { cwd: privateRoot, env: safeEnv(), stdio: ["ignore", "pipe", "pipe"] });
+  // Package lifecycle validation must not depend on public version endpoints.
+  // Keep install/update networking separate; only this disposable Hub is offline.
+  const child = spawn(process.execPath, [cli, "serve", "--config", config], { cwd: privateRoot, env: safeEnv({ PI_OFFLINE: "1" }), stdio: ["ignore", "pipe", "pipe"] });
   const closed = new Promise((resolve) => child.once("close", resolve));
   child.stderr.resume();
   let timer;
@@ -161,13 +163,15 @@ async function assertProductionInstall(agentDir, expectedHash) {
   const installed = path.join(agentDir, "git", "github.com", "pi-web-ui-install-test", "pi-web-ui");
   assert.equal(await distHash(installed), expectedHash, "installed dist integrity check");
   const pkg = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
-  assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ["ws"]);
+  assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ["@xterm/addon-serialize", "@xterm/headless", "ws"]);
+  assert.equal(pkg.dependencies["@xterm/addon-serialize"], "0.14.0");
+  assert.equal(pkg.dependencies["@xterm/headless"], "6.0.0");
   const modules = path.join(installed, "node_modules");
-  for (const forbidden of ["vite", "typescript", "react", "pi-coding-agent", "@earendil-works/pi-coding-agent"]) {
+  for (const forbidden of ["vite", "typescript", "react", "pi-coding-agent", "@earendil-works/pi-coding-agent", "@xterm/xterm"]) {
     await assert.rejects(stat(path.join(modules, forbidden)), { code: "ENOENT" });
   }
   const count = await packageCount(modules);
-  assert.equal(count, 1, "Git install must contain only ws");
+  assert.equal(count, 3, "Git install must contain only ws and the fixed headless/serialize runtime pair");
   assert.match(
     checked(process.execPath, [path.join(installed, pkg.bin["pi-web-hub"]), "--help"]).stdout,
     /independent multi-session portal/,
@@ -176,151 +180,155 @@ async function assertProductionInstall(agentDir, expectedHash) {
   return { installed, packageCount: count };
 }
 
-try {
-  await mkdir(base, { recursive: true });
-  root = await mkdtemp(path.join(base, "run-"));
-  const fixture = path.join(root, "fixture");
-  const workspace = path.join(root, "workspace");
-  const agent = path.join(root, "agent");
-  const repo = path.join(root, "source.git");
-  await copyFixture(fixture);
-  await mkdir(workspace);
-  const initialHash = await distHash(fixture);
-  checked("git", ["init", "-b", "main", fixture]);
-  checked("git", ["config", "user.name", "Install Test"], { cwd: fixture });
-  checked("git", ["config", "user.email", "install-test@example.invalid"], { cwd: fixture });
-  checked("git", ["add", "-A"], { cwd: fixture });
-  checked("git", ["commit", "-m", "fixture v1"], { cwd: fixture });
-  checked("git", ["clone", "--bare", fixture, repo]);
-
-  const install = run(process.env.PI_INSTALL_TEST_BIN || "pi", ["install", gitSpec], {
-    cwd: workspace,
-    env: piEnv(agent, repo),
-  });
-  assert.equal(install.status, 0, `Pi git install failed (${install.status}):\n${install.stderr}`);
-  const first = await assertProductionInstall(agent, initialHash);
-
-  await writeFile(path.join(first.installed, "dist", "stale-sentinel"), "stale\n");
-  await writeFile(path.join(fixture, "docs/installation-test.txt"), "fixture-only update\n");
-  checked("git", ["add", "-A"], { cwd: fixture });
-  checked("git", ["commit", "-m", "fixture v2"], { cwd: fixture });
-  checked("git", ["push", repo, "main"], { cwd: fixture });
-  const update = run(process.env.PI_INSTALL_TEST_BIN || "pi", ["update", gitSpec], {
-    cwd: workspace,
-    env: piEnv(agent, repo),
-  });
-  assert.equal(update.status, 0, `Pi git update failed (${update.status}):\n${update.stderr}`);
-  const second = await assertProductionInstall(agent, initialHash);
-  await assertHubLifecycle(second.installed, "git-update");
-  await assert.rejects(stat(path.join(second.installed, "dist", "stale-sentinel")), { code: "ENOENT" });
-  const actualHead = git(second.installed, ["rev-parse", "HEAD"]).stdout.trim();
-  const fixtureHead = git(fixture, ["rev-parse", "HEAD"]).stdout.trim();
-  assert.equal(actualHead, fixtureHead, "updated checkout must point at fixture HEAD");
-
-  const staleInputs = [
-    "src/web/index.html",
-    "extensions/remote-access/plan.ts",
-    "extensions/remote-access/gateway.py",
-    "hub/server.ts",
-    "bin/pi-web-hub.mjs",
-    "vite.hub.config.ts",
-    "extensions/workspace-uploads.ts",
-    "extensions/runtime-control.ts",
-    "extensions/runtime-metadata.ts",
-    "extensions/runtime-stdin-guard.mjs",
-    "src/web/src/core/incremental-sha256.ts",
-  ];
-  for (const [index, input] of staleInputs.entries()) {
-    const sourcePath = path.join(fixture, input);
-    const originalSource = await readFile(sourcePath);
-    await writeFile(sourcePath, Buffer.concat([originalSource, Buffer.from("\n<!-- stale-source-test -->\n")]));
-    const negative = run(process.execPath, [path.join(fixture, "scripts/web-dist.mjs"), "--install", "--root", fixture]);
-    assert.notEqual(negative.status, 0, `source mismatch should fail verification: ${input}`);
+async function main() {
+  try {
+    await mkdir(base, { recursive: true });
+    root = await mkdtemp(path.join(base, "run-"));
+    const fixture = path.join(root, "fixture");
+    const workspace = path.join(root, "workspace");
+    const agent = path.join(root, "agent");
+    const repo = path.join(root, "source.git");
+    await copyFixture(fixture);
+    await mkdir(workspace);
+    const initialHash = await distHash(fixture);
+    checked("git", ["init", "-b", "main", fixture]);
+    checked("git", ["config", "user.name", "Install Test"], { cwd: fixture });
+    checked("git", ["config", "user.email", "install-test@example.invalid"], { cwd: fixture });
     checked("git", ["add", "-A"], { cwd: fixture });
-    checked("git", ["commit", "-m", `fixture stale input must fail installation: ${input}`], { cwd: fixture });
-    checked("git", ["push", repo, "main"], { cwd: fixture });
-    const rejectedInstall = run(process.env.PI_INSTALL_TEST_BIN || "pi", ["install", gitSpec], {
-      cwd: workspace,
-      env: piEnv(path.join(root, `negative-agent-${index}`), repo),
-    });
-    assert.notEqual(rejectedInstall.status, 0, `Real Pi install must reject a stale-source commit via prepare: ${input}`);
-    assert.match(rejectedInstall.stdout + rejectedInstall.stderr, /Source inventory mismatch/);
-    await writeFile(sourcePath, originalSource);
-  }
+    checked("git", ["commit", "-m", "fixture v1"], { cwd: fixture });
+    checked("git", ["clone", "--bare", fixture, repo]);
 
-  const packDir = path.join(root, "pack");
-  await mkdir(packDir);
-  checked("npm", ["pack", "--ignore-scripts", "--pack-destination", packDir], { cwd: fixture, env: safeEnv() });
-  const tgz = path.join(
-    packDir,
-    (await readdir(packDir)).find((file) => file.endsWith(".tgz")),
-  );
-  const consumer = path.join(root, "npm-consumer");
-  await mkdir(consumer);
-  checked("npm", ["install", tgz, "--prefix", consumer, "--omit=dev", "--legacy-peer-deps"], {
-    cwd: root,
-    env: safeEnv(),
-  });
-  const packed = path.join(consumer, "node_modules", "@kkkiio", "pi-web-ui");
-  assert.match(
-    checked(process.execPath, [path.join(packed, "scripts/web-dist.mjs"), "--install", "--root", packed]).stdout,
-    /verified/i,
-  );
-  for (const required of [
-    "dist/build-manifest.json",
-    "docs/images",
-    "docs/remote-access.md",
-    "docs/hub.md",
-    "bin/pi-web-hub.mjs",
-    "dist/hub/pi-web-hub.mjs",
-    "hub/server.ts",
-    "extensions/connection-config.ts",
-    "extensions/connection-listener.ts",
-    "extensions/runtime-control.ts",
-    "extensions/runtime-metadata.ts",
-    "extensions/runtime-stdin-guard.mjs",
-    "extensions/workspace-uploads.ts",
-    "extensions/session-registration.ts",
-    "extensions/remote-access/plan.ts",
-    "extensions/remote-access/gateway.py",
-    "scripts/web-dist.mjs",
-    "LICENSE",
-  ]) {
-    await stat(path.join(packed, required));
+    const install = run(process.env.PI_INSTALL_TEST_BIN || "pi", ["install", gitSpec], {
+      cwd: workspace,
+      env: piEnv(agent, repo),
+    });
+    assert.equal(install.status, 0, `Pi git install failed (${install.status}):\n${install.stderr}`);
+    const first = await assertProductionInstall(agent, initialHash);
+
+    await writeFile(path.join(first.installed, "dist", "stale-sentinel"), "stale\n");
+    await writeFile(path.join(fixture, "docs/installation-test.txt"), "fixture-only update\n");
+    checked("git", ["add", "-A"], { cwd: fixture });
+    checked("git", ["commit", "-m", "fixture v2"], { cwd: fixture });
+    checked("git", ["push", repo, "main"], { cwd: fixture });
+    const update = run(process.env.PI_INSTALL_TEST_BIN || "pi", ["update", gitSpec], {
+      cwd: workspace,
+      env: piEnv(agent, repo),
+    });
+    assert.equal(update.status, 0, `Pi git update failed (${update.status}):\n${update.stderr}`);
+    const second = await assertProductionInstall(agent, initialHash);
+    await assertHubLifecycle(second.installed, "git-update", root);
+    await assert.rejects(stat(path.join(second.installed, "dist", "stale-sentinel")), { code: "ENOENT" });
+    const actualHead = git(second.installed, ["rev-parse", "HEAD"]).stdout.trim();
+    const fixtureHead = git(fixture, ["rev-parse", "HEAD"]).stdout.trim();
+    assert.equal(actualHead, fixtureHead, "updated checkout must point at fixture HEAD");
+
+    const staleInputs = [
+      "src/web/index.html",
+      "extensions/remote-access/plan.ts",
+      "extensions/remote-access/gateway.py",
+      "hub/server.ts",
+      "bin/pi-web-hub.mjs",
+      "vite.hub.config.ts",
+      "extensions/workspace-uploads.ts",
+      "extensions/runtime-control.ts",
+      "extensions/runtime-metadata.ts",
+      "extensions/runtime-stdin-guard.mjs",
+      "src/web/src/core/incremental-sha256.ts",
+    ];
+    for (const [index, input] of staleInputs.entries()) {
+      const sourcePath = path.join(fixture, input);
+      const originalSource = await readFile(sourcePath);
+      await writeFile(sourcePath, Buffer.concat([originalSource, Buffer.from("\n<!-- stale-source-test -->\n")]));
+      const negative = run(process.execPath, [path.join(fixture, "scripts/web-dist.mjs"), "--install", "--root", fixture]);
+      assert.notEqual(negative.status, 0, `source mismatch should fail verification: ${input}`);
+      checked("git", ["add", "-A"], { cwd: fixture });
+      checked("git", ["commit", "-m", `fixture stale input must fail installation: ${input}`], { cwd: fixture });
+      checked("git", ["push", repo, "main"], { cwd: fixture });
+      const rejectedInstall = run(process.env.PI_INSTALL_TEST_BIN || "pi", ["install", gitSpec], {
+        cwd: workspace,
+        env: piEnv(path.join(root, `negative-agent-${index}`), repo),
+      });
+      assert.notEqual(rejectedInstall.status, 0, `Real Pi install must reject a stale-source commit via prepare: ${input}`);
+      assert.match(rejectedInstall.stdout + rejectedInstall.stderr, /Source inventory mismatch/);
+      await writeFile(sourcePath, originalSource);
+    }
+
+    const packDir = path.join(root, "pack");
+    await mkdir(packDir);
+    checked("npm", ["pack", "--ignore-scripts", "--pack-destination", packDir], { cwd: fixture, env: safeEnv() });
+    const tgz = path.join(
+      packDir,
+      (await readdir(packDir)).find((file) => file.endsWith(".tgz")),
+    );
+    const consumer = path.join(root, "npm-consumer");
+    await mkdir(consumer);
+    checked("npm", ["install", tgz, "--prefix", consumer, "--omit=dev", "--legacy-peer-deps"], {
+      cwd: root,
+      env: safeEnv(),
+    });
+    const packed = path.join(consumer, "node_modules", "@kkkiio", "pi-web-ui");
+    assert.match(
+      checked(process.execPath, [path.join(packed, "scripts/web-dist.mjs"), "--install", "--root", packed]).stdout,
+      /verified/i,
+    );
+    for (const required of [
+      "dist/build-manifest.json",
+      "docs/images",
+      "docs/remote-access.md",
+      "docs/hub.md",
+      "bin/pi-web-hub.mjs",
+      "dist/hub/pi-web-hub.mjs",
+      "hub/server.ts",
+      "extensions/connection-config.ts",
+      "extensions/connection-listener.ts",
+      "extensions/runtime-control.ts",
+      "extensions/runtime-metadata.ts",
+      "extensions/runtime-stdin-guard.mjs",
+      "extensions/workspace-uploads.ts",
+      "extensions/session-registration.ts",
+      "extensions/remote-access/plan.ts",
+      "extensions/remote-access/gateway.py",
+      "scripts/web-dist.mjs",
+      "LICENSE",
+    ]) {
+      await stat(path.join(packed, required));
+    }
+    const packedManifest = JSON.parse(await readFile(path.join(packed, "dist/build-manifest.json"), "utf8"));
+    await assertHubLifecycle(packed, "tarball", root);
+    const packedPkg = JSON.parse(await readFile(path.join(packed, "package.json"), "utf8"));
+    assert.match(
+      checked(process.execPath, [path.join(packed, packedPkg.bin["pi-web-hub"]), "--help"]).stdout,
+      /independent multi-session portal/,
+      "Tarball must include a working hub CLI",
+    );
+    assert.equal(packedManifest.outputs.sha256, initialHash);
+    assert.deepEqual(Object.keys(packedPkg.dependencies ?? {}).sort(), ["@xterm/addon-serialize", "@xterm/headless", "ws"]);
+    const count = await packageCount(path.join(consumer, "node_modules"));
+    assert.equal(count, 4, "Tarball consumer must contain only the root package, ws and headless/serialize");
+    const lockChanged =
+      sha(await readFile(path.join(second.installed, "package-lock.json"))) !==
+      sha(await readFile(path.join(fixture, "package-lock.json")));
+    console.log(
+      JSON.stringify({
+        result: "passed",
+        install: "passed",
+        update: "passed",
+        sourceMismatch: "rejected by real Pi install prepare",
+        rejectedStaleInputs: staleInputs,
+        tarball: "passed",
+        installedHubLifecycle: "init/issue/serve/HTTP/revoke/SIGTERM passed for Git update and tarball",
+        productionPackages: second.packageCount,
+        tarballConsumerPackages: count,
+        npmRewroteLock: lockChanged,
+        ...(keep ? { runtimeRoot: root, installedRuntime: second.installed } : {}),
+      }),
+    );
+  } catch (error) {
+    console.error(`Git install production test failed: ${error.message}`);
+    process.exitCode = 1;
+  } finally {
+    if (root && !keep) await rm(root, { recursive: true, force: true });
   }
-  const packedManifest = JSON.parse(await readFile(path.join(packed, "dist/build-manifest.json"), "utf8"));
-  await assertHubLifecycle(packed, "tarball");
-  const packedPkg = JSON.parse(await readFile(path.join(packed, "package.json"), "utf8"));
-  assert.match(
-    checked(process.execPath, [path.join(packed, packedPkg.bin["pi-web-hub"]), "--help"]).stdout,
-    /independent multi-session portal/,
-    "Tarball must include a working hub CLI",
-  );
-  assert.equal(packedManifest.outputs.sha256, initialHash);
-  assert.deepEqual(Object.keys(packedPkg.dependencies ?? {}).sort(), ["ws"]);
-  const count = await packageCount(path.join(consumer, "node_modules"));
-  assert.equal(count, 2, "Tarball consumer must contain only the root package and ws");
-  const lockChanged =
-    sha(await readFile(path.join(second.installed, "package-lock.json"))) !==
-    sha(await readFile(path.join(fixture, "package-lock.json")));
-  console.log(
-    JSON.stringify({
-      result: "passed",
-      install: "passed",
-      update: "passed",
-      sourceMismatch: "rejected by real Pi install prepare",
-      rejectedStaleInputs: staleInputs,
-      tarball: "passed",
-      installedHubLifecycle: "init/issue/serve/HTTP/revoke/SIGTERM passed for Git update and tarball",
-      productionPackages: second.packageCount,
-      tarballConsumerPackages: count,
-      npmRewroteLock: lockChanged,
-      ...(keep ? { runtimeRoot: root, installedRuntime: second.installed } : {}),
-    }),
-  );
-} catch (error) {
-  console.error(`Git install production test failed: ${error.message}`);
-  process.exitCode = 1;
-} finally {
-  if (root && !keep) await rm(root, { recursive: true, force: true });
 }
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

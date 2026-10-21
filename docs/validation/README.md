@@ -2,6 +2,18 @@
 
 人工报告集中在此目录：
 
+- [宿主机 Codex 测试交接](terminal-host-handoff.md)：测试分支拉取、隔离验证命令、runtime只读调查、禁止自动部署及回传格式。
+
+- [独立隔离终端入口与受控输入](terminal-browser.md)：真实 Browser→WS→同一测试 Pi PTY、配对scope、单writer／撤权／unknown、跨源SW/opener验证与桌面手机截图；未接生产。
+
+- [隔离终端完整画面与重连](terminal-screen.md)：真实 PTY→headless framebuffer、全帧恢复与只读浏览器桌面／手机截图；已知 serialize fidelity／字体／小屏限制，未接生产。
+
+- [真实私有终端连接](pty-transport.md)：Unix socket→私有worker pipe→同一Pi PTY，单writer、断线/到期、sink排队撤权与停滞清理；未接网页或生产。
+
+- [隔离真实 Pi PTY](isolated-pty.md)：同PID原生confirm/custom、尺寸、测试输入围栏及退出清理；Pi1.1/1.3验证，不代表网页终端已可用。
+
+- [数学与终端等待提示](math-terminal-prompts.md)：隔离源码修复与验证记录；终端等待提示不等于 Web Yes/No 授权，未安装或部署。
+
 - [消息版本翻页](message-versions.md)：问题／回答下 `‹ 2 / 2 ›` 切整条分支、完整原始关系索引、cursor 修复与 scope 防护；337 项单测（1 skip）、71 Chromium、离线 runtime 2/2、桌面／手机视觉，本地未发布。
 
 - [每轮编辑与重新生成](message-revision.md)：完整原问题、单次 preview、分支保留／切换、busy／unknown 防护与真实 Pi 桌面手机验证；本地未发布，最终证据及限制见报告。

@@ -4,7 +4,7 @@
 
 **Goal:** Connect an opt-in newly launched pirun to a trusted phone terminal controlling that same Pi, without changing ordinary pirun or weakening bounded Hub state.
 
-**Architecture:** An image-owned PTY supervisor and fixed broker own the only Pi terminal. A separately authenticated, default-disabled Gate provider locates an approved terminal-profile container and opens only its fixed image client; Hub serves a third-origin terminal using that provider. Remote control permanently latches chat writes off for the child, and both supervisor and Gate reject managed restart for this profile.
+**Architecture:** An image-owned PTY supervisor and fixed broker own the only Pi terminal. A separately authenticated, default-disabled Gate provider locates an approved terminal-profile container and opens only its fixed image client; Hub serves a third-origin terminal using that provider. The opt-in terminal profile rejects ordinary browser-chat mutations from startup; all computer/phone input uses the same native terminal. Successful terminal preparation still commits an irreversible child latch, and both supervisor and Gate reject managed restart for this profile.
 
 **Tech Stack:** Python standard-library PTY/Unix IPC/Docker stream framing, Node 22+, TypeScript, ws, pinned xterm/headless/serialize, Vite, node:test, Python unittest, Playwright.
 
@@ -14,7 +14,7 @@
 
 - Preserve ordinary `inherited-tui`; only explicit `web-terminal-v1` startup enables terminal; old running containers are not migrated/restarted.
 - Default UID/GID `1000:1000`, cap-drop ALL, no-new-privileges, no sudo; no Docker socket or provider authority in Hub/Pi.
-- First remote control latches chat writes off for the child; release/reload/idle/disconnect do not clear it.
+- The opt-in terminal profile rejects all ordinary browser-chat mutations from startup, before SDK dispatch or asynchronous side effects. Ordinary inherited-tui remains writable. Successful terminal preparation retains its separate irreversible child latch; release/reload/idle/disconnect never restore terminal-profile chat writes or clear unknown/taint.
 - Terminal profile has `managedRestartEligible:false`, reason `terminal_profile_unaudited`, enforced in supervisor and Gate.
 - Terminal origin differs from chat/admin; public HTTPS hostname is explicit, not created or deployed automatically.
 - Dedicated provider credentials never reuse registry/deployment/lifecycle/runtime tokens.
@@ -46,6 +46,8 @@ async function connectTerminalProvider(config: TerminalProviderConfig, target: T
 Provider first frame is strict JSONL `{v:1,op:"status",token,runId}` or `{v:1,op:"connect",token,target,scope,binding}`. It is private IPC, never browser protocol. Connection responses/events use `{type:"ready",target}`, `{type:"response",id,result}` and `{type:"screen-*",...}` frames; requests use positive integer `id`, `type` from `acquire|release|input|resize`, plus exact per-action fields. The fixed client talks to `/run/pi-runtime/terminal.sock`, not a supplied path. No request selects command, pid, cwd, env or container.
 
 Runtime control adds action `terminal-prepare`, with current child token/run/runtime/session identity. It returns success only after draining admitted chat mutations and latching a child-global terminal barrier. A read-only `terminal-state` action exposes identity and barrier liveness. A replacement adapter/identity fences current terminal writes until an explicit new authorization.
+
+Approval amendment, 2026-10-21: user explicitly accepted startup-read-only chat for web-terminal-v1 after Task3 I1 review. There is no supported ordinary-browser-prompt → terminal handoff in this profile. The adapter's existing latched field still means successful preparation, not merely startup read-only policy. Preserve bounded drain/unknown defenses; do not patch SDK or infer completion from idle/ACK. Tasks3,5,6,7 consume this amended contract; completed Task1/2 evidence and paused Task4 work remain preserved.
 
 ## Task 1: Reconcile experimental sources and reproducible dependencies
 
@@ -93,21 +95,23 @@ def test_remote_input_is_rejected_while_local_owns_terminal(self):
 
 **Consumes:** Terminal profile environment and current run/runtime/session identity. **Produces:** `terminal-prepare` and `terminal-state` adapter actions; latch survives extension reload in same child.
 
-- [ ] RED: admit a long-running chat mutation, request terminal prepare, prove lease is not granted while mutation remains; prove queued mutation cannot execute after barrier. Cover another browser and context replacement.
+- [ ] RED: before any terminal prepare, reject ordinary browser prompt/steer/follow-up, abort, commands, models/settings/session mutations, dialogs and HTTP uploads without dispatch/side effects; permit explicit harmless reads. Cover two browsers and context replacement. Ordinary inherited-tui still accepts the same normal prompt. Retain bounded drain/unknown unit and adapter defenses; native terminal dialogs remain answerable.
 
 ```ts
-test("release and reload never restore writes after terminal takeover", async () => {
+test("terminal-profile chat is read-only from startup and across reload", async () => {
   const adapter = await realAdapter();
+  assert.equal((await adapter.prompt("must not execute before takeover")).error, "terminal_untracked");
   await adapter.terminalPrepare();
   await adapter.reload();
   assert.equal((await adapter.prompt("must not execute")).error, "terminal_untracked");
 });
 ```
 
-- [ ] Implement exact read-only allowlist at central ingress plus execution-time checks for async admitted work; latch on child-global state, never clear stdin taint. Ensure HTTP and extension-command mutation paths are covered, not just WS.
+- [ ] Establish immutable child-global startup read-only policy before any terminal-profile browser mutation can be admitted; preserve exact read allowlist, execution-time checks, successful-prepare latch and unknown/taint. Ensure HTTP and extension-command paths are covered, not just WS. A rejected browser prompt must not create permanently unknown work or remove terminal availability; it must never be dispatched.
 - [ ] Add live adapter heartbeat/identity fencing for broker; no pending control grant survives session switch, reload, adapter loss or child exit.
 - [ ] Ensure latestCtx/latestExecuteCtx are used in asynchronous callbacks; preserve pure mirror forwarding and no extension stdout/stderr.
 - [ ] Verify ordinary inherited-tui behavior and managed runtime tests remain unchanged; commit after scoped review.
+- [ ] Real acceptance: rejected ordinary browser prompt has no SDK/tool effect, then terminal preparation succeeds while native work/dialog is active. Preserve command uncertainty tests at an internal barrier/adapter boundary; do not reopen terminal-profile chat merely to exercise the obsolete pre-takeover write path.
 
 ## Task 4: Gate terminal provider and refresh admission
 
@@ -139,12 +143,12 @@ def test_terminal_profile_cannot_refresh(self):
 - [ ] Implement private provider client using interface ledger, validate all responses/limits/identity. No provider credential to browser; each action and stream checks current authorization and fences provider on revoke.
 - [ ] Implement fixed terminal assets using pinned xterm, disableStdin and explicit draft/key controls; no automatic connection/retry/renewal, multiline confirmation, IME explicit-send, hidden/release/disconnect unknown semantics.
 - [ ] Attach nonce is short-lived/session-bound; at most two readers and one writer; serialize/chunk snapshots with one 1MiB assembly, 256KiB outbound queue and no stale ANSI-tail recovery.
-- [ ] Add nonprivileged chat link plus read-only explanation, no iframe or shared cookies/CORS. Keep terminal static assets separate from chat Service Worker.
+- [ ] Add nonprivileged chat link plus startup-read-only explanation for terminal profile, with no enabled chat mutation controls even before first takeover; ordinary mode remains unchanged. No iframe or shared cookies/CORS. Keep terminal static assets separate from chat Service Worker.
 - [ ] Run desktop/mobile screenshot checks, actual browser + production provider/runtime tests; exact current-session identity across resume/reload and no auto-retarget. Commit reviewed source and rebuilt assets.
 
 ## Task 6: Centralized pirun/Compose/image wiring and isolated deployment test
 
-**Files:** External pi-docker `scripts/pi-pirun`, `scripts/pi-dockerctl`, `pi-entrypoint`, `Dockerfile`, Compose overlays, tests/help; repository `docs/trusted-terminal.md` and external patch provenance.
+**Files:** External pi-docker `scripts/pi-pirun`, root `/home/fate/docker_files/pi-dockerctl`, `pi-entrypoint`, `Dockerfile`, Compose overlays, tests/help; repository `docs/trusted-terminal.md` and external patch provenance.
 
 **Consumes:** Tasks 2–5. **Produces:** `PI_PIRUN_WEB_TERMINAL=on pirun`, optional `PI_PIRUN_WEB_TERMINAL_CONTROL=remote`, verified immutable runtime image and no live cutover.
 
@@ -152,14 +156,14 @@ def test_terminal_profile_cannot_refresh(self):
 - [ ] Add explicit environment/label/profile preflight and fixed entrypoint dispatch. Never source `.env`. Copy verified runtime assets into root-owned image path; do not reuse mutable extension installation as broker.
 - [ ] Add dedicated provider IPC/credential mounts only to Gate/Hub, no Docker/private provider mounts to Pi. Preserve volumes, node UID, security options and normal compose lifecycle.
 - [ ] Build separate test tags, create disposable temporary project/HOME/state, launch actual new terminal Pi. Verify same PID, dialog refusal/confirmation and custom panel navigation through Hub, local/remote handoff and exit cleanup; do not stop existing services.
-- [ ] Record exact host changes and rollback instructions; help clearly names new mode and restrictions. Commit repository artifacts, leave external active service configuration disabled unless separately authorized.
+- [ ] Record exact host changes and rollback instructions; help clearly names new mode, startup-read-only ordinary chat, native-terminal-only input and manual-relaunch restriction. Commit repository artifacts, leave external active service configuration disabled unless separately authorized.
 
 ## Task 7: Whole-branch verification and integration
 
 **Files:** `docs/validation/2026-10-21-trusted-terminal-runtime.md`, `docs/development-log.md`, package dist/build manifest, final implementation ledger.
 
 - [ ] Run targeted Node/Python security/resource suites and main bounded-state/history regressions; both TypeScript configs; Biome; complete unit suite; production build and `verify:dist`; clean production Git install regression.
-- [ ] Run real Browser→Hub→Gate provider→new Pi path with synthetic dialogs/custom side effects. No personal token/model API required; never count fixture-only success as production integration.
+- [ ] Run real Browser→Hub→Gate provider→new Pi path with synthetic dialogs/custom side effects: ordinary chat rejected from startup without dispatch; terminal can then acquire and answer native dialogs. No personal token/model API required; never count fixture-only success as production integration.
 - [ ] Exercise revocation/expiry/two tabs/local reclaim/unknown delivery, output floods/slow peers/1MiB snapshot bounds, shutdown signals, termios restore, no orphan child/helper/socket and default-disabled behavior.
 - [ ] Independent task and whole-branch review; fix critical/important findings and rerun covering tests. Summarize actual counts, skip reasons and real-device/public-gateway items not tested.
 - [ ] Merge main only after all acceptance gates pass; preserve unrelated changes. Push only the approved integration, not experimental incomplete runtime. Public deployment/service restart is a separate handoff.

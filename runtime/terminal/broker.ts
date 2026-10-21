@@ -69,10 +69,24 @@ class Broker {
   private writer?: Peer;
   private polling = false;
   private stopped = false;
+  private ending = false;
+  private outputEnded = false;
+  private finalSnapshot?: ScreenSnapshot;
   private dirty = true;
   private capturing = false;
   private resizeAt = -Infinity;
-  private resize?: { peer: Peer; id: number; generation: number; columns: number; rows: number; timer: NodeJS.Timeout };
+  private operationId = 0;
+  private resize?: {
+    peer: Peer;
+    id: number;
+    operationId: number;
+    leaseId: string;
+    binding: TerminalBinding;
+    generation: number;
+    columns: number;
+    rows: number;
+    timer: NodeJS.Timeout;
+  };
   private readonly pendingAdapters = new Set<net.Socket>();
   private readonly server: net.Server;
   private readonly interval: NodeJS.Timeout;
@@ -112,9 +126,11 @@ class Broker {
       this.localFrame({ type: "started", managedRestartEligible: false, reason: "terminal_profile_unaudited" });
     });
     this.interval = setInterval(() => {
+      this.expireWriter();
       if (this.adapter && performance.now() - this.heartbeatAt > 750) this.fence();
       void this.poll();
       this.publish();
+      this.finishOutput();
     }, 100);
     void this.poll();
   }
@@ -130,6 +146,7 @@ class Broker {
   private fence() {
     const first = !this.remoteDisabled;
     this.remoteDisabled = true;
+    this.cancelResize();
     this.writer = undefined;
     this.generation++;
     for (const peer of this.peers)
@@ -217,7 +234,7 @@ class Broker {
   }
 
   private observe(state: AdapterState): boolean {
-    if (this.stopped || this.remoteDisabled) return false;
+    if (this.stopped || this.ending || this.remoteDisabled) return false;
     if (
       this.adapter &&
       (this.adapter.adapterInstanceId !== state.adapterInstanceId ||
@@ -246,7 +263,7 @@ class Broker {
   }
 
   private async poll() {
-    if (this.polling || this.acquiring || this.remoteDisabled || this.stopped) return;
+    if (this.polling || this.acquiring || this.remoteDisabled || this.stopped || this.ending) return;
     this.polling = true;
     try {
       this.observe(await this.adapterCall("terminal-state"));
@@ -258,17 +275,18 @@ class Broker {
   }
 
   private current() {
+    this.expireWriter();
     const target = this.lease?.snapshot();
-    return target && { ...target, inputState: this.remoteDisabled ? ("fenced" as const) : target.inputState };
+    return (
+      target && { ...target, inputState: this.remoteDisabled || this.ending ? ("fenced" as const) : target.inputState }
+    );
   }
 
   private drop(peer: Peer) {
     if (peer.closed) return;
     peer.closed = true;
     // Synchronous invalidation precedes destruction and any async continuation.
-    if (peer.binding) this.lease?.revoke(peer.binding);
-    if (this.writer === peer) this.writer = undefined;
-    peer.leaseId = undefined;
+    this.revokeWriter(peer);
     peer.snapshot = undefined;
     clearTimeout(peer.timer);
     clearTimeout(peer.outputTimer);
@@ -289,7 +307,7 @@ class Broker {
   }
 
   private connect(socket: net.Socket) {
-    if (this.peers.size >= 8 || this.stopped) {
+    if (this.peers.size >= 8 || this.stopped || this.ending) {
       socket.destroy();
       return;
     }
@@ -357,6 +375,7 @@ class Broker {
   private live(peer: Peer): boolean {
     return (
       !this.stopped &&
+      !this.ending &&
       !this.remoteDisabled &&
       !peer.closed &&
       !peer.socket.destroyed &&
@@ -376,7 +395,35 @@ class Broker {
     this.send(peer, { type: "response", id, result });
   }
 
+  private cancelResize() {
+    const resize = this.resize;
+    if (!resize) return;
+    this.resize = undefined;
+    clearTimeout(resize.timer);
+    // A dispatched ioctl cannot be recalled. Never retry or credit a successor.
+    this.reply(resize.peer, resize.id, { ok: false, error: "resize_unknown" });
+  }
+
+  private revokeWriter(peer: Peer) {
+    if (peer.binding) this.lease?.revoke(peer.binding);
+    peer.leaseId = undefined;
+    if (this.writer !== peer) return;
+    this.writer = undefined;
+    this.generation++;
+    this.cancelResize();
+  }
+
+  private expireWriter() {
+    if (this.writer && this.lease?.snapshot().inputState !== "remote") this.revokeWriter(this.writer);
+  }
+
+  private nextOperation() {
+    if (this.operationId === Number.MAX_SAFE_INTEGER) throw new Error();
+    return ++this.operationId;
+  }
+
   private request(peer: Peer, value: Frame) {
+    this.expireWriter();
     if (!peer.binding || !peer.target || !this.lease) throw new Error();
     const binding = peer.binding;
     const target = peer.target;
@@ -386,9 +433,7 @@ class Broker {
     peer.lastId = id;
     if (value.type === "release") {
       exact(value, "id,type");
-      leaseState.revoke(binding);
-      if (this.writer === peer) this.writer = undefined;
-      peer.leaseId = undefined;
+      this.revokeWriter(peer);
       // Cancels this connection's pending prepare without revoking another owner.
       peer.pending = false;
       this.reply(peer, id, { ok: true });
@@ -412,15 +457,13 @@ class Broker {
           const written = writeSync(this.master, data);
           if (written !== data.length) throw new Error();
         } catch {
-          leaseState.revoke(binding);
-          peer.leaseId = undefined;
+          this.revokeWriter(peer);
           this.reply(peer, id, { ok: false, delivery: "unknown", error: "input_delivery_unknown" });
           return;
         }
         this.reply(peer, id, { ok: true, delivery: "written" });
       } catch {
-        leaseState.revoke(binding);
-        peer.leaseId = undefined;
+        this.revokeWriter(peer);
         this.reply(peer, id, { ok: false, delivery: "rejected", error: "input_rejected" });
       }
       return;
@@ -441,30 +484,39 @@ class Broker {
         return;
       }
       this.resizeAt = performance.now();
+      const operationId = this.nextOperation();
       this.resize = {
         peer,
         id,
+        operationId,
+        leaseId: peer.leaseId,
+        binding: { ...binding },
         generation: this.generation,
         columns: Number(value.columns),
         rows: Number(value.rows),
-        timer: setTimeout(() => {
-          if (this.resize) this.reply(this.resize.peer, this.resize.id, { ok: false, error: "resize_unknown" });
-          this.resize = undefined;
-        }, 500),
+        timer: setTimeout(() => this.cancelResize(), 500),
       };
-      this.localFrame({ type: "resize", id, columns: value.columns, rows: value.rows });
+      this.localFrame({ type: "resize", id: operationId, columns: value.columns, rows: value.rows });
       return;
     }
     throw new Error();
   }
 
   private async acquire(peer: Peer, id: number) {
+    this.expireWriter();
     const state = this.lease?.snapshot().inputState;
     if (state === "local") {
       this.reply(peer, id, { ok: false, error: "local_owns_input" });
       return;
     }
-    if (state !== "none" || peer.scope !== "write" || peer.pending || this.acquiring || this.remoteDisabled) {
+    if (
+      state !== "none" ||
+      peer.scope !== "write" ||
+      peer.pending ||
+      this.acquiring ||
+      this.remoteDisabled ||
+      this.ending
+    ) {
       this.reply(peer, id, { ok: false, error: "control_unavailable" });
       return;
     }
@@ -496,6 +548,7 @@ class Broker {
         throw new Error();
       if (!this.lease || !peer.binding || !peer.target) throw new Error();
       const lease = this.lease.grant(peer.binding, peer.target);
+      this.generation++;
       this.writer = peer;
       peer.leaseId = lease.leaseId;
       this.reply(peer, id, { ok: true, ...lease });
@@ -508,8 +561,32 @@ class Broker {
   }
 
   local(value: Frame) {
-    if (value.type === "output") {
+    if (value.type === "child-exit") {
+      exact(value, "type");
+      if (this.ending) throw new Error();
+      this.ending = true;
+      this.generation++;
+      if (this.writer) this.revokeWriter(this.writer);
+      this.cancelResize();
+    } else if (value.type === "output-end") {
+      exact(value, "type");
+      if (!this.ending || this.outputEnded) throw new Error();
+      this.outputEnded = true;
+      // capture is ordered after all prior output writes in TerminalScreen.
+      void this.screen.capture().then(
+        (snapshot) => {
+          if (this.stopped) return;
+          this.finalSnapshot = snapshot;
+          this.finishOutput();
+        },
+        () => {
+          this.screenFailure();
+          this.localFrame({ type: "output-drained" });
+        },
+      );
+    } else if (value.type === "output") {
       exact(value, "data,type");
+      if (this.outputEnded) throw new Error();
       const data = bytes(value.data, OUTPUT_BYTES);
       if (!this.parserFailed)
         void this.screen.write(data).then(
@@ -524,6 +601,7 @@ class Broker {
     } else if (value.type === "local-input") {
       exact(value, "data,type");
       const data = bytes(value.data, INPUT_BYTES);
+      if (this.ending) return;
       if ((this.lease ? this.lease.snapshot().inputState : this.owner) !== "local") return;
       try {
         if (writeSync(this.master, data) !== data.length) throw new Error();
@@ -532,6 +610,7 @@ class Broker {
       }
     } else if (value.type === "local-yield" || value.type === "local-reclaim") {
       exact(value, "type");
+      if (this.ending) return;
       const current = this.lease?.snapshot().inputState ?? this.owner;
       if (value.type === "local-yield") {
         if (current === "local") {
@@ -540,6 +619,7 @@ class Broker {
           this.owner = "none";
         }
       } else {
+        this.cancelResize();
         this.generation++;
         this.lease?.reclaimLocal();
         this.owner = "local";
@@ -549,11 +629,14 @@ class Broker {
       this.localFrame({ type: "owner", owner: this.lease?.snapshot().inputState ?? this.owner });
     } else if (value.type === "local-resize") {
       exact(value, "columns,rows,type");
+      if (this.ending) return;
       if (size(value.columns, value.rows) && (this.lease?.snapshot().inputState ?? this.owner) === "local")
-        this.localFrame({ type: "resize", id: 0, columns: value.columns, rows: value.rows });
+        this.localFrame({ type: "resize", id: this.nextOperation(), columns: value.columns, rows: value.rows });
     } else if (value.type === "resized") {
       exact(value, "columns,id,rows,type");
-      if (!size(value.columns, value.rows)) throw new Error();
+      if (!size(value.columns, value.rows) || !Number.isSafeInteger(value.id) || Number(value.id) <= 0)
+        throw new Error();
+      this.expireWriter();
       if (!this.parserFailed)
         void this.screen.resize(Number(value.columns), Number(value.rows)).then(
           () => {
@@ -561,7 +644,7 @@ class Broker {
           },
           () => this.screenFailure(),
         );
-      if (this.resize && value.id === this.resize.id) {
+      if (this.resize && value.id === this.resize.operationId) {
         const resize = this.resize;
         clearTimeout(resize.timer);
         this.resize = undefined;
@@ -569,6 +652,11 @@ class Broker {
           ok:
             this.live(resize.peer) &&
             this.writer === resize.peer &&
+            resize.peer.leaseId === resize.leaseId &&
+            resize.peer.binding?.authorizationId === resize.binding.authorizationId &&
+            resize.peer.binding?.connectionId === resize.binding.connectionId &&
+            value.columns === resize.columns &&
+            value.rows === resize.rows &&
             this.lease?.snapshot().inputState === "remote" &&
             resize.generation === this.generation,
         });
@@ -578,6 +666,7 @@ class Broker {
 
   private publish() {
     if (
+      this.outputEnded ||
       !this.dirty ||
       this.capturing ||
       this.parserFailed ||
@@ -591,6 +680,7 @@ class Broker {
       .capture()
       .then(
         (snapshot) => {
+          if (this.outputEnded) return;
           for (const peer of this.peers) {
             if (!peer.target) continue;
             if (peer.snapshot) this.dirty = true;
@@ -602,6 +692,20 @@ class Broker {
       .finally(() => {
         this.capturing = false;
       });
+  }
+
+  private finishOutput() {
+    const snapshot = this.finalSnapshot;
+    if (!snapshot || this.stopped) return;
+    for (const peer of this.peers) {
+      if (!peer.target || this.remoteDisabled) continue;
+      this.pump(peer);
+      if (!peer.snapshot && peer.snapshotSequence !== snapshot.sequence) this.snapshot(peer, snapshot);
+    }
+    if ([...this.peers].some((peer) => peer.snapshot || peer.socket.writableLength)) return;
+    this.finalSnapshot = undefined;
+    // Transport flush, not browser receipt. Parent independently bounds shutdown.
+    this.localFrame({ type: "output-drained" });
   }
 
   private snapshot(peer: Peer, snapshot: ScreenSnapshot) {

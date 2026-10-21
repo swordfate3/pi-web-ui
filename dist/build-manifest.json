@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 183,
-    "sha256": "d5735c09ae9d5999d3dab9135cd787cfb6b7c32410c36164a1bedbed333f6e36",
+    "sha256": "4d2d7ad7213608ff287b37cad834863288b8a1018c9728c5f6aba973c391d920",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -210,7 +210,7 @@
       },
       {
         "path": "runtime/terminal/broker.ts",
-        "sha256": "c4e606ab9f89a32d444ce81395c1ebbc992210eb55a7c71d06070ea09e657635"
+        "sha256": "f60d9073dd1281a39bb95b86cfa6026911dac966ae7ff26b26c2f0a59c55a491"
       },
       {
         "path": "runtime/terminal/build.mjs",
@@ -226,7 +226,7 @@
       },
       {
         "path": "runtime/terminal/supervisor.py",
-        "sha256": "9d7be086a5394a08f52f5b7e85e5f72cbeee13cfe7e26f0ac74af1fd5ae7e600"
+        "sha256": "af30f5e12db6c4da3275877f337d3716bc9732e227b58955c0dca478e631d4a4"
       },
       {
         "path": "scripts/web-dist.mjs",
@@ -740,7 +740,7 @@
   },
   "outputs": {
     "count": 735,
-    "sha256": "0733bf252459e1badb729cc1f7f60642e2876a6220de442fdcaa9775c5b559bd",
+    "sha256": "655ddb6d1690fb1f79b984d48b64270e2d30ef58257902734af2e0cb3f8be54b",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3644,7 +3644,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "c456e85b0b7e265d5f96b7c642f0d562a5c243ba21502f7550eb0081666da197"
+        "sha256": "9489cd5628c7ff3e1fe890e8adf21ea88e6415db98ef889bef1ca3d24e47b309"
       },
       {
         "path": "icons/pi-web-ui-192.png",
@@ -3668,7 +3668,7 @@
       },
       {
         "path": "runtime/broker.cjs",
-        "sha256": "f1d5be77c3ba992e546d716ef9b7223c1a45998d929a513af181572a4bd35a87"
+        "sha256": "cd1f5d006a30f089c677fd9674ddaa982f6fcf2fc950468d06ba7eecdf9a8edd"
       },
       {
         "path": "runtime/client.py",
@@ -3676,7 +3676,7 @@
       },
       {
         "path": "runtime/supervisor.py",
-        "sha256": "9d7be086a5394a08f52f5b7e85e5f72cbeee13cfe7e26f0ac74af1fd5ae7e600"
+        "sha256": "af30f5e12db6c4da3275877f337d3716bc9732e227b58955c0dca478e631d4a4"
       },
       {
         "path": "sw.js",

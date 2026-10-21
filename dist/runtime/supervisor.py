@@ -59,6 +59,7 @@ class Runtime:
         self.screen_enabled = True
         self.prefix = False
         self.child_status = None
+        self.output_drained = False
 
     def _queue(self, value, output=False):
         frame = json.dumps(value, separators=(",", ":")).encode() + b"\n"
@@ -135,6 +136,8 @@ class Runtime:
                 self._display(b"\r\n[terminal: remote screen unavailable; local input remains available]\r\n")
             elif kind == "local-input-unknown":
                 self._display(b"\r\n[terminal: input delivery unknown; not retried]\r\n")
+            elif kind == "output-drained":
+                self.output_drained = True
             elif kind != "started":
                 raise ValueError("invalid terminal frame")
 
@@ -143,7 +146,9 @@ class Runtime:
         # Linux session membership, not caller-supplied PIDs. Include job-control
         # descendants even after the session leader exits. Never inspect env.
         if self.child:
-            for entry in Path("/proc").iterdir():
+            try: entries = list(Path("/proc").iterdir())
+            except OSError: entries = []
+            for entry in entries:
                 if not entry.name.isdigit():
                     continue
                 try:
@@ -158,7 +163,7 @@ class Runtime:
         for group in self._groups():
             if group and group != os.getpgrp():
                 try: os.killpg(group, sig)
-                except ProcessLookupError: pass
+                except OSError: pass
 
     def run(self, argv):
         if not argv or not os.path.isabs(argv[0]) or not os.isatty(0) or not os.isatty(1):
@@ -218,25 +223,34 @@ class Runtime:
             selector.register(self.master, selectors.EVENT_READ, "pty")
             selector.register(self.channel, selectors.EVENT_READ, "broker")
             deadline = None
+            pty_eof = False
+            output_ended = False
             while True:
-                waited, status = os.waitpid(self.child, os.WNOHANG)
-                if waited:
-                    self.child_status = status
-                    result = os.waitstatus_to_exitcode(status)
+                if self.child_status is None:
+                    waited, status = os.waitpid(self.child, os.WNOHANG)
+                    if waited:
+                        self.child_status = status
+                        result = os.waitstatus_to_exitcode(status)
+                        deadline = deadline or time.monotonic() + 1
+                        self._queue({"type": "child-exit"})
+                if self.child_status is not None and pty_eof and not output_ended:
+                    output_ended = True
+                    self._queue({"type": "output-end"})
+                if self.output_drained and not self.display and not self.outgoing:
                     break
                 if self.broker.poll() is not None:
                     break
                 if self.pending_signal:
                     self._signal_groups(self.pending_signal)
                     self.pending_signal = None
-                    deadline = time.monotonic() + 1
+                    deadline = deadline or time.monotonic() + 1
                 if deadline and time.monotonic() >= deadline:
                     break
-                if self.window_changed:
+                if self.window_changed and self.child_status is None:
                     self.window_changed = False
                     columns, rows = self._size()
                     self._queue({"type": "local-resize", "columns": columns, "rows": rows})
-                for fd, enabled, event, name in ((0, len(self.outgoing) < 65536, selectors.EVENT_READ, "input"),
+                for fd, enabled, event, name in ((0, self.child_status is None and not deadline and len(self.outgoing) < 65536, selectors.EVENT_READ, "input"),
                                                   (1, bool(self.display), selectors.EVENT_WRITE, "display")):
                     try: selector.unregister(fd)
                     except KeyError: pass
@@ -253,6 +267,9 @@ class Runtime:
                             self._display(data)
                             if self.screen_enabled:
                                 self._queue({"type": "output", "data": base64.b64encode(data).decode()}, output=True)
+                        else:
+                            pty_eof = True
+                            selector.unregister(self.master)
                     elif key.data == "input":
                         try: data = os.read(0, 8192)
                         except BlockingIOError: continue
@@ -271,26 +288,44 @@ class Runtime:
                             if not data: return 1
                             self._frames(data)
         finally:
-            # Restore local terminal even on partial startup or broker failure.
-            termios.tcsetattr(0, termios.TCSANOW, saved)
-            for fd, flag in flags.items(): fcntl.fcntl(fd, fcntl.F_SETFL, flag)
-            for sig, handler in handlers.items(): signal.signal(sig, handler)
+            # Hung-up TTY restoration (EIO) must never bypass owned cleanup.
+            # Each best-effort stage is independent; no exception text is logged.
+            try: termios.tcsetattr(0, termios.TCSANOW, saved)
+            except (OSError, termios.error): pass
+            for fd, flag in flags.items():
+                try: fcntl.fcntl(fd, fcntl.F_SETFL, flag)
+                except OSError: pass
+            for sig, handler in handlers.items():
+                try: signal.signal(sig, handler)
+                except (OSError, ValueError): pass
             selector.close()
             self._signal_groups(signal.SIGTERM)
             if self.broker and self.broker.poll() is None:
-                self.broker.terminate()
+                try: self.broker.terminate()
+                except ProcessLookupError: pass
                 try: self.broker.wait(1)
                 except subprocess.TimeoutExpired:
-                    self.broker.kill()
-                    self.broker.wait()
+                    try: self.broker.kill()
+                    except ProcessLookupError: pass
+                    try: self.broker.wait(1)
+                    except subprocess.TimeoutExpired: pass
             self._signal_groups(signal.SIGKILL)
             if self.child and self.child_status is None:
-                try: os.waitpid(self.child, 0)
-                except ChildProcessError: pass
-            if self.channel: self.channel.close()
-            if peer: peer.close()
-            if self.master is not None: os.close(self.master)
-            if slave is not None: os.close(slave)
+                reap_deadline = time.monotonic() + 1
+                while time.monotonic() < reap_deadline:
+                    try:
+                        waited, _ = os.waitpid(self.child, os.WNOHANG)
+                        if waited: break
+                    except ChildProcessError: break
+                    time.sleep(.01)
+            for endpoint in (self.channel, peer):
+                if endpoint:
+                    try: endpoint.close()
+                    except OSError: pass
+            for fd in (self.master, slave):
+                if fd is not None:
+                    try: os.close(fd)
+                    except OSError: pass
         return result if result >= 0 else 128 - result
 
 

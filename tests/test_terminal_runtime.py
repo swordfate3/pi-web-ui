@@ -1,6 +1,7 @@
 """Real PTY + private Unix adapter tests. No personal Pi state or credentials."""
 import base64
 import contextlib
+import fcntl
 import importlib.util
 import json
 import os
@@ -11,6 +12,7 @@ import select
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import tempfile
 import termios
@@ -95,10 +97,10 @@ class Adapter:
 
 
 class Peer:
-    def __init__(self, path):
-        self.sock = socket.socket(socket.AF_UNIX)
+    def __init__(self, path=None, connected=None):
+        self.sock = connected or socket.socket(socket.AF_UNIX)
         self.sock.settimeout(3)
-        self.sock.connect(str(path))
+        if connected is None: self.sock.connect(str(path))
         self.buffer = b""
         self.frames = []
         self.sequence = 0
@@ -118,9 +120,15 @@ class Peer:
     def request(self, kind, **fields):
         self.request_id += 1
         self.send({"id": self.request_id, "type": kind, **fields})
+        return self.response(self.request_id)
+
+    def response(self, request_id):
+        for index, value in enumerate(self.frames):
+            if value.get("type") == "response" and value["id"] == request_id:
+                return self.frames.pop(index)["result"]
         while True:
             value = self.receive()
-            if value.get("type") == "response" and value["id"] == self.request_id:
+            if value.get("type") == "response" and value["id"] == request_id:
                 return value["result"]
             self.frames.append(value)
 
@@ -199,9 +207,72 @@ class Running:
             self.process.kill()
             self.process.wait()
         if self.adapter: self.adapter.close()
-        os.close(self.master)
+        if self.master is not None: os.close(self.master)
         os.close(self.slave)
         self.tmp.cleanup()
+
+
+def process_state(pid):
+    try: return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+    except FileNotFoundError: return None
+
+
+def wait_condition(predicate, message, timeout=3):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate(): return
+        time.sleep(.01)
+    raise AssertionError(message)
+
+
+class BrokerRelay(Running):
+    """Trusted test parent with controllable real relay ACK timing, not production hooks.
+
+    Runs the real bundled broker, real PTY child and real private adapter. The
+    test parent performs actual ioctls before acknowledging them over socketpair.
+    """
+    def __init__(self, stage):
+        self.tmp = tempfile.TemporaryDirectory(prefix="terminal-relay-review-")
+        self.dir = Path(self.tmp.name)
+        self.adapter = Adapter(self.dir / "adapter.sock")
+        self.master, self.slave = pty.openpty()
+        self.peers = []
+        self.output = b""
+        self.child = subprocess.Popen(
+            ["/usr/bin/python3", "-I", "-u", "-c",
+             "import os,fcntl,termios;os.setsid();fcntl.ioctl(0,termios.TIOCSCTTY,0);" + CHILD],
+            stdin=self.slave, stdout=self.slave, stderr=subprocess.DEVNULL, cwd=self.dir,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(self.dir)},
+        )
+        os.set_blocking(self.master, False)
+        parent, child = socket.socketpair()
+        self.relay = Peer(connected=parent)
+        self.process = subprocess.Popen(
+            ["/usr/local/bin/node", str(stage / "broker.cjs"), str(self.master), str(child.fileno())],
+            pass_fds=(self.master, child.fileno()), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"},
+        )
+        child.close()
+        self.relay.send({"type": "start", "directory": str(self.dir), "runId": RUN,
+                         "childToken": TOKEN, "terminalEpoch": "e" * 32,
+                         "owner": "none", "columns": 120, "rows": 40})
+        if self.relay.receive().get("type") != "started": raise AssertionError("broker startup failed")
+        self.until(b"PID:")
+
+    def acknowledge(self, operation, columns=None, rows=None):
+        columns = operation["columns"] if columns is None else columns
+        rows = operation["rows"] if rows is None else rows
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+        self.relay.send({"type": "resized", "id": operation["id"], "columns": columns, "rows": rows})
+
+    def close(self):
+        self.relay.close()
+        try:
+            super().close()
+        finally:
+            if self.child.poll() is None: self.child.kill()
+            self.child.wait(3)
 
 
 class RuntimeTests(unittest.TestCase):
@@ -274,6 +345,203 @@ class RuntimeTests(unittest.TestCase):
             runtime.process.wait(5)
             self.assertEqual(termios.tcgetattr(runtime.slave), runtime.before)
             self.assertFalse((runtime.dir / "terminal.sock").exists())
+
+    def test_review_resize_reacquire_cannot_ack_old_lease_as_success(self):
+        with self.runtime() as runtime:
+            peer = runtime.connect()
+            runtime.handoff()
+            lease = peer.request("acquire")
+            runtime.process.send_signal(signal.SIGSTOP)
+            try:
+                wait_condition(lambda: process_state(runtime.process.pid) == "T", "supervisor did not pause")
+                peer.request_id += 1
+                old_id = peer.request_id
+                peer.send({"id": old_id, "type": "resize", "leaseId": lease["leaseId"], "columns": 81, "rows": 29})
+                self.assertTrue(peer.request("release")["ok"])
+                successor = peer.request("acquire")
+                self.assertTrue(successor["ok"])
+                self.assertTrue(successor["leaseId"] != lease["leaseId"], "must reacquire a different lease")
+            finally: runtime.process.send_signal(signal.SIGCONT)
+            self.assertFalse(peer.response(old_id)["ok"], "old ioctl cannot gain a successor lease's successful ACK")
+
+    def test_review_resize_late_ack_cannot_match_other_peer_request_id(self):
+        runtime = BrokerRelay(self.stage)
+        try:
+            old = runtime.connect()
+            new = runtime.connect()
+            lease = old.request("acquire")
+            old.request_id += 1
+            old.send({"id": old.request_id, "type": "resize", "leaseId": lease["leaseId"], "columns": 83, "rows": 30})
+            operation = runtime.relay.receive()
+            self.assertEqual(operation["type"], "resize")
+            self.assertFalse(old.response(old.request_id)["ok"], "unacknowledged ioctl must time out")
+            self.assertTrue(old.request("release")["ok"])
+            successor = new.request("acquire")
+            new.request_id += 1
+            self.assertEqual(new.request_id, 2)  # both connections independently reuse request ID 2
+            new.send({"id": new.request_id, "type": "resize", "leaseId": successor["leaseId"], "columns": 83, "rows": 30})
+            current = runtime.relay.receive()
+            runtime.acknowledge(operation)  # real old ioctl, deliberately late; same dimensions too
+            runtime.relay.send({"type": "local-yield"})
+            self.assertEqual(runtime.relay.receive()["type"], "owner")  # processed after the stale ACK
+            new.sock.settimeout(.05)
+            try:
+                while True:
+                    frame = new.receive()
+                    self.assertFalse(frame.get("type") == "response" and frame.get("id") == new.request_id,
+                                     "stale relay ACK completed successor's request")
+            except socket.timeout: pass
+            finally: new.sock.settimeout(3)
+            runtime.acknowledge(current)
+            self.assertTrue(new.response(new.request_id)["ok"])
+            self.assertNotEqual(operation["id"], current["id"], "relay correlation must be broker-global")
+        finally: runtime.close()
+
+    def test_review_resize_ack_dimensions_must_match_dispatched_ioctl(self):
+        runtime = BrokerRelay(self.stage)
+        try:
+            peer = runtime.connect()
+            lease = peer.request("acquire")
+            peer.request_id += 1
+            peer.send({"id": peer.request_id, "type": "resize", "leaseId": lease["leaseId"], "columns": 84, "rows": 30})
+            operation = runtime.relay.receive()
+            runtime.acknowledge(operation, columns=85)
+            self.assertFalse(peer.response(peer.request_id)["ok"], "wrong-sized ioctl must not satisfy request")
+        finally: runtime.close()
+
+    def test_review_normal_exit_drains_final_output_before_teardown(self):
+        child = CHILD.replace('out("PID:',
+            'signal.signal(signal.SIGUSR1, lambda *_: (out("FINAL-OUTPUT-MARKER"), exit(0)))\nout("PID:')
+        with self.runtime(child=child) as runtime:
+            peer = runtime.connect("read")
+            pid = int(re.search(rb"PID:(\d+)", runtime.output).group(1))
+            runtime.process.send_signal(signal.SIGSTOP)
+            try:
+                wait_condition(lambda: process_state(runtime.process.pid) == "T", "supervisor did not pause")
+                os.kill(pid, signal.SIGUSR1)
+                wait_condition(lambda: process_state(pid) == "Z", "child did not exit before drain")
+            finally: runtime.process.send_signal(signal.SIGCONT)
+            runtime.until(b"FINAL-OUTPUT-MARKER")
+            runtime.process.wait(4)
+            self.assertEqual(runtime.process.returncode, 0)
+            screen = bytearray()
+            final_complete = False
+            try:
+                while True:
+                    frame = peer.receive()
+                    if frame["type"] == "screen-start": screen.clear()
+                    if frame["type"] == "screen-chunk": screen.extend(base64.b64decode(frame["data"]))
+                    if frame["type"] == "screen-end" and b"FINAL-OUTPUT-MARKER" in screen:
+                        final_complete = True
+            except (EOFError, ConnectionResetError): pass
+            self.assertTrue(final_complete, "complete final parser snapshot must reach a reading peer")
+
+    def test_review_final_drain_deadline_bounds_descendant_and_blocked_display(self):
+        for mode in ("held-slave", "blocked-display"):
+            child = r'''
+import os,signal
+def finish(*_):
+    if MODE == "held-slave":
+        ready, notify = os.pipe()
+        descendant = os.fork()
+        if descendant == 0:
+            os.close(ready)
+            os.setpgid(0,0)
+            signal.signal(signal.SIGHUP,signal.SIG_IGN)
+            signal.signal(signal.SIGTERM,signal.SIG_IGN)
+            os.write(notify,b"1")
+            os.close(notify)
+            while True: signal.pause()
+        os.close(notify)
+        os.read(ready,1)
+        os.close(ready)
+        os.write(1,("DESC:%d\n" % descendant).encode())
+    else:
+        os.write(1,b"x"*100000)
+    os._exit(7)
+signal.signal(signal.SIGUSR1,finish)
+os.write(1,("PID:%d:%d:%d\n" % (os.getpid(),os.getsid(0),os.tcgetpgrp(0))).encode())
+while True: signal.pause()
+'''.replace("MODE", repr(mode))
+            with self.subTest(mode=mode), self.runtime(child=child) as runtime:
+                pid = int(re.search(rb"PID:(\d+)", runtime.output).group(1))
+                os.kill(pid, signal.SIGUSR1)
+                descendant = None
+                if mode == "held-slave":
+                    runtime.until(b"DESC:")
+                    descendant = int(re.search(rb"DESC:(\d+)", runtime.output).group(1))
+                # Deliberately do not read local display: completion must be bounded.
+                runtime.process.wait(4)
+                self.assertEqual(runtime.process.returncode, 7)
+                self.assertEqual(termios.tcgetattr(runtime.slave), runtime.before)
+                self.assertFalse((runtime.dir / "terminal.sock").exists())
+                if descendant:
+                    wait_condition(lambda: process_state(descendant) is None, "final drain leaked descendant")
+
+    def test_review_child_exit_fences_input_while_final_screen_drains(self):
+        runtime = BrokerRelay(self.stage)
+        try:
+            peer = runtime.connect()
+            lease = peer.request("acquire")
+            runtime.relay.send({"type": "child-exit"})
+            runtime.relay.send({"type": "output", "data": base64.b64encode(b"final").decode()})
+            runtime.relay.send({"type": "output-end"})
+            self.assertEqual(runtime.relay.receive()["type"], "output-drained")
+            self.assertFalse(runtime.input(peer, lease, "forbidden")["ok"])
+            self.assertFalse(peer.request("acquire")["ok"])
+            runtime.relay.send({"type": "local-input", "data": base64.b64encode(b"forbidden").decode()})
+            self.assertFalse(select.select([runtime.master], [], [], .1)[0], "child received post-exit input")
+        finally: runtime.close()
+
+    def test_review_hungup_local_tty_cannot_skip_group_and_broker_cleanup(self):
+        child = r'''
+import os,signal
+signal.signal(signal.SIGHUP,signal.SIG_IGN)
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+descendant=os.fork()
+if descendant == 0:
+    os.setpgid(0,0)
+    while True: signal.pause()
+os.write(1,("DESC:%d\nPID:%d:%d:%d\n" % (descendant,os.getpid(),os.getsid(0),os.tcgetpgrp(0))).encode())
+while True: signal.pause()
+'''
+        with self.runtime(child=child) as runtime:
+            runtime.until(b"DESC:")
+            pid = int(re.search(rb"PID:(\d+)", runtime.output).group(1))
+            descendant = int(re.search(rb"DESC:(\d+)", runtime.output).group(1))
+            children = Path(f"/proc/{runtime.process.pid}/task/{runtime.process.pid}/children").read_text().split()
+            owned = {pid, descendant, *(int(value) for value in children)}
+            try:
+                os.close(runtime.master)
+                runtime.master = None
+                # Force a real hung-up-tty ioctl error, independent of EOF scheduling.
+                runtime.process.send_signal(signal.SIGWINCH)
+                runtime.process.wait(5)
+                wait_condition(lambda: all(process_state(value) is None for value in owned),
+                               "hung-up TTY restoration skipped owned process cleanup")
+                self.assertFalse((runtime.dir / "terminal.sock").exists(), "owned broker socket leaked")
+            finally:
+                # Independent test cleanup also contains the intentionally failing RED implementation.
+                for value in owned:
+                    if process_state(value) is not None:
+                        try: os.kill(value, signal.SIGKILL)
+                        except ProcessLookupError: pass
+
+    def test_review_hungup_eof_cannot_extend_shutdown_deadline(self):
+        child = CHILD.replace('signal.signal(signal.SIGTERM, lambda *_: (out("TERM"), exit(0)))',
+            'signal.signal(signal.SIGTERM, signal.SIG_IGN)\nsignal.signal(signal.SIGHUP, signal.SIG_IGN)')
+        with self.runtime(child=child) as runtime:
+            pid = int(re.search(rb"PID:(\d+)", runtime.output).group(1))
+            try:
+                os.close(runtime.master)
+                runtime.master = None
+                runtime.process.wait(4)
+                wait_condition(lambda: process_state(pid) is None, "EOF shutdown leaked child")
+                self.assertFalse((runtime.dir / "terminal.sock").exists())
+            finally:
+                if process_state(pid) is not None:
+                    try: os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError: pass
 
     def test_adapter_replacement_invalidates_lease_without_breaking_local_input(self):
         with self.runtime() as runtime:
@@ -421,12 +689,29 @@ while True:''')
             runtime.until(b"73616665")
 
     def test_parser_output_flood_does_not_block_local_relay(self):
-        child = CHILD.replace('out("PID:', 'os.write(1, b"x" * (4 * 1024 * 1024))\nout("PID:')
+        child = CHILD.replace('out("PID:', '''
+def flood(*_):
+    os.write(1, b"x" * (4 * 1024 * 1024))
+    out("FLOOD-DONE")
+signal.signal(signal.SIGUSR1, flood)
+out("PID:''')
         with self.runtime(child=child) as runtime:
+            pid = int(re.search(rb"PID:(\d+)", runtime.output).group(1))
+            children = Path(f"/proc/{runtime.process.pid}/task/{runtime.process.pid}/children").read_text().split()
+            broker, = [int(value) for value in children if int(value) != pid]
+            # Force the bounded screen relay to fill, independent of parser/CPU speed.
+            # Resume only after the PTY has drained the flood; the disable notice then
+            # cannot itself disappear into the permitted local-display overflow.
+            os.kill(broker, signal.SIGSTOP)
+            try:
+                wait_condition(lambda: process_state(broker) == "T", "broker did not pause")
+                os.kill(pid, signal.SIGUSR1)
+                runtime.until(b"FLOOD-DONE")
+            finally: os.kill(broker, signal.SIGCONT)
+            runtime.until(b"remote screen unavailable")
             runtime.local(b"survives")
             runtime.until(b"7375727669766573")
             self.assertIsNone(runtime.process.poll())
-            runtime.until(b"remote screen unavailable")
             self.assertEqual(runtime.status()["error"], "terminal_backend_unavailable")
 
     def test_raw_local_interrupt_and_canonical_eof_reach_foreground_child(self):

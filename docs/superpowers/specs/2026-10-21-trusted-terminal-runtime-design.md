@@ -114,7 +114,7 @@ Hub 只挂 provider 的专用 IPC 卷与只读的专用凭据文件；Pi 不挂 
 - 只有当前 writer 可以 resize，范围 20..240 列、5..120 行并节流。reader 缩放、滚动不能改写 Pi 终端尺寸。
 - xterm 禁 stdin 自动回传、自动终端查询回写、OSC52、自动链接、下载、通知及动态标题覆盖可信身份。输入来自独立人工输入框与固定按键枚举，不使用 innerHTML。
 - 中文 IME 结束后显式发送；多行粘贴单独确认；首版无 TUI 鼠标协议，不承诺所有窄屏布局完美。
-- 日志只有身份、动作类别、字节计数和结果，不记录凭据或内容。provider、broker 的进程/CPU/内存及 Docker 日志均有上限；终端身份和租约过期记录有容量与清理规则。
+- 日志只有身份、动作类别、字节计数和结果，不记录凭据或内容。终端 profile 的 raw relay 会输出真实 TUI，因此必须显式使用 Docker `log-driver=none`，Gate 独立核验；不能把轮转后的终端正文日志当作合规。普通 profile 的日志不变。provider、broker 的进程/CPU/内存及非内容审计日志均有上限；终端身份和租约过期记录有容量与清理规则。
 - main 的历史 256KiB、详情 64KiB、浏览器历史 200 项/512KiB、Hub 8MiB、512 active grants、既有 WS FIFO/连接上限及 tombstone 规则保持不变。终端独立预算不能扩大聊天历史预算。
 
 ## 7. 启动、构建与迁移体验

@@ -21,6 +21,7 @@
 - Input 8KiB decoded UTF-8; output chunks 32KiB; per-peer queue 256KiB; parser backlog 1MiB; snapshot 1MiB; screen 240x120/1000 scrollback; two readers/one writer; fixed 30s lease.
 - Hub history 256KiB, detail 64KiB, browser history 200 items/512KiB, Hub persistent state 8MiB/512 active grants stay unchanged. All terminal persistent writes use `withStateWriter`.
 - No terminal content/keystroke/credential logging; no automatic input retry, reconnect control, ANSI response forwarding, OSC52 or arbitrary command/path/container.
+- Terminal-profile containers use explicit Docker log-driver none because raw TUI is relayed to stdout; Gate independently verifies inspect metadata. Ordinary-profile logging remains unchanged; count-only audit logs are bounded.
 - Source edits use apply_patch; external docker_files writes require sandbox approval. Preserve the existing untracked validation report and unrelated worktree.
 - User approved this spec and execution; continue through tasks without repeated product approval. Public deployment and shared-service interruption remain outside scope.
 

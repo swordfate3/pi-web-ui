@@ -1,7 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, realpathSync, unlinkSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { childTerminalBarrier } from "./terminal-barrier.ts";
 
 export type RuntimeSnapshot = {
   run_id: string;
@@ -65,6 +66,12 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
   const [runId, token, socketPath] = keys;
   if (!hex(runId, 32) || !hex(token, 64) || !socketPath || !path.isAbsolute(socketPath))
     throw new Error("Invalid managed runtime configuration");
+  const terminal = env.PI_RUNTIME_PROFILE === "web-terminal-v1";
+  const terminalEpoch = env.PI_RUNTIME_TERMINAL_EPOCH;
+  if ((terminal && !hex(terminalEpoch, 32)) || (!terminal && terminalEpoch))
+    throw new Error("Invalid terminal runtime configuration");
+  const barrier = terminal ? childTerminalBarrier() : undefined;
+  const adapterInstanceId = randomBytes(16).toString("hex");
   const parent = path.dirname(socketPath);
   const parentStat = lstatSync(parent);
   if (
@@ -79,7 +86,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
   let closed = false;
   let preparedAt = 0;
   let lease: NodeJS.Timeout | undefined;
-  const guard = stdinGuard();
+  const guard = terminal ? undefined : stdinGuard();
   const owner = Object.freeze({});
   const release = () => {
     if (prepared) guard?.release(owner, prepared);
@@ -111,7 +118,12 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
     const result = {
       ...value,
       busy:
-        value.busy || !guard || stdinGuard() !== guard || !guard.safe() || !auditedRuntimeVersions.has(value.version),
+        terminal ||
+        value.busy ||
+        !guard ||
+        stdinGuard() !== guard ||
+        !guard.safe() ||
+        !auditedRuntimeVersions.has(value.version),
     };
     // Validate the complete outbound envelope before acquiring a barrier.
     if (Buffer.byteLength(`${JSON.stringify({ ok: true, result })}\n`) > 16384) throw new Error("Runtime unavailable");
@@ -142,15 +154,51 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
       if (end < 0) return;
       replied = true;
       try {
-        const request = JSON.parse(data.subarray(0, end).toString("utf8"));
+        const request = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data.subarray(0, end)));
         if (!request || typeof request !== "object" || Array.isArray(request) || !equal(request.token, token))
           throw new Error();
         // A prepared lease cannot strand the user's terminal forever if its controller vanished.
         if (prepared && Date.now() - preparedAt > 150_000) release();
         let result: unknown;
-        if (request.action === "snapshot" && Object.keys(request).every((key) => ["action", "token"].includes(key))) {
+        if (request.action === "terminal-state" || request.action === "terminal-prepare") {
+          if (!barrier || Object.keys(request).sort().join(",") !== "action,expected,token") throw new Error();
+          const expected = request.expected;
+          if (!expected || typeof expected !== "object" || Array.isArray(expected)) throw new Error();
+          const keys = Object.keys(expected).sort().join(",");
+          const discovery = request.action === "terminal-state" && keys === "runId,terminalEpoch";
+          if (!discovery && keys !== "runId,runtimeId,sessionId,terminalEpoch") throw new Error();
+          // Deliberately not fresh(): native turns/dialogs do not need to be idle,
+          // restart-audited, saved, or qualified by the legacy stdin guard.
+          const current = snapshot();
+          if (
+            !current ||
+            current.run_id !== runId ||
+            expected.runId !== runId ||
+            expected.terminalEpoch !== terminalEpoch ||
+            !identifier(current.runtime_id) ||
+            !identifier(current.session_id) ||
+            /[\uD800-\uDFFF]/u.test(current.runtime_id + current.session_id) ||
+            (!discovery && (expected.runtimeId !== current.runtime_id || expected.sessionId !== current.session_id))
+          )
+            throw new Error();
+          // Closing admission is irreversible even if admitted/unknown work prevents
+          // a grant. A failed preparation never fabricates completion or waits on idle.
+          if (request.action === "terminal-prepare" && !barrier.prepare()) throw new Error();
+          result = {
+            runId,
+            runtimeId: current.runtime_id,
+            sessionId: current.session_id,
+            terminalEpoch,
+            adapterInstanceId,
+            latched: barrier.latched,
+          };
+        } else if (
+          request.action === "snapshot" &&
+          Object.keys(request).every((key) => ["action", "token"].includes(key))
+        ) {
           result = fresh();
         } else if (request.action === "prepare") {
+          if (terminal) throw new Error();
           if (Object.keys(request).some((key) => !["action", "token", "operation_id", "expected"].includes(key)))
             throw new Error();
           const value = fresh();

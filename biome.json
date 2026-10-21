@@ -75,6 +75,8 @@
       "tests/version-status.test.ts",
       "tests/pi-client-managed-restart.test.ts",
       "tests/runtime-control.test.ts",
+      "tests/terminal-barrier*.test.ts",
+      "tests/fixtures/terminal-barrier-extension.ts",
       "tests/runtime-guard-process.test.ts",
       "tests/remote-access-draft-state.test.ts",
       "tsconfig.json",

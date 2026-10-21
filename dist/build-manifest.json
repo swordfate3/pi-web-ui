@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "source": {
-    "count": 183,
-    "sha256": "4d2d7ad7213608ff287b37cad834863288b8a1018c9728c5f6aba973c391d920",
+    "count": 184,
+    "sha256": "9e5489a244ba147e1b6c22922026fcd4a3c88f5ff6ec3669676c7f5c6ce94423",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -50,7 +50,7 @@
       },
       {
         "path": "extensions/mirror-server.ts",
-        "sha256": "952aca494ee3f46e97f1812523fc8e41b8238e9e9186539346f0fbe35af0733c"
+        "sha256": "eba8c1bea8288535034b42b54eb3934534fe4e59332e9ba74fe3490ad42c048a"
       },
       {
         "path": "extensions/remote-access/gateway.py",
@@ -62,7 +62,7 @@
       },
       {
         "path": "extensions/runtime-control.ts",
-        "sha256": "ce4f6acec9485e50dfb31dca7ace0474d360a828eff65ffe8444c71dc794bd52"
+        "sha256": "139fb74e52e405e69a0231e669e3cc009f61d8341a692b4ea78f07eb70a82110"
       },
       {
         "path": "extensions/runtime-metadata.ts",
@@ -87,6 +87,10 @@
       {
         "path": "extensions/software-metadata.ts",
         "sha256": "5aa12f2d5a29ebeedeb783ea4d20bdb8533a7b85015fae3ae31dba8e81f8c438"
+      },
+      {
+        "path": "extensions/terminal-barrier.ts",
+        "sha256": "035cfff603f05a212ac06bb589fbc67514b99ca64def1f7a7bb49ebfe67bff34"
       },
       {
         "path": "extensions/terminal-prompt.ts",
@@ -230,7 +234,7 @@
       },
       {
         "path": "scripts/web-dist.mjs",
-        "sha256": "959f2bfcb39f01a2467d822c3a431f522e950e7b685b114276e8dfe5e204a934"
+        "sha256": "66bbcdb175ec611260d95b1bdf3fc49246980dd7d575f8e0ca734283f021890b"
       },
       {
         "path": "src/web/components/ai-elements/code-block.tsx",
@@ -740,7 +744,7 @@
   },
   "outputs": {
     "count": 735,
-    "sha256": "655ddb6d1690fb1f79b984d48b64270e2d30ef58257902734af2e0cb3f8be54b",
+    "sha256": "c8c34c1368383db4c6f84e9a328021c2b9248bfe33672539084c8262ec67f4e8",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3644,7 +3648,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "9489cd5628c7ff3e1fe890e8adf21ea88e6415db98ef889bef1ca3d24e47b309"
+        "sha256": "fb5d4d8ac96fdeab2c7ff7bb063a4be4b2514b2ba3e02c4301b3907b6603fc4c"
       },
       {
         "path": "icons/pi-web-ui-192.png",

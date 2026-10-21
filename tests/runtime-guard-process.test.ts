@@ -14,19 +14,21 @@ for (const flag of [undefined, false, true]) {
         import vm from 'node:vm';
         import ts from 'typescript';
         import {taintRuntimeInput} from './extensions/runtime-control.ts';
+        import {terminalReadOnly} from './extensions/terminal-barrier.ts';
         const file=ts.createSourceFile('mirror-server.ts',readFileSync('./extensions/mirror-server.ts','utf8'),ts.ScriptTarget.Latest,true);
-        let declaration;
+        const declarations=[];
         function visit(node) {
-          if(ts.isFunctionDeclaration(node)&&node.name?.text==='handleRequest') declaration=node;
+          if(ts.isFunctionDeclaration(node)&&['handleRequest','sendBrowserMessage','assertBrowserWritable'].includes(node.name?.text)) declarations.push(node);
           ts.forEachChild(node,visit);
         }
-        visit(file); assert.ok(declaration);
+        visit(file); assert.equal(declarations.length,3);
         const guard=globalThis[Symbol.for('pi.runtime.stdin-guard.v1')];
         let release, finished=false, safeAtDispatch, dispatched;
         const held=new Promise(resolve=>release=resolve);
         const responses=[];
         const context=vm.createContext({
           latestCtx:{isIdle:()=>${idle}}, runtimeStopping:false, runtimeControl:undefined,
+          runtimeActive:true, terminalBarrier:undefined, terminalReadOnly,
           revisionAttempt:false, revisionDispatchUnknown:false, activeBrowserMutations:0,
           sessionReplacementPending:false, internalCommands:new Set(), taintRuntimeInput,
           sendTo:(_ws,response)=>responses.push(response),
@@ -39,7 +41,7 @@ for (const flag of [undefined, false, true]) {
             }
           }
         });
-        const js=ts.transpileModule(declaration.getText(file),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+        const js=ts.transpileModule(declarations.map(node=>node.getText(file)).join(';'),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
         vm.runInContext(js,context);
         await context.handleRequest({}, {id:'test',method:'prompt',params:${JSON.stringify({ message: "/guard-hold", executePiCommand: flag })}});
         try {

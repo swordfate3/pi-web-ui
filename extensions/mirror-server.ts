@@ -42,6 +42,7 @@ import {
 import { createSessionRegistration, guardSessionRequest, type SessionRegistration } from "./session-registration.ts";
 import { getSessionUsageStatistics } from "./session-usage.ts";
 import { captureSoftwareMetadata } from "./software-metadata.ts";
+import { childTerminalBarrier, terminalReadOnly } from "./terminal-barrier.ts";
 import { TERMINAL_UI_REQUIRED, TerminalPromptState } from "./terminal-prompt.ts";
 import { serveWorkspaceUpload, WorkspaceUploads } from "./workspace-uploads.ts";
 
@@ -379,6 +380,7 @@ export default function (pi: ExtensionAPI) {
   // Keep pre-existing async browser mutations ineligible to race revision navigation.
   let activeBrowserMutations = 0;
   let activeHttpMutations = 0;
+  const terminalBarrier = process.env.PI_RUNTIME_PROFILE === "web-terminal-v1" ? childTerminalBarrier() : undefined;
   let runtimeControl: Awaited<ReturnType<typeof startRuntimeControl>>;
   let runtimeStopping = false;
   // Protocol: replacement acknowledgements mean accepted, never completed.
@@ -413,6 +415,45 @@ export default function (pi: ExtensionAPI) {
   const fileDownloads = new WorkspaceDownloads();
   const workspaceUploads = new WorkspaceUploads();
   let activeExport: { controller: AbortController; done: Promise<unknown> } | null = null;
+
+  function assertBrowserWritable(scope?: ReturnType<typeof sessionScope>) {
+    terminalBarrier?.assertWritable();
+    if (runtimeStopping || !runtimeActive || (scope && !scopeIsCurrent(scope)))
+      throw new Error("Session changed. Nothing was sent.");
+  }
+
+  function sendBrowserMessage(...args: Parameters<ExtensionAPI["sendUserMessage"]>) {
+    assertBrowserWritable();
+    // The SDK discards the underlying promise, including command dispatch before
+    // input hooks. Neither the response ACK nor later agent events prove completion.
+    terminalBarrier?.markUnknown();
+    pi.sendUserMessage(...args);
+  }
+
+  function compactFromBrowser(customInstructions?: string) {
+    assertBrowserWritable();
+    if (!latestCtx) throw new Error("No Pi context available");
+    const scope = sessionScope(latestCtx);
+    const finish = terminalBarrier?.enter();
+    const settled = (payload: { summary?: unknown }) => {
+      finish?.();
+      if (!scopeIsCurrent(scope)) return;
+      // Only plain identity is retained; never restore the captured compact ctx.
+      broadcast({ type: "event", event: "auto_compaction_end", payload });
+    };
+    broadcast({ type: "event", event: "auto_compaction_start", payload: {} });
+    try {
+      latestCtx.compact({
+        customInstructions,
+        onComplete: (result) => settled({ summary: result?.summary }),
+        onError: (error) => settled({ summary: `Error: ${error.message}` }),
+      });
+    } catch (error) {
+      terminalBarrier?.markUnknown();
+      finish?.();
+      throw error;
+    }
+  }
 
   const runtimeMetadata = () =>
     runtimeControl && latestCtx && runtimeActive
@@ -587,6 +628,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function acceptSessionAction(command: string) {
+    assertBrowserWritable();
     sessionReplacementPending = true;
     const [invocation, ...args] = command.trim().split(/\s+/);
     pendingSessionCommand = invocation.slice(1);
@@ -597,14 +639,20 @@ export default function (pi: ExtensionAPI) {
     // extension_error, NOT a public pi.on event. Bound the pre-handler lock even
     // when dispatch fails before a command context can be supplied.
     dispatchTimer = setTimeout(() => {
-      if (runtimeActive && lifecycleEpoch === epoch && pendingDispatchId === dispatchId && sessionReplacementPending)
+      if (
+        !terminalBarrier?.blocked &&
+        runtimeActive &&
+        lifecycleEpoch === epoch &&
+        pendingDispatchId === dispatchId &&
+        sessionReplacementPending
+      )
         reportSessionCommandError("Pi could not dispatch the session action. Try again.");
     }, 10_000);
     dispatchTimer.unref();
     try {
       // Fence a delayed dispatch too: an expired command cannot execute under
       // the lock of a later request for the same operation.
-      pi.sendUserMessage(`${invocation} ${dispatchId} ${args.join(" ")}`.trimEnd(), { expandPromptTemplates: true });
+      sendBrowserMessage(`${invocation} ${dispatchId} ${args.join(" ")}`.trimEnd(), { expandPromptTemplates: true });
     } catch {
       clearSessionAction();
       throw new Error("Pi could not dispatch the session action. Try again.");
@@ -1040,6 +1088,7 @@ export default function (pi: ExtensionAPI) {
       handler: async (args, commandCtx) => {
         const [dispatchId, ...commandArgs] = args.trim().split(/\s+/);
         if (
+          terminalBarrier?.blocked ||
           !runtimeActive ||
           pendingSessionCommand !== name ||
           pendingDispatchId !== dispatchId ||
@@ -1049,6 +1098,9 @@ export default function (pi: ExtensionAPI) {
         if (dispatchTimer) clearTimeout(dispatchTimer);
         dispatchTimer = null;
         const epoch = lifecycleEpoch;
+        const finish = terminalBarrier?.enter();
+        latestCtx = commandCtx;
+        latestExecuteCtx = commandCtx;
         try {
           await command.handler(commandArgs.join(" "), commandCtx);
         } catch {
@@ -1057,6 +1109,7 @@ export default function (pi: ExtensionAPI) {
           if (runtimeActive && epoch === lifecycleEpoch && pendingDispatchId === dispatchId)
             reportSessionCommandError("Pi could not complete the session action. Try again.");
         } finally {
+          finish?.();
           // Success replaces/disposes this runtime. Do not consult commandCtx/pi.
           if (
             runtimeActive &&
@@ -1154,9 +1207,10 @@ export default function (pi: ExtensionAPI) {
         // Re-list through the public API at execution time: a selection is not
         // authority to switch to a file that has since moved or changed project.
         const sessions = await SessionManager.list(selection.cwd, selection.sessionDir);
-        if (!scopeIsCurrent(selection)) throw new Error("Session changed. Reopen the session picker.");
+        assertBrowserWritable(selection);
+        if (!latestExecuteCtx) throw new Error("Command context changed. Run /webui again.");
         // The asynchronous disk scan can overlap terminal input or another client.
-        if (!commandCtx.isIdle() || commandCtx.hasPendingMessages())
+        if (!latestExecuteCtx.isIdle() || latestExecuteCtx.hasPendingMessages())
           throw new Error("Wait for the current Pi turn and queued messages to finish");
         const target = sessions.find(
           (session) =>
@@ -1194,7 +1248,7 @@ export default function (pi: ExtensionAPI) {
           path.resolve(header.cwd) !== selection.cwd
         )
           throw new Error("Saved session project changed");
-        const result = await commandCtx.switchSession(target.path);
+        const result = await latestExecuteCtx.switchSession(target.path);
         if (result.cancelled) reportSessionCommandError("Resuming the session was cancelled.");
         // Success is confirmed by the new runtime's state_sync, not this ctx.
       } catch (err) {
@@ -1683,7 +1737,7 @@ export default function (pi: ExtensionAPI) {
         if (epoch === lifecycleEpoch && !revisionAttempt) sessionReplacementPending = false;
       }, 8_000);
       revisionDispatchTimer.unref();
-      pi.sendUserMessage(content, { expandPromptTemplates: false });
+      sendBrowserMessage(content, { expandPromptTemplates: false });
       return { dispatched: true, sessionId: params.sessionId, runtimeId, userEntryId: original.userEntryId };
     } catch {
       if (revisionDispatchTimer && epoch === lifecycleEpoch) {
@@ -1820,10 +1874,12 @@ export default function (pi: ExtensionAPI) {
     });
 
     let ownsMutation = false;
+    let finishTerminalMutation: (() => void) | undefined;
     const mutates =
       !request.method.startsWith("get_") &&
       !["abort", "health", "sync_request", "extension_ui_response"].includes(request.method);
     try {
+      if (!terminalReadOnly(request.method)) finishTerminalMutation = terminalBarrier?.enter();
       if (
         (runtimeStopping || runtimeControl?.prepared) &&
         (mutates || request.method === "abort" || request.method === "extension_ui_response")
@@ -1868,6 +1924,7 @@ export default function (pi: ExtensionAPI) {
               const text = typeof params.message === "string" ? params.message : "";
               const message = `${text}\n\nUploaded workspace files (saved, not yet analyzed):\n${paths.map((file) => `- ${JSON.stringify(file)}`).join("\n")}`;
               const checkReady = () => {
+                assertBrowserWritable(scope);
                 if (!scopeIsCurrent(scope) || sessionReplacementPending || !latestCtx)
                   throw new Error("Session changed. Select the files again.");
                 // Pi 1.1.0 isIdle includes manual/automatic compaction. Never
@@ -1894,7 +1951,7 @@ export default function (pi: ExtensionAPI) {
                 },
                 () => {
                   checkReady();
-                  pi.sendUserMessage(message, { expandPromptTemplates: false });
+                  sendBrowserMessage(message, { expandPromptTemplates: false });
                 },
               );
               sendTo(ws, success());
@@ -1918,7 +1975,7 @@ export default function (pi: ExtensionAPI) {
               sendTo(ws, error(`Unknown Pi command: /${commandName}`));
               break;
             }
-            pi.sendUserMessage(message, { expandPromptTemplates: true });
+            sendBrowserMessage(message, { expandPromptTemplates: true });
             sendTo(ws, success({ command: commandName, source: "pi" }));
             break;
           }
@@ -1998,19 +2055,7 @@ export default function (pi: ExtensionAPI) {
               sendTo(ws, error("No Pi context available"));
               break;
             }
-            const compactScope = sessionScope(latestCtx);
-            const compactCtx = latestCtx;
-            const finishCompact = (payload: { summary?: unknown }) => {
-              if (!scopeIsCurrent(compactScope)) return;
-              latestCtx = compactCtx;
-              broadcast({ type: "event", event: "auto_compaction_end", payload });
-            };
-            broadcast({ type: "event", event: "auto_compaction_start", payload: {} });
-            compactCtx.compact({
-              customInstructions: commandArgs || undefined,
-              onComplete: (result: { summary?: unknown }) => finishCompact({ summary: result?.summary }),
-              onError: (err: Error) => finishCompact({ summary: `Error: ${err.message}` }),
-            });
+            compactFromBrowser(commandArgs || undefined);
             sendTo(ws, success({ command: "compact" }));
             break;
           }
@@ -2044,7 +2089,7 @@ export default function (pi: ExtensionAPI) {
           const commandContext = latestCtx;
           if (commandContext && !commandContext.isIdle()) {
             const behavior = typeof params.streamingBehavior === "string" ? params.streamingBehavior : "steer";
-            pi.sendUserMessage(message, {
+            sendBrowserMessage(message, {
               deliverAs: behavior === "followUp" ? "followUp" : "steer",
               expandPromptTemplates: images.length === 0,
             });
@@ -2064,11 +2109,11 @@ export default function (pi: ExtensionAPI) {
                   | "image/webp";
                 content.push({ type: "image", data, mimeType });
               }
-              pi.sendUserMessage(content.some((block) => block.type === "image") ? content : message, {
+              sendBrowserMessage(content.some((block) => block.type === "image") ? content : message, {
                 expandPromptTemplates: false,
               });
             } else {
-              pi.sendUserMessage(message, { expandPromptTemplates: true });
+              sendBrowserMessage(message, { expandPromptTemplates: true });
             }
           }
           sendTo(ws, success());
@@ -2077,19 +2122,20 @@ export default function (pi: ExtensionAPI) {
 
         case "steer": {
           if (sessionReplacementPending) throw new Error("A session action is already in progress");
-          pi.sendUserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "steer" });
+          sendBrowserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "steer" });
           sendTo(ws, success());
           break;
         }
 
         case "follow_up": {
           if (sessionReplacementPending) throw new Error("A session action is already in progress");
-          pi.sendUserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "followUp" });
+          sendBrowserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "followUp" });
           sendTo(ws, success());
           break;
         }
 
         case "abort": {
+          terminalBarrier?.markUnknown(); // ctx.abort is also void over async core work.
           if (revisionAttempt) revisionAttempt.cancelled = true;
           latestCtx?.abort();
           sendTo(ws, success());
@@ -2097,12 +2143,14 @@ export default function (pi: ExtensionAPI) {
         }
 
         case "enter_arch_mode": {
+          terminalBarrier?.markUnknown(); // Arbitrary extension-bus listeners have no completion contract.
           (pi as ExtensionAPIWithEvents).events?.emit?.("cmd:arch:enter", {});
           sendTo(ws, success());
           break;
         }
 
         case "exit_arch_mode": {
+          terminalBarrier?.markUnknown();
           (pi as ExtensionAPIWithEvents).events?.emit?.("cmd:arch:exit", {});
           sendTo(ws, success());
           break;
@@ -2176,7 +2224,9 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("No context available"));
             break;
           }
+          const scope = sessionScope(ctx);
           const models = await ctx.modelRegistry.getAvailable();
+          assertBrowserWritable(scope);
           const model = (models as ModelCandidate[]).find(
             (candidate) => candidate.provider === params.provider && candidate.id === params.modelId,
           );
@@ -2188,6 +2238,7 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("No API key for this model"));
             break;
           }
+          assertBrowserWritable(scope);
           sendTo(
             ws,
             success({
@@ -2204,8 +2255,10 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, success(null));
             break;
           }
+          const scope = sessionScope(ctx);
           const availModels = await ctx.modelRegistry.getAvailable();
-          const currentModel = ctx.model;
+          assertBrowserWritable(scope);
+          const currentModel = latestCtx?.model;
           if (!currentModel || availModels.length <= 1) {
             sendTo(ws, success(null));
             break;
@@ -2215,6 +2268,7 @@ export default function (pi: ExtensionAPI) {
           );
           const nextModel = availModels[(idx + 1) % availModels.length];
           await pi.setModel(nextModel);
+          assertBrowserWritable(scope);
           sendTo(
             ws,
             success({
@@ -2341,19 +2395,7 @@ export default function (pi: ExtensionAPI) {
 
         case "compact": {
           if (ctx) {
-            const compactScope = sessionScope(ctx);
-            const compactCtx = ctx;
-            const finishCompact = (payload: { summary?: unknown }) => {
-              if (!scopeIsCurrent(compactScope)) return;
-              latestCtx = compactCtx;
-              broadcast({ type: "event", event: "auto_compaction_end", payload });
-            };
-            broadcast({ type: "event", event: "auto_compaction_start", payload: {} });
-            compactCtx.compact({
-              customInstructions: typeof params.customInstructions === "string" ? params.customInstructions : undefined,
-              onComplete: (result: { summary?: unknown }) => finishCompact({ summary: result?.summary }),
-              onError: (err: Error) => finishCompact({ summary: `Error: ${err.message}` }),
-            });
+            compactFromBrowser(typeof params.customInstructions === "string" ? params.customInstructions : undefined);
           }
           sendTo(ws, success());
           break;
@@ -2434,7 +2476,7 @@ export default function (pi: ExtensionAPI) {
           const uploadCtx = checkHistoryIdentity(params, true);
           if (params.runtimeId !== runtimeId) throw new Error("Invalid upload identity");
           const scope = sessionScope(uploadCtx);
-          const isCurrent = () => scopeIsCurrent(scope) && !sessionReplacementPending;
+          const isCurrent = () => !terminalBarrier?.blocked && scopeIsCurrent(scope) && !sessionReplacementPending;
           if (params.protocol === 2) {
             sendTo(
               ws,
@@ -2464,7 +2506,7 @@ export default function (pi: ExtensionAPI) {
           const result = await workspaceUploads.complete(
             params.uploadId,
             scope,
-            () => scopeIsCurrent(scope) && !sessionReplacementPending,
+            () => !terminalBarrier?.blocked && scopeIsCurrent(scope) && !sessionReplacementPending,
           );
           sendTo(ws, success(result));
           break;
@@ -2506,7 +2548,11 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("filePath required"));
             break;
           }
+          const scope = latestCtx ? sessionScope(latestCtx) : undefined;
           const { execFile } = await import("node:child_process");
+          assertBrowserWritable(scope);
+          // The opener may hand off to an application that outlives this process.
+          terminalBarrier?.markUnknown();
           execFile("open", [filePath], (err) => {
             if (err) latestCtx?.ui.notify(`Failed to open file: ${err.message}`, "warning");
           });
@@ -2611,16 +2657,18 @@ export default function (pi: ExtensionAPI) {
             sendTo(ws, error("No model selected"));
             break;
           }
+          const scope = sessionScope(latestCtx);
           sessionReplacementPending = true;
           try {
             const result = await latestExecuteCtx.navigateTree(entryId);
+            assertBrowserWritable(scope);
             if (result.cancelled) {
               sendTo(ws, success({ cancelled: true }));
               break;
             }
             sendTo(ws, success({ editorText: result.editorText, cancelled: false }));
           } finally {
-            sessionReplacementPending = false;
+            if (scope.epoch === lifecycleEpoch) sessionReplacementPending = false;
           }
           break;
         }
@@ -2636,6 +2684,7 @@ export default function (pi: ExtensionAPI) {
     } catch (e: unknown) {
       sendTo(ws, error(e instanceof Error ? e.message : String(e)));
     } finally {
+      finishTerminalMutation?.();
       if (ownsMutation) activeBrowserMutations--;
     }
   }
@@ -2650,12 +2699,13 @@ export default function (pi: ExtensionAPI) {
     urlPath = urlPath.split("?")[0];
 
     if (urlPath.startsWith("/api/uploads")) {
-      if (runtimeStopping || runtimeControl?.prepared) {
+      if (terminalBarrier?.blocked || runtimeStopping || runtimeControl?.prepared) {
         res.writeHead(409, { "Cache-Control": "no-store" }).end();
         return;
       }
       const scope = runtimeActive && latestCtx && !sessionReplacementPending ? sessionScope(latestCtx) : undefined;
       activeHttpMutations++;
+      const finishTerminalMutation = terminalBarrier?.enter();
       void serveWorkspaceUpload(
         req,
         res,
@@ -2663,15 +2713,23 @@ export default function (pi: ExtensionAPI) {
         scope,
         () =>
           !!scope &&
+          !terminalBarrier?.blocked &&
           !runtimeStopping &&
           !runtimeControl?.prepared &&
           !sessionReplacementPending &&
           scopeIsCurrent(scope),
         SETTINGS.publicUrl ? new URL(SETTINGS.publicUrl).origin : `http://${req.headers.host}`,
         !!registration && typeof req.headers["x-pi-web-proof"] === "string",
-      ).finally(() => {
-        activeHttpMutations--;
-      });
+      )
+        .catch(() => {
+          // A cancelled streaming upload may already have destroyed its request
+          // socket. Do not let error-response cleanup become an unhandled rejection.
+          res.destroy();
+        })
+        .finally(() => {
+          finishTerminalMutation?.();
+          activeHttpMutations--;
+        });
       return;
     }
 

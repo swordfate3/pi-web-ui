@@ -6,10 +6,11 @@ import path from "node:path";
 import test from "node:test";
 import "../extensions/runtime-stdin-guard.mjs";
 import { type RuntimeSnapshot, startRuntimeControl } from "../extensions/runtime-control.ts";
+import { childTerminalBarrier } from "../extensions/terminal-barrier.ts";
 
 const token = "a".repeat(64);
 const operation = "b".repeat(32);
-async function fixture() {
+async function fixture(terminal = false) {
   const directory = mkdtempSync(path.join(tmpdir(), "pi-runtime-adapter-"));
   const file = path.join(directory, "session.jsonl");
   writeFileSync(file, "saved\n");
@@ -34,27 +35,30 @@ async function fixture() {
       PI_RUNTIME_RUN_ID: snapshot.run_id,
       PI_RUNTIME_CHILD_TOKEN: token,
       PI_RUNTIME_EXTENSION_SOCKET: socket,
+      ...(terminal ? { PI_RUNTIME_PROFILE: "web-terminal-v1", PI_RUNTIME_TERMINAL_EPOCH: "e".repeat(32) } : {}),
     },
     () => snapshot,
   );
   assert.ok(adapter);
   const request = (value: Record<string, unknown>) =>
-    new Promise<any>((resolve, reject) => {
-      const client = net.createConnection(socket);
-      let data = "";
-      client.on("connect", () => client.end(`${JSON.stringify({ token, ...value })}\n`));
-      client.on("data", (chunk) => {
-        data += chunk;
-      });
-      client.on("end", () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (error) {
-          reject(error);
-        }
-      });
-      client.on("error", reject);
-    });
+    new Promise<{ ok: boolean; result: RuntimeSnapshot & { adapterInstanceId: string; latched: boolean } }>(
+      (resolve, reject) => {
+        const client = net.createConnection(socket);
+        let data = "";
+        client.on("connect", () => client.end(`${JSON.stringify({ token, ...value })}\n`));
+        client.on("data", (chunk) => {
+          data += chunk;
+        });
+        client.on("end", () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (error) {
+            reject(error);
+          }
+        });
+        client.on("error", reject);
+      },
+    );
   return {
     directory,
     adapter,
@@ -68,6 +72,74 @@ async function fixture() {
     },
   };
 }
+
+test("terminal adapter authenticates exact live identity, drains browser work, survives replacement, and never restart-prepares", async () => {
+  let f = await fixture(true);
+  const expected = {
+    runId: "c".repeat(32),
+    terminalEpoch: "e".repeat(32),
+    runtimeId: "runtime-1",
+    sessionId: "session-1",
+  };
+  const state = { action: "terminal-state", expected };
+  const prepare = { action: "terminal-prepare", expected };
+  try {
+    f.set({ idle: false, pending: true, busy: true, session_file: null, version: "unaudited" });
+    const discovery = await f.request({
+      action: "terminal-state",
+      expected: { runId: expected.runId, terminalEpoch: expected.terminalEpoch },
+    });
+    assert.equal(discovery.ok, true);
+    assert.deepEqual(Object.keys(discovery.result).sort(), [
+      "adapterInstanceId",
+      "latched",
+      "runId",
+      "runtimeId",
+      "sessionId",
+      "terminalEpoch",
+    ]);
+    assert.equal(discovery.result.latched, false);
+    assert.match(discovery.result.adapterInstanceId, /^[a-f0-9]{32}$/);
+    for (const invalid of [
+      { ...prepare, token: "d".repeat(64) },
+      { ...prepare, expected: { runId: expected.runId, terminalEpoch: expected.terminalEpoch } },
+      { ...prepare, expected: { ...expected, sessionId: "old" } },
+      { ...state, expected: { ...expected, terminalEpoch: "f".repeat(32) } },
+      { ...state, extra: true },
+    ])
+      assert.equal((await f.request(invalid)).ok, false);
+    const barrier = childTerminalBarrier();
+    assert.equal(barrier.blocked, false);
+    const finish = barrier.enter();
+    assert.equal((await f.request(prepare)).ok, false);
+    assert.throws(() => barrier.enter(), /terminal_untracked/);
+    assert.equal((await f.request(state)).result.latched, false);
+    finish();
+    assert.equal((await f.request(prepare)).result.latched, true);
+    assert.equal((await f.request(state)).result.latched, true);
+    assert.equal(
+      (
+        await f.request({
+          action: "prepare",
+          operation_id: operation,
+          expected: { runtime_id: "runtime-1", session_id: "session-1", leaf_id: "leaf-1" },
+        })
+      ).ok,
+      false,
+    );
+    assert.equal((await f.request({ action: "snapshot" })).result.busy, true);
+    f.set({ session_id: "session-2" });
+    assert.equal((await f.request(state)).ok, false);
+    await f.close();
+    f = await fixture(true);
+    const replacement = await f.request(state);
+    assert.equal(replacement.result.latched, true);
+    assert.notEqual(replacement.result.adapterInstanceId, discovery.result.adapterInstanceId);
+    assert.throws(() => childTerminalBarrier().enter(), /terminal_untracked/);
+  } finally {
+    await f.close();
+  }
+});
 
 test("runtime IPC is opt-in and rejects partially configured supervision", async () => {
   assert.equal(await startRuntimeControl({}, () => null), undefined);

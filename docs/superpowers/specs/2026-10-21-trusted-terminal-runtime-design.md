@@ -121,6 +121,8 @@ Hub 只挂 provider 的专用 IPC 卷与只读的专用凭据文件；Pi 不挂 
 
 拟新增启动方式：`PI_PIRUN_WEB_TERMINAL=on pirun`。默认 local owner；如确需远程初始控制，显式增加 `PI_PIRUN_WEB_TERMINAL_CONTROL=remote`。这些是本次要实现并测试的接口，当前尚不可用。
 
+2026-10-22 实施状态补注：上一段保留的是批准设计时的历史状态。上述显式启动接口、独立镜像构建入口、受信 Gate 预检和 Hub 接线已在 Tasks 1–6 的源代码中实现，并完成隔离环境的真实原生 Pi 验证；Task7 负责最终候选的全量验证。实现不等于部署：现有 Hub/Gate、镜像允许列表和公网入口没有因此启用或重启，普通 `pirun` 不变。实际使用前仍须按 `docs/trusted-terminal.md` 单独授权安装、配置与上线。
+
 pirun 在启动前检查交互 TTY、Hub 登记、支持终端的镜像/provider 与配置；维护命令、print/RPC、无扩展或非交互启动不自动进入终端模式。显式开启而条件不满足时退出并给出原因。
 
 新容器标签声明 profile，entrypoint 按严格 allowlist 路由到新 supervisor 分支。普通 Pi 不增加 provider socket、Docker socket、Gate 凭据或公网监听。`pi-dockerctl` 增加预检/帮助，仍统一调用集中 Compose 配置。

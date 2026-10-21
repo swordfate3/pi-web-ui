@@ -112,33 +112,76 @@ test("aborted start cannot leave a listening server", async () => {
   assert.equal(server.listening, false);
 });
 
-test("more than ten occupied ports do not impose a session-count limit", async () => {
-  const occupied: http.Server[] = [];
-  const probe = http.createServer();
-  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-  const first = (probe.address() as { port: number }).port;
-  await new Promise<void>((resolve) => probe.close(() => resolve()));
-  const server = http.createServer();
-  try {
-    for (let index = 0; index < 12; index++) {
-      const blocker = http.createServer();
-      occupied.push(blocker);
-      try {
+async function closeServers(servers: http.Server[]) {
+  await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+}
+
+async function occupyPorts(count: number, initial?: http.Server) {
+  const deadline = Date.now() + 5_000;
+  for (let attempt = 0; attempt < 50 && Date.now() < deadline; attempt++) {
+    const probe = attempt === 0 && initial ? initial : http.createServer();
+    const occupied = [probe];
+    try {
+      if (!probe.listening) await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+      const first = (probe.address() as { port: number }).port;
+      if (first + count - 1 > 65535) {
+        await closeServers(occupied);
+        continue;
+      }
+      // Retain the ephemeral first socket throughout allocation. Only our own
+      // live sockets count; another service's EADDRINUSE is a rejected range.
+      for (let index = 1; index < count; index++) {
+        const blocker = http.createServer();
+        occupied.push(blocker);
         await new Promise<void>((resolve, reject) => {
           blocker.once("error", reject);
-          blocker.listen(first + index, "127.0.0.1", resolve);
+          blocker.listen(first + index, "127.0.0.1", () => {
+            blocker.removeListener("error", reject);
+            resolve();
+          });
         });
-      } catch (error) {
-        // Existing services also occupy a port; never stop or replace them for this test.
-        if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
       }
+      return { first, occupied };
+    } catch (error) {
+      await closeServers(occupied);
+      if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
     }
+  }
+  throw new Error("Could not reserve a stable consecutive test-port range within 50 attempts / 5 seconds");
+}
+
+test("more than ten occupied ports do not impose a session-count limit", async () => {
+  const { first, occupied } = await occupyPorts(12);
+  const server = http.createServer();
+  try {
     const port = await listenWithFallback(server, { host: "127.0.0.1", port: first }, new AbortController().signal);
     assert.ok(port >= first + 12);
     assert.ok(server.listenerCount("close") < 5, "failed listens must release their abort cleanup listeners");
   } finally {
-    await Promise.all(
-      [...occupied, server].map((value) => new Promise<void>((resolve) => value.close(() => resolve()))),
+    await closeServers([...occupied, server]);
+  }
+});
+
+test("occupied-port fixture retries a range rather than relying on a transient occupant", async () => {
+  const pair = await occupyPorts(2);
+  const [initial, transient] = pair.occupied;
+  const server = http.createServer();
+  let reserved: Awaited<ReturnType<typeof occupyPorts>> | undefined;
+  try {
+    assert.ok(initial.listening && transient.listening, "collision setup must own both live sockets");
+    reserved = await occupyPorts(12, initial);
+    assert.ok(transient.listening, "a collision must never close the other occupant");
+    await closeServers([transient]);
+    const port = await listenWithFallback(
+      server,
+      { host: "127.0.0.1", port: reserved.first },
+      new AbortController().signal,
     );
+    assert.ok(port >= reserved.first + 12, "all twelve blockers must outlive a transient collision");
+    assert.equal(reserved.occupied.length, 12);
+    assert.ok(reserved.occupied.every((blocker) => blocker.listening));
+    assert.equal(initial.listening, false, "the rejected candidate must release its owned first socket");
+  } finally {
+    await closeServers([...pair.occupied, ...(reserved?.occupied ?? []), server]);
   }
 });

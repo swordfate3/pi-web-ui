@@ -341,9 +341,16 @@ class Stack:
                 return None
 
         def capture():
-            self.evidence['nativeEvents']=self.events()
+            events=self.workspace/'native-events.jsonl'
+            # A failed close still removes the temporary workspace. Retrying
+            # resource cleanup must not erase the last real native snapshot.
+            if events.exists() or 'nativeEvents' not in self.evidence:
+                self.evidence['nativeEvents']=self.events()
             effects=self.workspace/'native-effects.txt'
-            self.evidence['effects']=effects.read_text().splitlines() if effects.exists() else []
+            if effects.exists():
+                self.evidence['effects']=effects.read_text().splitlines()
+            elif 'effects' not in self.evidence:
+                self.evidence['effects']=[]
         if hasattr(self,'workspace'):attempt('capture native evidence',capture)
         if self.master is not None and self.launcher and self.launcher.poll() is None:
             try:os.write(self.master,b'\x1dl/quit\r')

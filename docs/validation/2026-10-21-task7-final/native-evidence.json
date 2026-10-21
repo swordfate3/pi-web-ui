@@ -1,0 +1,116 @@
+{
+  "prefix": "pi-task6-d65212f03feb",
+  "base": "sha256:1a23ab4104c1d806a9cd2370f508ed04d83ea79c48ebdf9da8d99ae904cebae8",
+  "buildOutputBytes": [
+    0,
+    0
+  ],
+  "runtimeImage": "sha256:362c010450a7cf3e7817beaa9615732f7c78ba4532f0c36e897dad2eb4d8be95",
+  "gateImage": "sha256:9ddffe66d114f5c9da495ece016b2df8a370712babb3448e52033efded11bbf0",
+  "preflight": {
+    "v": 1,
+    "profile": "web-terminal-v1",
+    "image": "sha256:362c010450a7cf3e7817beaa9615732f7c78ba4532f0c36e897dad2eb4d8be95",
+    "instanceId": "b30e35d3d6ade51f886d196b2a7cdcbe",
+    "ready": true
+  },
+  "preflightBeforePiCreation": true,
+  "actualComposeConfigLogging": "none",
+  "nativeChild": {
+    "pid": 18,
+    "ppid": 1,
+    "start": "28211376",
+    "exe": "/usr/local/bin/node"
+  },
+  "nativeVersionSource": "/home/node/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+  "nativeVersion": "1.1.0",
+  "actualSshAndModelsPreparation": true,
+  "inspectLogging": "none",
+  "hubUidGidReadonlyPermission": true,
+  "permissionReadyThroughRealProvider": true,
+  "noHelperAfterDisconnect": true,
+  "nativeExitCode": 0,
+  "noRetrievableTuiMarker": true,
+  "sameNativeChildVerified": true,
+  "nativeEvents": [
+    {
+      "event": "ready",
+      "pid": 18,
+      "mode": "tui",
+      "tty": true,
+      "entry": "/home/node/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+      "version": "1.1.0"
+    },
+    {
+      "event": "confirm-open",
+      "pid": 18
+    },
+    {
+      "event": "confirm-result",
+      "pid": 18,
+      "approved": false
+    },
+    {
+      "event": "confirm-open",
+      "pid": 18
+    },
+    {
+      "event": "confirm-result",
+      "pid": 18,
+      "approved": true
+    },
+    {
+      "event": "chinese",
+      "pid": 18,
+      "text": "\u4e2d\u6587\u8f93\u5165 \ud83d\udc33"
+    },
+    {
+      "event": "panel-open",
+      "pid": 18
+    },
+    {
+      "event": "panel-render",
+      "pid": 18,
+      "width": 120,
+      "columns": 120,
+      "rows": 40
+    },
+    {
+      "event": "panel-render",
+      "pid": 18,
+      "width": 96,
+      "columns": 96,
+      "rows": 30
+    },
+    {
+      "event": "panel-result",
+      "pid": 18,
+      "result": "BETA"
+    },
+    {
+      "event": "chinese",
+      "pid": 18,
+      "text": "LOCAL_NATIVE"
+    },
+    {
+      "event": "chinese",
+      "pid": 18,
+      "text": "REMOTE_AGAIN"
+    },
+    {
+      "event": "shutdown",
+      "pid": 18
+    }
+  ],
+  "effects": [
+    "APPROVED_ONCE"
+  ],
+  "gateAndHubSocketsRemoved": true,
+  "cleanupFailures": [],
+  "cleanupAttempts": [
+    {
+      "failures": []
+    }
+  ],
+  "ownedResourcesRemoved": true
+}

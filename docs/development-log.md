@@ -613,3 +613,11 @@
 - Gate 全套373/373、pi-docker143项（140通过/3未启用真实服务或生产卷测试）通过；首次 Node 全套752项为748通过/3新 staging-script fixture/inventory失败/1显式1GiB压力skip。修正 fixture 后仅重跑覆盖58/58，未假称首次全套绿色，Task7保留最终全套门禁。build/dist、两套types、just check通过；原32warnings/7infos/Vite大chunk/Node模块类型提示保留，新增格式问题已修。
 - [运行指南](trusted-terminal.md)与[Task6精确证据](validation/2026-10-21-task6-terminal-wiring/README.md)记录12个外部文件 delta、真实 before/final哈希与双向回滚复现；重叠 Gate 基于Task4最终版，其他14个Task4文件保留。外部文件本身不在Git。既有 helper 曾短暂编辑后撤回但缺独立原始备份，明确披露且不伪称原始逐字相等。
 - 所有测试使用自有临时工作区、合成无用户凭据输入、隔离命名镜像/容器/卷并精确清理；未读取.env、复用生产卷、retag pi-sandbox、重启/部署现有服务、修改DNS/Caddy/tunnel/password或merge/push。等待controller独立复审；未启动Task7。
+
+## 2026-10-22 · Task7 最终候选验证（待独立审查，未部署）
+
+- 基于已接受的 Task6/R1 修复 `1a972139`，只修两项测试 fixture：连续端口必须持有十二个自有稳定 listener，碰撞整段释放重选并限制50次/5秒；native cleanup retry 在源文件已清理时保留真实已捕获事件/副作用，不捏造 socket 证明。真实行为 RED→GREEN 分别为10通过/1失败→11/11，以及9通过/1失败→10/10（保留原9项模拟Engine故障测试）；生产 fallback/runtime/provider和外部哈希/策略不变。
+- 最终 Node753项为752通过/1显式1GiB压力skip，0失败/取消；最初一次全套的2000轮有界登记在60秒取消，明确不是绿色。未改超时/断言/迭代数：两次专项通过约33秒，实测8020次真实fsync占24.37秒；改为单独执行、四文件并发后最终全套48.617秒通过，登记测试45.370秒。没有用专项通过替代全套，也未重复其他宽门禁。
+- Python PTY31/31、Gate373/373、launcher/supervisor143项140通过/3生产依赖opt-in skip；额外gateway19项15通过/4环境或可选Caddy skip。两套types、全Biome317文件0error（保留32warnings/7infos）、生产build/dist通过；确定性重建无dist字节差异。隔离干净生产Git安装/更新、18项真实stale-source拒绝、tarball及两种安装Hub生命周期均通过，3依赖/4consumer包、lock未改；使用非空代理白名单、隔离npm/Git配置和临时根，无用户token/fixture包替代。
+- 最终真实Browser→Hub→Gate→安装原生Pi1.1.0 BDD只执行一次并通过1/1（31.6秒）；同子进程PID18/start28211376，confirm拒绝零副作用/接受一次、中文/custom BETA/96x30、本机收回/重新交接、helper/socket/自有资源清理均有新证据。1440/390实际截图另行打开检查，原Task6证据不冒充本轮。startup只读和prepare latch仍明确分开，ordinary inherited-tui实际prompt回归保留。
+- [最终验证、覆盖图谱和限制](validation/2026-10-21-trusted-terminal-runtime.md)明确记录初始取消、真实skip、warning/嵌套patch空白债、旧helper原始基线缺口及未测实机/公网/shared-upgrade；设计第7节补注实现状态但不更改批准架构。仅提交自有测试/文档/证据，不触碰无关host-review、已应用保留stash或外部源文件；controller接管Task7及全分支独立审查，未merge/push/部署/生产重启。

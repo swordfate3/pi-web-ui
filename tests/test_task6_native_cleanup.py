@@ -177,6 +177,28 @@ class NativeCleanupTests(unittest.TestCase):
         self.stack.close()
         self.assertEqual(len(self.engine.calls), removed, 'complete close must be idempotent')
 
+    def test_retry_preserves_captured_native_events_and_effects_after_source_removal(self):
+        self.full_stack()
+        self.stack.workspace = self.stack.root / 'workspace'
+        self.stack.workspace.mkdir()
+        events = [{'event': 'shutdown', 'pid': 18}]
+        (self.stack.workspace / 'native-events.jsonl').write_text(json.dumps(events[0]) + '\n')
+        (self.stack.workspace / 'native-effects.txt').write_text('APPROVED_ONCE\n')
+        self.engine.failures[('run',)] = 1
+        with self.assertRaises(RuntimeError):
+            self.stack.close()
+        self.assert_empty()
+        self.assertEqual(self.evidence()['nativeEvents'], events)
+        self.assertEqual(self.evidence()['effects'], ['APPROVED_ONCE'])
+        self.assertFalse(self.stack.closed)
+        self.stack.close()
+        self.assertTrue(self.stack.closed)
+        self.assertEqual(self.evidence()['nativeEvents'], events)
+        self.assertEqual(self.evidence()['effects'], ['APPROVED_ONCE'])
+        self.assertTrue(self.evidence()['cleanupAttempts'][0]['failures'])
+        self.assertNotEqual(self.evidence().get('gateAndHubSocketsRemoved'), True,
+                            'retaining native evidence cannot invent a missing socket proof')
+
     def test_volume_image_and_alias_failures_are_aggregated_and_retried(self):
         self.full_stack()
         state = self.stack.prefix + '-state'

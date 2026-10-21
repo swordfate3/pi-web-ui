@@ -621,3 +621,10 @@
 - Python PTY31/31、Gate373/373、launcher/supervisor143项140通过/3生产依赖opt-in skip；额外gateway19项15通过/4环境或可选Caddy skip。两套types、全Biome317文件0error（保留32warnings/7infos）、生产build/dist通过；确定性重建无dist字节差异。隔离干净生产Git安装/更新、18项真实stale-source拒绝、tarball及两种安装Hub生命周期均通过，3依赖/4consumer包、lock未改；使用非空代理白名单、隔离npm/Git配置和临时根，无用户token/fixture包替代。
 - 最终真实Browser→Hub→Gate→安装原生Pi1.1.0 BDD只执行一次并通过1/1（31.6秒）；同子进程PID18/start28211376，confirm拒绝零副作用/接受一次、中文/custom BETA/96x30、本机收回/重新交接、helper/socket/自有资源清理均有新证据。1440/390实际截图另行打开检查，原Task6证据不冒充本轮。startup只读和prepare latch仍明确分开，ordinary inherited-tui实际prompt回归保留。
 - [最终验证、覆盖图谱和限制](validation/2026-10-21-trusted-terminal-runtime.md)明确记录初始取消、真实skip、warning/嵌套patch空白债、旧helper原始基线缺口及未测实机/公网/shared-upgrade；设计第7节补注实现状态但不更改批准架构。仅提交自有测试/文档/证据，不触碰无关host-review、已应用保留stash或外部源文件；controller接管Task7及全分支独立审查，未merge/push/部署/生产重启。
+
+## 2026-10-22 · 全分支最终修复：画面就绪后才能输入
+
+- 根据独立全分支审查I1，在终端浏览器区分transport ready与完整有效画面成功渲染：申请控制、文本/固定键/resize在实际dispatch及按钮层都受阻；首次/替换画面固定2秒建立期限，旧回调/断线/错身份/渲染失败不得恢复输入。保留单1MiBassembly/parser、256KiB串行队列及草稿revision ACK语义；被阻止输入不消耗sequence。
+- M1限定浏览器本地反馈：控制申请显示为上次确认/非实时归属，显示有陈旧说明的上次输入归属；保守剩余时间从申请发出而非ACK到达计算，dispatch额外核对期限，无自动续租/重连或新协议。M2既有32warnings/7infos、Node/Vite/color提示与精确证据空白债延后，不作无关清理。
+- 实际行为RED28项20通过/8失败→GREEN28/28；最终浏览器handler及指定terminal/server回归95/95。受影响Chromium用例1/1（1440/390）并打开新截图；两套types、scoped/fullBiome、build/dist/BDD生成通过。新真实隔离Git安装/更新、18stale-source拒绝、tarball/installedHub通过；新安装原生BDD只跑一次1/1（35.9s），同child/confirm/中文/BETA/resize/local交接/退出清理均有新证据。未重复旧宽Node/PTY/Gate/Pi套件，完整postmerge Node留给controller。
+- [最终验证追加节](validation/2026-10-21-trusted-terminal-runtime.md)明确区分历史Task7与新source/build/native身份，记录/tmp日志/截图及精确资源清理。两种浏览器边界不混称；未验证物理手机/Safari/OSIME、公网、真实共享卷升级或所有用户扩展。33/33外部/报告哈希及已应用保留stash不变；未改runtime/Hub/provider/Gate权限或外部源，未merge/push/部署/生产重启，待controller一次fix-only独立复审。

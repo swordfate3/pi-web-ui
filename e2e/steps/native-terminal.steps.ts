@@ -37,6 +37,9 @@ async function connect() {
 async function acquire() {
   await button("取得控制权").click();
   await expect(page().locator("#draft")).toBeEnabled();
+  await expect(page().locator("#connection-state")).toContainText("控制申请已确认（非实时）");
+  await expect(page().locator("#lease-state")).toContainText(/保守剩余 (?:[0-9]|[12][0-9]) 秒/);
+  await expect(page().locator("#ownership-state")).toContainText("非实时，可能已改变");
 }
 async function scrollNativeBottom() {
   const scroll = page().locator("#screen-scroll");

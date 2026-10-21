@@ -32,12 +32,14 @@ let csrf = "",
 let target: TerminalTarget | undefined,
   socket: WebSocket | undefined,
   connected = false,
+  screenReady = false,
   composing = false,
   transition = false;
 let lease: string | undefined,
   sequence = 0,
   id = 0,
-  generation = 0;
+  generation = 0,
+  leaseDeadline = 0;
 let assembly: TerminalSnapshotAssembly | undefined,
   terminal: Terminal | undefined,
   rendering = false,
@@ -46,27 +48,37 @@ let assembly: TerminalSnapshotAssembly | undefined,
   draftRevision = 0;
 const screenQueue: string[] = [];
 let leaseTimer: ReturnType<typeof setTimeout> | undefined, connectTimer: ReturnType<typeof setTimeout> | undefined;
+let screenTimer: ReturnType<typeof setTimeout> | undefined;
 let cancelRender: (() => void) | undefined, operation: AbortController | undefined;
-const pending = new Map<number, { type: string; timer: ReturnType<typeof setTimeout>; draftRevision?: number }>();
+const pending = new Map<
+  number,
+  { type: string; timer: ReturnType<typeof setTimeout>; startedAt: number; draftRevision?: number }
+>();
 const notice = (text: string) => {
   element("delivery-state").textContent = text;
 };
 const controls = () => {
   if (connected)
-    element("connection-state").textContent = lease
-      ? "已连接 · 控制权已取得"
-      : access === "read"
-        ? "已连接 · 只读查看"
-        : "已连接 · 输入仍需取得控制权";
-  const writable = connected && !!lease && !composing && pending.size === 0;
+    element("connection-state").textContent = !screenReady
+      ? "传输已连接 · 等待完整画面，输入已锁定"
+      : lease
+        ? "已连接 · 控制申请已确认（非实时）"
+        : access === "read"
+          ? "已连接 · 只读查看"
+          : "已连接 · 输入仍需取得控制权";
+  const granted = !!lease && performance.now() < leaseDeadline;
+  if (lease)
+    element("lease-state").textContent =
+      `申请已确认（非实时归属） · 保守剩余 ${Math.max(0, Math.floor((leaseDeadline - performance.now()) / 1000))} 秒 · 不自动续租`;
+  const writable = connected && screenReady && granted && !composing && pending.size === 0;
   button("unlock").disabled = transition || connected;
   button("logout").disabled = !authorized || transition;
   button("connect").disabled = !authorized || !available || !!socket || transition;
   button("disconnect").disabled = !socket && !transition;
-  button("acquire").disabled = !connected || access !== "write" || !!lease || pending.size !== 0;
+  button("acquire").disabled = !connected || !screenReady || access !== "write" || !!lease || pending.size !== 0;
   button("send").disabled = !writable;
   button("resize").disabled = !writable;
-  draft.disabled = !connected || !lease;
+  draft.disabled = !connected || !screenReady || !granted;
   element<HTMLSelectElement>("access").disabled = !!socket || transition;
   for (const key of document.querySelectorAll<HTMLButtonElement>("[data-key]")) key.disabled = !writable;
 };
@@ -74,13 +86,17 @@ function disconnect(message = "连接已关闭；未收到确认的输入结果�
   // Fence local input before close/abort/cleanup or any promise continuation.
   generation++;
   connected = false;
+  screenReady = false;
   lease = undefined;
+  leaseDeadline = 0;
   sequence = 0;
   transition = false;
   for (const call of pending.values()) clearTimeout(call.timer);
   pending.clear();
   clearTimeout(leaseTimer);
   clearTimeout(connectTimer);
+  clearTimeout(screenTimer);
+  screenTimer = undefined;
   const old = socket;
   socket = undefined;
   operation?.abort();
@@ -103,6 +119,26 @@ function disconnect(message = "连接已关闭；未收到确认的输入结果�
   old?.close();
   notice(message);
 }
+function fenceScreen() {
+  screenReady = false;
+  if (screenTimer === undefined) {
+    const own = generation;
+    screenTimer = setTimeout(() => {
+      if (own === generation) disconnect("完整画面未在期限内就绪；已断开，不会自动恢复。");
+    }, 2000);
+  }
+  controls();
+}
+function tickLease(own: number) {
+  if (own !== generation || !lease) return;
+  const remaining = leaseDeadline - performance.now();
+  if (remaining <= 0) {
+    disconnect("本地保守控制租期已结束；请核对画面后显式重新连接。");
+    return;
+  }
+  controls();
+  leaseTimer = setTimeout(() => tickLease(own), Math.min(1000, remaining));
+}
 async function api(route: string, value?: object, signal?: AbortSignal) {
   const response = await fetch(`/api/terminal/${route}`, {
     method: value === undefined ? "GET" : "POST",
@@ -118,6 +154,10 @@ async function api(route: string, value?: object, signal?: AbortSignal) {
 function identity() {
   const container = element("identity");
   container.replaceChildren();
+  const inputStates = { local: "本地", none: "无人", remote: "远程", fenced: "已锁定" };
+  element("ownership-state").textContent = target
+    ? `上次核对输入归属：${inputStates[target.inputState]}（非实时，可能已改变；本地收回不会主动通知本页）。`
+    : "输入归属尚未核对；本页不提供实时归属通知。";
   if (!target) {
     const dt = document.createElement("dt"),
       dd = document.createElement("dd");
@@ -178,6 +218,7 @@ async function restore(snapshot: TerminalSnapshot) {
   if (rendering || !connected) throw new Error();
   const own = generation;
   rendering = true;
+  fenceScreen();
   terminal?.dispose();
   element("terminal-screen").replaceChildren();
   const view = new Terminal({
@@ -210,6 +251,12 @@ async function restore(snapshot: TerminalSnapshot) {
     });
     if (own !== generation || !connected) return;
     element("screen-state").textContent = `完整画面快照 #${snapshot.sequence} · ${snapshot.columns} × ${snapshot.rows}`;
+    if (screenQueue.length === 0) {
+      screenReady = true;
+      clearTimeout(screenTimer);
+      screenTimer = undefined;
+      controls();
+    }
   } finally {
     clearTimeout(renderDeadline);
     if (own === generation) {
@@ -238,12 +285,18 @@ async function drainScreens() {
   }
 }
 function send(type: string, extra: Record<string, unknown> = {}, submittedRevision?: number) {
+  if (lease && performance.now() >= leaseDeadline) {
+    disconnect("本地保守控制租期已结束；请核对画面后显式重新连接。");
+    return;
+  }
   if (
     !socket ||
     !connected ||
+    !screenReady ||
     !target ||
     composing ||
     pending.size ||
+    (type === "acquire" && access !== "write") ||
     (type !== "acquire" && !lease) ||
     document.hidden
   )
@@ -256,9 +309,11 @@ function send(type: string, extra: Record<string, unknown> = {}, submittedRevisi
   }
   pending.set(requestId, {
     type,
+    startedAt: performance.now(),
     draftRevision: submittedRevision,
     timer: setTimeout(() => disconnect("未收到确认：输入结果未知，已断开，不会重发。"), 2000),
   });
+  if (type === "input") sequence++;
   socket.send(text);
   controls();
 }
@@ -271,7 +326,7 @@ function sendInput(data: string, submittedRevision?: number) {
     return;
   send(
     "input",
-    { v: 1, terminalEpoch: target.terminalEpoch, leaseId: lease, sequence: ++sequence, data },
+    { v: 1, terminalEpoch: target.terminalEpoch, leaseId: lease, sequence: sequence + 1, data },
     submittedRevision,
   );
 }
@@ -340,8 +395,7 @@ button("connect").addEventListener("click", () => {
             transition = false;
             clearTimeout(connectTimer);
             assembly = new TerminalSnapshotAssembly(selected);
-            element("connection-state").textContent = "已连接 · 输入仍需取得控制权";
-            controls();
+            fenceScreen();
             return;
           }
           if (frame.type === "response") {
@@ -355,9 +409,11 @@ button("connect").addEventListener("click", () => {
             if (call.type === "acquire") {
               if (result.ok === true) {
                 lease = result.leaseId as string;
+                // The grant can begin before its ACK arrives. Start locally at
+                // request dispatch, never extend it by network/render delay.
+                leaseDeadline = call.startedAt + 30000;
                 sequence = 0;
-                element("lease-state").textContent = "控制权已取得 · 最长 30 秒，不自动续租";
-                leaseTimer = setTimeout(() => disconnect("控制租期已结束；请核对画面后显式重新连接。"), 30000);
+                tickLease(own);
               } else
                 notice(
                   result.error === "local_owns_input"
@@ -382,6 +438,7 @@ button("connect").addEventListener("click", () => {
             return;
           }
           if (frame.type === "screen-unavailable") throw new Error();
+          if (frame.type === "screen-start") fenceScreen();
           const bytes = textBytes(event.data);
           if (queuedScreenBytes + bytes > TERMINAL_QUEUE_BYTES) throw new Error();
           // Retain only byte-counted raw envelopes, not assemblies or a growing

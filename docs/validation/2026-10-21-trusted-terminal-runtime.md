@@ -1,4 +1,12 @@
-# Trusted terminal runtime — Task7 final candidate verification
+# Trusted terminal runtime — candidate verification and final fix
+
+The original Task7 results below are **historical evidence for the pre-fix
+candidate**, not acceptance of modified bytes. See the dated final whole-branch
+fix section at the end for refreshed browser, package and installed-native
+evidence on BASE `be3f7158bfd472d9a3464a2dee85896d5c3b5516`. Complete postmerge
+Node verification and independent fix-only re-review remain controller-owned.
+
+## Historical Task7 candidate (before final whole-branch readiness fix)
 
 Executed 2026-10-22 on `codex/trusted-terminal-runtime`, starting at
 `1a97213908e9789f531f5259312e7f70220f6659` after controller acceptance of Task6
@@ -279,3 +287,139 @@ Gate/Hub installation/restart and rollout/rollback remain separately authorized
 handoffs. No `.env`/personal credential read, production resource use, existing
 container migration, service restart, retag of `pi-sandbox`, merge or external
 push occurred. Source completion is not a claim of live terminal availability.
+
+## 2026-10-22 — final whole-branch readiness/feedback fix
+
+This is the single final fix wave on BASE
+`be3f7158bfd472d9a3464a2dee85896d5c3b5516`, following the whole-branch review.
+I1 is addressed in the terminal browser only: transport ready is separate from
+interactive readiness. Acquire, draft, text, fixed keys and resize stay fenced
+until a complete, identity-validated current-generation snapshot successfully
+renders. The same check guards dispatch, not just disabled controls. Initial
+and replacement screen establishment have a fixed 2-second bound, not renewed
+by trickled frames. Incoming replacement starts fence immediately, including
+while another render is outstanding; an earlier callback cannot enable input
+ahead of queued newer frames. Disconnect/invalid identity/render failure fence
+and clear state; late callbacks cannot resurrect it. Existing one 1 MiB
+assembly/parser, serialized 256 KiB raw peer queue and render deadline remain.
+Blocked input does not consume a sequence; draft-revision ACK behavior remains.
+
+M1 is addressed without claiming new live sink evidence: the UI labels a grant
+as last acknowledged/non-real-time, shows last checked target input ownership
+with explicit staleness/local-reclaim limits, and shows conservative local
+remaining seconds. Local expiry is anchored to acquire **request dispatch**,
+not delayed ACK receipt; dispatch checks expiry even when browser timers lag.
+Nothing renews/acquires/reconnects automatically. M2 remains deferred,
+nonblocking warning/exact-evidence whitespace debt. No protocol, authority,
+runtime/Hub/provider/Gate, dependency or external host source changed.
+
+### Fresh executable evidence for the modified bytes
+
+| Gate | Actual result | Raw log |
+| --- | --- | --- |
+| Actual-entry browser-handler behavioral RED | 28 total, 20 pass / 8 fail; exit 1; 140.888404 ms | `/tmp/pi-final-fix-red.log` |
+| Initial covering GREEN | 28/28, 0 fail/cancel/skip; exit 0; 137.156542 ms | `/tmp/pi-final-fix-green1.log` |
+| Final covering browser + named terminal/server regressions | 95/95, 0 fail/cancel/skip; exit 0; 4.972 s | `/tmp/pi-final-fix-focused.log` |
+| Affected controlled Chromium browser case, desktop/mobile | 1/1; exit 0; 1.733 s test / 2.062 s process | `/tmp/pi-final-fix-browser.log` |
+| Default TypeScript (inside build) and connection/E2E TypeScript | Both exit 0 | `/tmp/pi-final-fix-build.log`, `/tmp/pi-final-fix-types-connection.log` |
+| Scoped format/check; full Biome | Exit 0; scoped clean; full 317 files, 32 warnings / 7 infos | `/tmp/pi-final-fix-format.log`, `/tmp/pi-final-fix-biome-{scoped,full}.log` |
+| Production build / dist correspondence / BDD generation | Exit 0 each; existing chunk warning | `/tmp/pi-final-fix-{build,dist,bdd-gen}.log` |
+| Fresh real Git install/update/tarball/installed Hub | Exit 0; 18 real stale-input rejections; 3 dependencies / 4 consumer packages; lock unchanged | `/tmp/pi-final-fix-install.log` |
+| Refreshed actual installed native BDD, **one invocation** | 1/1; exit 0; 35.2 s scenario / 35.9 s runner | `/tmp/pi-final-fix-native.log` |
+| External/report provenance, before and after | 33/33 unchanged hashes; exit 0 each | `/tmp/pi-final-fix-provenance-{before,after}.log` |
+| Exact-owned cleanup / retained stash / process audit | Exit 0; zero resources/processes, install root empty | `/tmp/pi-final-fix-audit.log` |
+
+RED failures were actual assertions: premature readiness for absent/partial/held/
+failed first render and replacement/queued render, incorrect ownership/countdown,
+and input after local expiry. The original 19 render/draft/ID cases remain;
+their acquire setup now renders a screen before obtaining control. Boundary
+doubles control DOM/socket/xterm completion and clock, while executing the
+production entry and real validators. They are not installed-native proof.
+
+Commands (all logs above retained; no active command sessions):
+
+```sh
+NODE_OPTIONS='' node --import ./tests/register-ts.mjs --test tests/hub-terminal-browser.test.ts
+NODE_OPTIONS='' node --import ./tests/register-ts.mjs --test tests/hub-terminal-browser.test.ts tests/hub-terminal-server.test.ts tests/hub-terminal.test.ts tests/terminal-screen.test.ts tests/terminal-lease.test.ts
+NODE_OPTIONS='' node_modules/.bin/tsc --noEmit -p tsconfig.connection.json
+NODE_OPTIONS='' node_modules/.bin/biome check src/web/terminal/app.ts src/web/terminal/index.html tests/hub-terminal-browser.test.ts e2e/task5-terminal.integration.ts e2e/steps/native-terminal.steps.ts
+NODE_OPTIONS='' node_modules/.bin/biome check .
+NODE_OPTIONS='' npm run build:web
+NODE_OPTIONS='' npm run verify:dist
+NODE_OPTIONS='' npm run e2e:gen
+NODE_OPTIONS='' PI_E2E_BROWSER_EXECUTABLE=<cached Chromium> PI_E2E_ARTIFACT_DIR=/tmp/pi-final-fix-browser node --import ./tests/register-ts.mjs --test --test-name-pattern='browser client successive snapshots' e2e/task5-terminal.integration.ts
+NODE_OPTIONS='' node /tmp/pi-task7-install.mjs final
+NODE_OPTIONS='' PI_TASK6_NATIVE_E2E=1 PI_TASK6_GATE_SOURCE=<reviewed Gate> PI_TASK6_DOCKER_SOURCE=<reviewed pi-docker> PI_E2E_BROWSER_EXECUTABLE=<cached Chromium> PI_E2E_ARTIFACT_DIR=/tmp/pi-final-fix-native PLAYWRIGHT_HTML_OUTPUT_DIR=/tmp/pi-final-fix-native-report node_modules/.bin/playwright test -c e2e/playwright.config.ts --grep @native-terminal --output=/tmp/pi-final-fix-native-results
+```
+
+The audited install wrapper was reused unchanged with fresh root
+`/tmp/pi-task7-install-W1U5CU`, isolated npm/Git config, official registry and
+the proven cache/nonempty proxy allowlist. No user token or dependency stand-in
+was supplied. Both installed-Hub forms exercise init/issue/serve/HTTP/revoke/
+SIGTERM; all temporary run/fixture/private state was removed. No extra metadata
+preflight, browser download, broad Node/PTY/Gate/pi-docker or old Docker-browser
+fixture rerun occurred. Controller retains complete postmerge Node verification.
+
+### New build/native identity, visual inspection and cleanup
+
+```text
+manifest SHA256 de5cc43a8c619f70944aff227e394c6fda1249a57dfcc1ffcec3164017dd3691
+source SHA256   0c26c986bc6f800373bfb269299b1055651c2119a9299e63b4b5ae4bb93e854f
+outputs SHA256  ec86b70d9ea94223abe97dfee6e68ce3e75b5fc211015e7f2586d64362ee37ef
+source/output entries: 191/738
+native prefix   pi-task6-1d61c25164e7
+runtime image   sha256:3fad4e56512274fe291b7fe42da8efeda5527f574094a5f065b3f68d08a4347c
+Gate image      sha256:b2ad2c5d23f78755bfb5e2f9f2a04d29912a3186b901c5039f6889886f4d14b4
+cached base     sha256:1a23ab4104c1d806a9cd2370f508ed04d83ea79c48ebdf9da8d99ae904cebae8
+native child    Pi1.1.0; PID18/PPID1/start28532070; /usr/local/bin/node
+```
+
+The generated Hub bundle changes only its embedded source-build identity;
+authority source is unchanged. New native evidence is
+`/tmp/pi-final-fix-native/pi-task6-1d61c25164e7-evidence.json`, not the historical
+Task7 artifact. Actual Browser → Hub → Gate/Engine/provider → installed fixed
+helper/broker/supervisor → shared-path installed Pi1.1.0 passed preflight before
+Pi creation, confirmation false/true with only `APPROVED_ONCE`, Chinese/emoji,
+BETA/120×40→96×30, local reclaim/no rejected remote execution, LOCAL_NATIVE and
+REMOTE_AGAIN, same child and exit0. Real readonly0640 provider mount permission,
+SSH/models setup, logging none/no retrievable marker, no Pi provider/Docker
+mounts, helper absence and Gate/Hub socket removal are retained. This fixture
+uses isolated Compose with the real overlay, synthetic commands and faux model;
+it is not full production pirun/shared-volume package-upgrade acceptance.
+
+No controllable in-app Browser tool is available. Actual cached Chromium
+screenshots were opened with view_image, not accepted from DOM checks alone:
+
+- `/tmp/pi-final-fix-browser/{1440,390}-final-fix-awaiting-screen.png`:
+  desktop1440×1050/mobile390×1000, input/acquire disabled before first screen.
+- `/tmp/pi-final-fix-browser/{1440,390}-final-fix-draft-preserved.png`:
+  complete latest screen, preserved edited Chinese draft, coherent non-live
+  grant/29-second conservative feedback. Controlled HTTP/WS boundary only.
+- `/tmp/pi-final-fix-native/1440-native-confirm-bottom.png`,1440×1100:
+  actual Yes/No/navigation/footer, readable non-live grant/29s.
+- `/tmp/pi-final-fix-native/390-native-panel-bottom.png`,390×1000:
+  ALPHA/selectedBETA/GAMMA/footer,96×30/manual controls, non-live28s.
+- `/tmp/pi-final-fix-native/390-native-handoff.png`,390×1000:
+  REMOTE_AGAIN and non-live29s; no contradictory live-control claim.
+- `/tmp/pi-final-fix-native/1440-native-chat-readonly.png`,1440×1000:
+  startup read-only banner, disabled composer, read-only empty state.
+
+Layouts are readable/wrapped without apparent overlap; horizontal native rows
+scroll intentionally. These are full-page captures of dynamic isolated loopback
+origins, now closed, not simultaneous physical-phone viewport visibility or
+Safari/OS IME/public-gateway proof. Raw screenshots/reports remain under /tmp.
+
+Exact-owned cleanup removed only the new labelled gate/hub/pi/probe containers,
+state/ipc/credentials volumes and runtime/gate/cached-base tags. Fresh ledger is
+inactive, `cleanupFailures:[]`, sockets removed; independent exact-prefix
+inventories are empty. No fixture process or command session remains. Provenance
+is still33/33; the unrelated host report and already-applied retained stash OID
+`8f091de8f84eec89cc850c1f69062e6c84f89c33` are unchanged. No external host source
+write, live service/production volume, retag pi-sandbox, merge/push/deploy occurred.
+
+The earlier historical “pending” statements apply to those checkpoints only.
+All requested fix-wave executable gates above are complete. Independent
+fix-only re-review and complete postmerge Node remain controller-owned. M2
+warnings/whitespace, original helper baseline gap and the physical-device,
+public-gateway, real shared-upgrade/user-extension limits remain explicit;
+no pristine-output or live terminal availability claim is made.

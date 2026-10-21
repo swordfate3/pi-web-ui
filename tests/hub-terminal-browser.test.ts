@@ -78,13 +78,16 @@ async function fixture(t: test.TestContext) {
     createElement: () => new Surface(),
   });
   const views: { data: string; complete: () => void; disposed: boolean }[] = [];
+  let failRender = false;
   class ControlledTerminal {
     parser = { registerOscHandler() {} };
     view = { data: "", complete() {}, disposed: false };
     constructor() {
       views.push(this.view);
     }
-    open() {}
+    open() {
+      if (failRender) throw new Error("controlled render failure");
+    }
     write(data: string, callback: () => void) {
       this.view.data = data;
       this.view.complete = callback;
@@ -116,7 +119,8 @@ async function fixture(t: test.TestContext) {
     }
   }
   let timerId = 0;
-  const timers = new Map<number, { callback: () => void; delay: number }>();
+  let now = 0;
+  const timers = new Map<number, { callback: () => void; delay: number; at: number }>();
   vm.runInNewContext(application, {
     document,
     window: Object.assign(new EventTarget(), { confirm: () => true }),
@@ -128,8 +132,9 @@ async function fixture(t: test.TestContext) {
     TextDecoder,
     atob,
     btoa,
+    performance: { now: () => now },
     setTimeout(callback: () => void, delay: number) {
-      timers.set(++timerId, { callback, delay });
+      timers.set(++timerId, { callback, delay, at: now + delay });
       return timerId;
     },
     clearTimeout(id: number) {
@@ -185,7 +190,13 @@ async function fixture(t: test.TestContext) {
   };
   const ack = (id: unknown, result: object = { ok: true, delivery: "written" }) =>
     socket.receive({ type: "response", id, result });
-  const acquire = () => {
+  const rendered = async () => {
+    snapshot(0, "validated native prompt");
+    views[0].complete();
+    await settle();
+  };
+  const acquire = async () => {
+    await rendered();
     element("acquire").click();
     ack(1, { ok: true, leaseId: "e".repeat(32), expiresInMs: 30000 });
     assert.equal(element("draft").disabled, false);
@@ -194,7 +205,35 @@ async function fixture(t: test.TestContext) {
     element("draft").value = value;
     element("draft").dispatchEvent(new Event("input"));
   };
-  return { element, socket, sockets, views, snapshot, ack, acquire, edit, keys, timers, document };
+  const advance = async (ms: number, runTimers = true) => {
+    now += ms;
+    if (!runTimers) return;
+    for (const [id, timer] of [...timers]) {
+      if (timers.has(id) && timer.at <= now) {
+        timers.delete(id);
+        timer.callback();
+        await settle();
+      }
+    }
+  };
+  return {
+    element,
+    socket,
+    sockets,
+    views,
+    snapshot,
+    ack,
+    acquire,
+    edit,
+    keys,
+    timers,
+    document,
+    rendered,
+    advance,
+    failNextRender: () => {
+      failRender = true;
+    },
+  };
 }
 
 test("valid next snapshot waits for delayed first render and is displayed in order", async (t) => {
@@ -252,7 +291,7 @@ test("queued malformed snapshot still fails closed when rendering drains", async
 
 test("fixed-key ACKs preserve an unrelated nonempty draft", async (t) => {
   const f = await fixture(t);
-  f.acquire();
+  await f.acquire();
   f.edit("unsent 中文 draft");
   for (const [index, key] of f.keys.entries()) {
     key.click();
@@ -264,7 +303,7 @@ test("fixed-key ACKs preserve an unrelated nonempty draft", async (t) => {
 
 test("text ACK preserves intervening edits including edit-away-and-back revision", async (t) => {
   const f = await fixture(t);
-  f.acquire();
+  await f.acquire();
   f.edit("draft A");
   f.element("send").click();
   assert.equal(f.socket.sent.at(-1)?.data, "draft A");
@@ -280,7 +319,7 @@ test("text ACK preserves intervening edits including edit-away-and-back revision
 
 test("text ACK clears only an unchanged submitted draft", async (t) => {
   const f = await fixture(t);
-  f.acquire();
+  await f.acquire();
   f.edit("submitted");
   f.element("send").click();
   f.ack(2);
@@ -292,10 +331,159 @@ test("response IDs are exact positive safe-integer numbers, never coerced", asyn
   for (const id of ["1", "01", true, false, null, 0, -1, 1.5, 9007199254740992, {}, []]) {
     await t.test(`reject ${JSON.stringify(id)}`, async (t) => {
       const f = await fixture(t);
+      await f.rendered();
       f.element("acquire").click();
       f.ack(id, { ok: true, leaseId: "e".repeat(32), expiresInMs: 30000 });
       assert.equal(f.socket.closed, true);
       assert.equal(f.element("draft").disabled, true);
     });
   }
+});
+
+function assertInputFenced(f: Awaited<ReturnType<typeof fixture>>) {
+  for (const id of ["send", "resize", "draft"]) assert.equal(f.element(id).disabled, true, `${id} must be fenced`);
+  for (const key of f.keys) assert.equal(key.disabled, true);
+  const before = f.socket.sent.length;
+  // dispatchEvent deliberately bypasses disabled-button click suppression:
+  // a visual-only fix cannot satisfy the real dispatch assertions.
+  f.element("send").dispatchEvent(new Event("click"));
+  for (const key of f.keys) key.dispatchEvent(new Event("click"));
+  f.element("resize-form").dispatchEvent(new Event("submit"));
+  assert.equal(f.socket.sent.length, before, "fenced handlers must emit no input/key/resize requests");
+}
+
+test("transport ready without a first screen cannot acquire or dispatch and expires at a bounded deadline", async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.element("acquire").disabled, true);
+  f.element("acquire").dispatchEvent(new Event("click"));
+  assert.equal(f.socket.sent.length, 1, "transport ready is not interactive readiness");
+  assertInputFenced(f);
+  await f.advance(2001);
+  assert.equal(f.socket.closed, true, "absent first screen cannot wait indefinitely");
+});
+
+test("partial first screen stays fenced and trickled frames do not renew establishment deadline", async (t) => {
+  const f = await fixture(t);
+  f.socket.receive({ type: "screen-start", target, sequence: 0, columns: 80, rows: 24, bytes: 1, chunks: 1 });
+  await f.advance(1500);
+  f.socket.receive({ type: "screen-chunk", terminalEpoch: target.terminalEpoch, sequence: 0, index: 0, data: "eA==" });
+  assert.equal(f.element("acquire").disabled, true);
+  f.element("acquire").dispatchEvent(new Event("click"));
+  assert.equal(f.socket.sent.length, 1);
+  assertInputFenced(f);
+  await f.advance(501);
+  assert.equal(f.socket.closed, true);
+});
+
+test("held first render does not certify readiness; successful completion alone enables acquisition", async (t) => {
+  const f = await fixture(t);
+  f.snapshot(0, "visible only after completion");
+  assert.equal(f.element("acquire").disabled, true);
+  f.element("acquire").dispatchEvent(new Event("click"));
+  assert.equal(f.socket.sent.length, 1);
+  assertInputFenced(f);
+  f.views[0].complete();
+  await settle();
+  assert.equal(f.element("acquire").disabled, false);
+  assertInputFenced(f); // Seeing a screen alone is not a writer grant.
+});
+
+test("failed first render never enables interaction or certifies readiness by timeout", async (t) => {
+  const f = await fixture(t);
+  f.failNextRender();
+  f.snapshot(0, "cannot render");
+  assert.equal(f.element("acquire").disabled, true);
+  assertInputFenced(f);
+  await settle();
+  assert.equal(f.socket.closed, true);
+  await f.advance(30000);
+  assertInputFenced(f);
+});
+
+test("replacement render fences a valid lease at dispatch and blocked drafts do not consume input sequence", async (t) => {
+  const f = await fixture(t);
+  await f.acquire();
+  f.edit("keep my draft");
+  f.snapshot(1, "replacement prompt");
+  assertInputFenced(f);
+  f.views[1].complete();
+  await settle();
+  assert.equal(f.element("send").disabled, false);
+  f.element("send").click();
+  assert.equal(f.socket.sent.at(-1)?.sequence, 1);
+  f.ack(2);
+  f.edit("next input");
+  f.element("draft").dispatchEvent(new Event("compositionstart"));
+  f.element("send").dispatchEvent(new Event("click"));
+  f.element("draft").dispatchEvent(new Event("compositionend"));
+  f.element("send").click();
+  assert.equal(f.socket.sent.at(-1)?.sequence, 2, "blocked composition dispatch cannot skip a sequence either");
+});
+
+test("queued newer screen prevents earlier completion from briefly re-enabling acquisition", async (t) => {
+  const f = await fixture(t);
+  f.snapshot(0, "first");
+  f.snapshot(1, "newer");
+  f.views[0].complete();
+  await settle();
+  assert.equal(f.element("acquire").disabled, true);
+  assertInputFenced(f);
+  f.views[1].complete();
+  await settle();
+  assert.equal(f.element("acquire").disabled, false);
+});
+
+test("identity change and disconnect fence readiness before any late render callback", async (t) => {
+  const f = await fixture(t);
+  await f.acquire();
+  f.snapshot(1, "held replacement");
+  f.element("disconnect").click();
+  f.views[1].complete();
+  await settle();
+  assertInputFenced(f);
+  assert.equal(f.element("screen-state").textContent, "画面已清除");
+  assert.equal(f.timers.size, 0);
+  const other = await fixture(t);
+  await other.acquire();
+  other.socket.receive({
+    type: "screen-start",
+    target: { ...target, sessionId: "replacement" },
+    sequence: 1,
+    columns: 80,
+    rows: 24,
+    bytes: 1,
+    chunks: 1,
+  });
+  assert.equal(other.socket.closed, true);
+  assertInputFenced(other);
+});
+
+test("ownership feedback is explicitly last-known and countdown is conservative from acquire dispatch, not ACK", async (t) => {
+  const f = await fixture(t);
+  await f.rendered();
+  f.element("acquire").click();
+  await f.advance(1500, false);
+  f.ack(1, { ok: true, leaseId: "e".repeat(32), expiresInMs: 30000 });
+  assert.match(f.element("connection-state").textContent, /申请已确认.*非实时/);
+  assert.match(f.element("lease-state").textContent, /保守剩余 28 秒/);
+  assert.match(f.element("ownership-state").textContent, /上次.*无人.*非实时/);
+  await f.advance(1000);
+  assert.match(f.element("lease-state").textContent, /保守剩余 27 秒/);
+  const staleCallbacks = [...f.timers.values()].map((timer) => timer.callback);
+  f.element("disconnect").click();
+  for (const callback of staleCallbacks) callback();
+  await settle();
+  assert.equal(f.timers.size, 0, "late local timers never reschedule after disconnect");
+  assertInputFenced(f);
+});
+
+test("expired conservative grant rejects dispatch even if a delayed browser timer has not fired", async (t) => {
+  const f = await fixture(t);
+  await f.acquire();
+  f.edit("must not send");
+  await f.advance(30001, false);
+  f.element("send").dispatchEvent(new Event("click"));
+  assert.equal(f.socket.closed, true);
+  assert.equal(f.socket.sent.length, 2, "attach and acquire only; never input after the local deadline");
+  assertInputFenced(f);
 });

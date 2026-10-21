@@ -65,6 +65,7 @@ test("browser client successive snapshots and delayed input ACK preserve current
     let input: Record<string, unknown> | undefined;
     const inputId = () => input?.id;
     let connections = 0;
+    const screens: string[] = [];
     const respond = (id: unknown, result: object) => remote?.send(JSON.stringify({ type: "response", id, result }));
     await page.routeWebSocket("**/api/terminal/ws", (ws) => {
       connections++;
@@ -87,7 +88,7 @@ test("browser client successive snapshots and delayed input ACK preserve current
               },
               { type: "screen-end", sequence, terminalEpoch: target.terminalEpoch },
             ])
-              ws.send(JSON.stringify(output));
+              screens.push(JSON.stringify(output));
           }
         } else if (frame.type === "acquire")
           respond(frame.id, { ok: true, leaseId: "e".repeat(32), expiresInMs: 30000 });
@@ -98,6 +99,16 @@ test("browser client successive snapshots and delayed input ACK preserve current
     await expect(page.locator("#connect")).toBeEnabled();
     await page.locator("#access").selectOption("write");
     await page.locator("#connect").click();
+    await expect(page.locator("#connection-state")).toContainText("等待完整画面");
+    await expect(page.locator("#acquire")).toBeDisabled();
+    await expect(page.locator("#draft")).toBeDisabled();
+    await expect(page.locator("#send")).toBeDisabled();
+    await page.screenshot({ path: path.join(artifacts, `${width}-final-fix-awaiting-screen.png`), fullPage: true });
+    const first = screens.shift();
+    assert.ok(first && remote);
+    remote.send(first);
+    await expect(page.locator("#acquire")).toBeDisabled();
+    for (const output of screens) remote?.send(output);
     await expect(page.locator("#screen-state")).toContainText("#1");
     await expect(page.locator("#terminal-screen .xterm-rows")).toContainText("BURST SECOND 中文画面");
     await page.locator("#acquire").click();
@@ -116,8 +127,10 @@ test("browser client successive snapshots and delayed input ACK preserve current
     respond(inputId(), { ok: true, delivery: "written" });
     await expect(page.locator("#send")).toBeEnabled();
     await expect(draft).toHaveValue("新的未发送草稿，必须保留");
-    await expect(page.locator("#connection-state")).toContainText("控制权已取得");
-    await page.screenshot({ path: path.join(artifacts, `${width}-fix1-draft-preserved.png`), fullPage: true });
+    await expect(page.locator("#connection-state")).toContainText("控制申请已确认（非实时）");
+    await expect(page.locator("#ownership-state")).toContainText("上次核对输入归属：无人（非实时");
+    await expect(page.locator("#lease-state")).toContainText(/保守剩余 (?:[0-9]|[12][0-9]) 秒/);
+    await page.screenshot({ path: path.join(artifacts, `${width}-final-fix-draft-preserved.png`), fullPage: true });
     input = undefined;
     await page.locator("#send").click();
     await expect.poll(() => input?.data).toBe("新的未发送草稿，必须保留");
@@ -410,7 +423,7 @@ test("actual Chromium → production Hub → actual Gate/Engine → bundled runt
     await expect(page.locator("#screen-state")).toContainText("完整画面快照");
     await page.getByRole("button", { name: "取得控制权", exact: true }).click();
     await expect(page.getByRole("button", { name: "发送文本", exact: true })).toBeEnabled();
-    await expect(page.locator("#connection-state")).toContainText("控制权已取得");
+    await expect(page.locator("#connection-state")).toContainText("控制申请已确认（非实时）");
     const draft = page.locator("#draft");
     await draft.dispatchEvent("compositionstart", { data: "中" });
     await draft.fill("中文输入");
@@ -475,7 +488,7 @@ test("actual Chromium → production Hub → actual Gate/Engine → bundled runt
   await expect(page.locator("#screen-state")).toContainText("完整画面快照");
   await page.getByRole("button", { name: "取得控制权", exact: true }).click();
   await expect(page.locator("#draft")).toBeEnabled();
-  await expect(page.locator("#connection-state")).toContainText("控制权已取得");
+  await expect(page.locator("#connection-state")).toContainText("控制申请已确认（非实时）");
   // Advance only this browser's clock: this proves the local UI fence and
   // display, not a new real-time broker lease-expiry validation.
   await page.clock.fastForward(30001);

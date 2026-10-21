@@ -316,56 +316,131 @@ class Stack:
 
     def close(self):
         if self.closed:return
-        self.closed=True
-        if hasattr(self,'workspace'):
+        failures=[]
+
+        def attempt(label, action):
+            try:
+                action()
+                return True
+            except Exception as error:
+                # Record fixed operation/resource names, never private payloads.
+                failures.append(label+': '+type(error).__name__)
+                return False
+
+        def resource(kind, name):
+            try:
+                return json.loads(docker(kind,'inspect','--format','{{json .}}',name))
+            except RuntimeError:
+                # Failed inspect alone is not absence (e.g. unavailable Engine).
+                # Confirm absence by exact name; never remove by a broad filter.
+                formats={'container':'{{.Names}}','volume':'{{.Name}}',
+                         'image':'{{.Repository}}:{{.Tag}}'}
+                options=['-a'] if kind=='container' else []
+                names=docker(kind,'ls',*options,'--format',formats[kind]).decode().splitlines()
+                if name in names:raise
+                return None
+
+        def capture():
             self.evidence['nativeEvents']=self.events()
             effects=self.workspace/'native-effects.txt'
             self.evidence['effects']=effects.read_text().splitlines() if effects.exists() else []
+        if hasattr(self,'workspace'):attempt('capture native evidence',capture)
         if self.master is not None and self.launcher and self.launcher.poll() is None:
             try:os.write(self.master,b'\x1dl/quit\r')
             except OSError:pass
-        for name in reversed(self.containers):
-            result=subprocess.run(['docker','inspect','--format','{{json .Config.Labels}}',name],capture_output=True,timeout=5)
-            if result.returncode:continue
-            assert json.loads(result.stdout).get('pi.task6.test')==self.prefix
-            if self.inspect(name)['State']['Running']:
-                docker('stop','--time','5',name,timeout=8)
+
+        def remove_container(name):
+            assert name in [self.prefix+'-'+role for role in ('gate','hub','pi','cleanup-probe')]
+            item=resource('container',name)
+            if item is None:
+                self.containers.remove(name)
+                return
+            assert item['Config']['Labels'].get('pi.task6.test')==self.prefix
+            if item['State']['Running']:
+                attempt('stop '+name,lambda:docker('stop','--time','5',name,timeout=8))
             docker('rm','-f',name,timeout=12)
+            self.containers.remove(name)
+        for name in reversed(self.containers[:]):
+            attempt('remove container '+name,lambda:remove_container(name))
+
+        def finish_launcher():
+            try:
+                if self.launcher.poll() is None:self.launcher.terminate()
+                self.launcher.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.launcher.kill()
+                self.launcher.communicate(timeout=5)
+            self.launcher=None
         if self.launcher:
-            if self.launcher.poll() is None:self.launcher.terminate()
-            self.launcher.communicate(timeout=5)
+            attempt('reap launcher',finish_launcher)
         self.stop_drain.set()
-        if self.drain:self.drain.join(1)
-        if self.master is not None:os.close(self.master)
-        registry=self.root/'registry/registry.sock'
-        assert not registry.exists(),'Hub registry socket left after graceful close'
-        if self.volumes:
+        if self.drain:attempt('join terminal drain',lambda:self.drain.join(1))
+        if self.master is not None:
+            def close_master():
+                os.close(self.master)
+                self.master=None
+            attempt('close terminal descriptor',close_master)
+
+        def check_sockets():
+            assert not (self.root/'registry/registry.sock').exists(),'Hub registry socket left after graceful close'
+            ipc=self.prefix+'-ipc'
+            item=resource('volume',ipc)
+            if item is None:return
+            assert item['Labels'].get('pi.task6.test')==self.prefix
             probe=self.prefix+'-cleanup-probe'
+            self.containers.append(probe) # --rm may not finish after a timeout/error.
             docker('run','--rm','--name',probe,*self.common(), '--read-only','--user','1000:1000',
-                   '--mount','type=volume,src='+self.volumes[1]+',dst=/run/pi-terminal-provider,readonly',
+                   '--mount','type=volume,src='+ipc+',dst=/run/pi-terminal-provider,readonly',
                    '--entrypoint','/usr/bin/python3',self.runtime_image,'-I','-c',
                    'from pathlib import Path; assert not Path("/run/pi-terminal-provider/provider.sock").exists()')
             self.evidence['gateAndHubSocketsRemoved']=True
-        for name in self.volumes:
-            assert json.loads(docker('volume','inspect','--format','{{json .Labels}}',name))['pi.task6.test']==self.prefix
-            docker('volume','rm',name)
-        for tag in reversed(self.images):
-            result=subprocess.run(['docker','image','inspect','--format','{{json .Config.Labels}}',tag],capture_output=True,timeout=5)
-            if result.returncode:continue
-            assert json.loads(result.stdout).get('pi.task6.test')==self.prefix
-            docker('image','rm',tag,timeout=15)
+        if self.prefix+'-ipc' in self.volumes and hasattr(self,'runtime_image'):
+            attempt('verify Gate and Hub socket removal',check_sockets)
+        probe=self.prefix+'-cleanup-probe'
+        if probe in self.containers:
+            attempt('remove container '+probe,lambda:remove_container(probe))
+
+        def remove_owned(kind, name, recorded, roles):
+            assert name in [self.prefix+role for role in roles]
+            item=resource(kind,name)
+            if item is not None:
+                labels=item['Labels'] if kind=='volume' else item['Config']['Labels']
+                assert labels.get('pi.task6.test')==self.prefix
+                docker(kind,'rm',name,timeout=15)
+            recorded.remove(name)
+        for name in self.volumes[:]:
+            attempt('remove volume '+name,lambda:remove_owned('volume',name,self.volumes,('-state','-ipc','-credentials')))
+        for tag in reversed(self.images[:]):
+            attempt('remove image '+tag,lambda:remove_owned('image',tag,self.images,(':runtime',':gate')))
+
+        def remove_alias():
+            assert self.base_alias==self.prefix+':cached-base'
+            item=resource('image',self.base_alias)
+            if item is not None:
+                assert item['Id']==BASE
+                docker('image','rm',self.base_alias,timeout=15)
+            self.base_alias=None
         if self.base_alias:
-            assert json.loads(docker('image','inspect','--format','{{json .Id}}',self.base_alias)) == BASE
-            docker('image','rm',self.base_alias,timeout=15)
-        remaining=docker('ps','-aq','--filter','label=pi.task6.test='+self.prefix).strip()
-        assert not remaining
-        assert not docker('volume','ls','-q','--filter','label=pi.task6.test='+self.prefix).strip()
-        assert not docker('image','ls','-q','--filter','label=pi.task6.test='+self.prefix).strip()
-        self.evidence['ownedResourcesRemoved']=True
-        artifacts=Path(os.environ.get('PI_E2E_ARTIFACT_DIR','/tmp/pi-task6-browser'))
-        artifacts.mkdir(parents=True,exist_ok=True)
-        (artifacts/(self.prefix+'-evidence.json')).write_text(json.dumps(self.evidence,indent=2)+'\n')
-        self.temporary.cleanup()
+            attempt('remove cached base alias',remove_alias)
+
+        def audit(*args):
+            assert not docker(*args,'--filter','label=pi.task6.test='+self.prefix).strip()
+        for label,args in [('containers',('ps','-aq')),('volumes',('volume','ls','-q')),('images',('image','ls','-q'))]:
+            attempt('audit '+label,lambda:audit(*args))
+        attempt('remove temporary directory',self.temporary.cleanup)
+        self.evidence['cleanupFailures']=failures[:]
+        self.evidence.setdefault('cleanupAttempts',[]).append({'failures':failures[:]})
+        self.evidence['ownedResourcesRemoved']=not failures
+
+        def save_evidence():
+            artifacts=Path(os.environ.get('PI_E2E_ARTIFACT_DIR','/tmp/pi-task6-browser'))
+            artifacts.mkdir(parents=True,exist_ok=True)
+            (artifacts/(self.prefix+'-evidence.json')).write_text(json.dumps(self.evidence,indent=2)+'\n')
+        attempt('save cleanup evidence',save_evidence)
+        self.closed=not failures
+        if failures:
+            self.evidence['ownedResourcesRemoved']=False
+            raise RuntimeError('isolated cleanup incomplete: '+'; '.join(failures))
 
 
 def main():

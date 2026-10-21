@@ -57,6 +57,29 @@ unique checked local base alias and scrolls outer padding; no CSS was changed.
 
 ## Actual native chain
 
+### Review fix round 1: cleanup failure paths
+
+Independent review R1 found that the original fixture's successful cleanup did
+not cover partial initialization or cleanup exceptions. The fixture now guards
+the exact provider-IPC volume role, attempts all recorded owned resources even
+after errors, aggregates incomplete-cleanup failures, and leaves failed entries
+retryable. Exact name/label checks and the cached-base immutable-ID check remain;
+no broad removal or prune was introduced. A timed-out cleanup probe is itself
+tracked and removed. Failed socket verification cannot be silently upgraded to
+a socket proof by a later cleanup retry.
+
+[Fix-round evidence](fix-round-1.md) records behavioral RED (four failures and the
+real one-volume IndexError) followed by GREEN, including the final9/9 mocked
+cleanup cases. Only disposable temporary files are real; Docker/Engine calls
+are substituted. No native, broad regression suite or live operation was rerun.
+The native run/screenshots below remain the original successful acceptance,
+not evidence of running the amended fixture against Docker. Existing warning
+debt (R2) and final whole-suite acceptance remain deferred to Task7. This fix
+does not change the external patch/provenance or require rebuilding dist;
+`npm run verify:dist` still verifies the unchanged release inventory.
+
+### Original installed-native acceptance
+
 [Structured evidence](native-evidence.json) records actual Gate preflight before
 Pi creation, runtime/Gate immutable IDs, child PID18/PPID1/kernel start27959636 and
 shared CLI source/Pi1.1.0. All later event reads independently recheck that kernel

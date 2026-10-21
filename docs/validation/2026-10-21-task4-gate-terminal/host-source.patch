@@ -561,7 +561,7 @@
 +        return True
 --- a/pi-deploy-gate/gate/terminal_provider.py
 +++ b/pi-deploy-gate/gate/terminal_provider.py
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,294 @@
 +"""Private Gate↔Hub provider. Closing a helper never signals the Pi process."""
 +import hmac
 +import fcntl
@@ -704,7 +704,7 @@
 +        queues = {helper: bytearray(wire.encode(opening)), peer: bytearray()}
 +        created = time.monotonic()
 +        next_inspect, first_deadline = created + .5, created + 2
-+        partial = {peer: None, helper: None}
++        partial = {inputs: None, outputs: None, mux: None}
 +        blocked = {peer: None, helper: created}
 +        ending = False
 +        while not self.closed and not self.gate.closing:
@@ -732,19 +732,26 @@
 +                    for value in values:
 +                        conversation.request(value)
 +                        queues[helper].extend(wire.encode(value))
-+                    incomplete = bool(inputs.pending)
++                    progress = [(inputs, bool(inputs.pending), bool(values))]
 +                else:
-+                    values = outputs.feed(mux.feed(data))
++                    payload = mux.feed(data)
++                    values = outputs.feed(payload)
 +                    for value in values:
 +                        keep = conversation.response(value)
 +                        queues[peer].extend(wire.encode(value))
 +                        if not keep or opening['op'] == 'status':
 +                            ending = True
-+                    incomplete = bool(outputs.pending or mux.pending or mux.size is not None)
-+                if incomplete:
-+                    partial[sock] = partial[sock] or time.monotonic()
-+                else:
-+                    partial[sock] = None
++                    # Mux payloads are nonempty: payload marks a completed packet,
++                    # while values marks completed JSON lines, independently.
++                    progress = [(mux, bool(mux.pending or mux.size is not None), bool(payload)),
++                                (outputs, bool(outputs.pending), bool(values))]
++                for parser, incomplete, completed in progress:
++                    if not incomplete:
++                        partial[parser] = None
++                    elif completed or partial[parser] is None:
++                        # Only a new unfinished frame gets a new deadline;
++                        # receiving more bytes of the same frame never renews it.
++                        partial[parser] = time.monotonic()
 +            for sock, queue in queues.items():
 +                if len(queue) > wire.QUEUE:
 +                    return
@@ -907,7 +914,7 @@
 +        self.assertEqual(manager.active(), [])
 --- a/pi-deploy-gate/tests/test_terminal_provider.py
 +++ b/pi-deploy-gate/tests/test_terminal_provider.py
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,515 @@
 +"""Real provider and Engine against a controlled Unix Docker HTTP boundary."""
 +import copy
 +import http.server
@@ -921,6 +928,8 @@
 +import threading
 +import time
 +import unittest
++from types import SimpleNamespace
++from unittest.mock import patch
 +
 +from gate.engine import Engine
 +from gate.service import Gate
@@ -934,6 +943,126 @@
 +
 +def line(value):
 +    return json.dumps(value, separators=(',', ':')).encode() + b'\n'
++
++
++class RelayDeadlinesTests(unittest.TestCase):
++    """Real relay/parsers with deterministic read boundaries and elapsed time."""
++    @staticmethod
++    def packet(data):
++        return b'\x01\0\0\0' + struct.pack('>I', len(data)) + data
++
++    def relay(self, events):
++        from gate import terminal_provider as provider
++
++        class Socket:
++            def __init__(self):
++                self.incoming = b''
++                self.sent = bytearray()
++
++            def setblocking(self, _):
++                pass
++
++            def recv(self, limit):
++                assert len(self.incoming) <= limit
++                return self.incoming
++
++            def send(self, data):
++                self.sent.extend(data)
++                return len(data)
++
++        peer, helper = Socket(), Socket()
++        sockets = {'peer': peer, 'helper': helper}
++        clock = SimpleNamespace(now=10.0)
++        remaining = list(events)
++
++        def select(readers, writers, errors, timeout):
++            clock.now += .25
++            if remaining:
++                name, data = remaining.pop(0)
++                if name is not None:
++                    sock = sockets[name]
++                    self.assertIn(sock, readers)
++                    sock.incoming = data
++                    return [sock], writers, []
++            return [], writers, []
++
++        gate = SimpleNamespace(token='1' * 64, lifecycle_token='2' * 64, closing=False)
++        relay = provider.TerminalProvider(gate, {'enabled': True, 'images': [IMAGE]}, TOKEN)
++        opening = dict(v=1, op='connect', target=TARGET, scope='write',
++                       binding=dict(authorizationId='8' * 32, connectionId='9' * 32))
++        with patch.object(provider, 'time', SimpleNamespace(monotonic=lambda: clock.now)), \
++                patch.object(provider.select, 'select', select):
++            relay.relay(peer, helper, opening, lambda: None)
++        return peer.sent, helper.sent, remaining, clock.now - 10, opening
++
++    def test_continuous_fragmented_helper_json_advances_partial_deadline(self):
++        ready = line({'type': 'ready', 'target': TARGET})
++        screen = line({'type': 'screen-unavailable'})
++        chunks = [ready + screen[:10]] + [screen[10:] + screen[:10]] * 15 + [screen[10:]]
++        events = [('helper', self.packet(chunk)) for chunk in chunks] + [('helper', b'')]
++        received, _, remaining, elapsed, _ = self.relay(events)
++        self.assertEqual(received, ready + screen * 16)
++        self.assertEqual(remaining, [])
++        self.assertGreater(elapsed, 4)
++
++    def test_continuous_fragmented_peer_json_advances_partial_deadline(self):
++        ready = line({'type': 'ready', 'target': TARGET})
++        requests = [line({'id': i, 'type': 'release'}) for i in range(1, 17)]
++        chunks = [requests[0][:10]]
++        chunks += [old[10:] + new[:10] for old, new in zip(requests, requests[1:])]
++        chunks += [requests[-1][10:]]
++        events = [('helper', self.packet(ready))] + [('peer', chunk) for chunk in chunks]
++        # Drain the final request before peer EOF (which intentionally cancels queued input).
++        events += [(None, None), ('peer', b'')]
++        _, forwarded, remaining, elapsed, opening = self.relay(events)
++        self.assertEqual(forwarded, line(opening) + b''.join(requests))
++        self.assertEqual(remaining, [])
++        self.assertGreater(elapsed, 4)
++
++    def test_continuous_fragmented_mux_advances_partial_deadline(self):
++        ready = line({'type': 'ready', 'target': TARGET})
++        screen = line({'type': 'screen-unavailable'})
++        packet = self.packet(screen)
++        for split in (4, 10):  # Next partial header, and next partial payload.
++            with self.subTest(split=split):
++                chunks = [packet[:split]] + [packet[split:] + packet[:split]] * 15 + [packet[split:]]
++                events = [('helper', self.packet(ready))]
++                events += [('helper', chunk) for chunk in chunks] + [('helper', b'')]
++                received, _, remaining, elapsed, _ = self.relay(events)
++                self.assertEqual(received, ready + screen * 16)
++                self.assertEqual(remaining, [])
++                self.assertGreater(elapsed, 4)
++
++    def test_trickling_peer_json_does_not_extend_partial_deadline(self):
++        ready = line({'type': 'ready', 'target': TARGET})
++        events = [('helper', self.packet(ready)), ('peer', b'{')]
++        events += [('peer', b' ')] * 15
++        received, forwarded, remaining, elapsed, opening = self.relay(events)
++        self.assertEqual(received, ready)
++        self.assertEqual(forwarded, line(opening))
++        self.assertTrue(remaining)
++        self.assertEqual(elapsed, 2.5)
++
++    def test_complete_mux_packets_do_not_extend_unfinished_json_deadline(self):
++        ready = line({'type': 'ready', 'target': TARGET})
++        events = [('helper', self.packet(ready)), ('helper', self.packet(b'{'))]
++        events += [('helper', self.packet(b' '))] * 15
++        received, _, remaining, elapsed, _ = self.relay(events)
++        self.assertEqual(received, ready)
++        self.assertTrue(remaining)
++        self.assertEqual(elapsed, 2.5)
++
++    def test_trickling_mux_header_or_payload_does_not_extend_partial_deadline(self):
++        ready = line({'type': 'ready', 'target': TARGET})
++        packet = self.packet(line({'type': 'screen-unavailable'}))
++        for split in (1, 8):
++            with self.subTest(split=split):
++                events = [('helper', self.packet(ready)), ('helper', packet[:split])]
++                events += [('helper', bytes([byte])) for byte in packet[split:]]
++                received, _, remaining, elapsed, _ = self.relay(events)
++                self.assertEqual(received, ready)
++                self.assertTrue(remaining)
++                self.assertEqual(elapsed, 2.5)
 +
 +
 +class DockerServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

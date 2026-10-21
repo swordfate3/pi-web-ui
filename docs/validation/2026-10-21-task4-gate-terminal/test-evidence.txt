@@ -101,3 +101,103 @@ CLEANUP exact owned containers/volumes/test tag removed; no background sessions
 Ran 358 tests in 78.327s
 
 OK
+
+=== Task4 fix round 1: historical logs above retained unchanged ===
+Base: 104940430f1ae6b5be9d768c7f99559c7bf18aef
+CWD: /home/fate/docker_files/pi-deploy-gate
+RED and targeted GREEN: env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests -p test_terminal_provider.py -k RelayDeadlinesTests -v
+Focused GREEN: env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests -p test_terminal_provider.py -v
+No full Gate or Docker rerun.
+
+=== /tmp/pi-task4-fix1-deadlines-red.log ===
+test_complete_mux_packets_do_not_extend_unfinished_json_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_continuous_fragmented_helper_json_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... FAIL
+test_continuous_fragmented_mux_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... test_continuous_fragmented_peer_json_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... FAIL
+test_trickling_mux_header_or_payload_does_not_extend_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_trickling_peer_json_does_not_extend_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+
+======================================================================
+FAIL: test_continuous_fragmented_helper_json_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/test_terminal_provider.py", line 87, in test_continuous_fragmented_helper_json_advances_partial_deadline
+    self.assertEqual(received, ready + screen * 16)
+AssertionError: bytearray(b'{"type":"ready","target":{"v":[436 chars]}\n') != b'{"type":"ready","target":{"v":1,"runId":[704 chars]"}\n'
+
+======================================================================
+FAIL: test_continuous_fragmented_mux_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) (split=4)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/test_terminal_provider.py", line 115, in test_continuous_fragmented_mux_advances_partial_deadline
+    self.assertEqual(received, ready + screen * 16)
+AssertionError: bytearray(b'{"type":"ready","target":{"v":[467 chars]}\n') != b'{"type":"ready","target":{"v":1,"runId":[704 chars]"}\n'
+
+======================================================================
+FAIL: test_continuous_fragmented_mux_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) (split=10)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/test_terminal_provider.py", line 115, in test_continuous_fragmented_mux_advances_partial_deadline
+    self.assertEqual(received, ready + screen * 16)
+AssertionError: bytearray(b'{"type":"ready","target":{"v":[467 chars]}\n') != b'{"type":"ready","target":{"v":1,"runId":[704 chars]"}\n'
+
+======================================================================
+FAIL: test_continuous_fragmented_peer_json_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/fate/docker_files/pi-deploy-gate/tests/test_terminal_provider.py", line 101, in test_continuous_fragmented_peer_json_advances_partial_deadline
+    self.assertEqual(forwarded, line(opening) + b''.join(requests))
+AssertionError: bytearray(b'{"v":1,"op":"connect","target"[572 chars]}\n') != b'{"v":1,"op":"connect","target":{"v":1,"r[784 chars]"}\n'
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.007s
+
+FAILED (failures=4)
+
+=== /tmp/pi-task4-fix1-deadlines-green.log ===
+test_complete_mux_packets_do_not_extend_unfinished_json_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_continuous_fragmented_helper_json_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_continuous_fragmented_mux_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_continuous_fragmented_peer_json_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_trickling_mux_header_or_payload_does_not_extend_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_trickling_peer_json_does_not_extend_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.007s
+
+OK
+
+=== /tmp/pi-task4-fix1-provider-green.log ===
+test_active_stream_is_revoked_if_logging_safety_changes (test_terminal_provider.ProviderTests) ... ok
+test_arbitrary_fields_and_nonfinite_or_duplicate_json_keys_are_refused (test_terminal_provider.ProviderTests) ... ok
+test_changed_container_identity_revokes_open_connection (test_terminal_provider.ProviderTests) ... ok
+test_close_revokes_established_stream (test_terminal_provider.ProviderTests) ... ok
+test_complete_screen_frames_and_request_results_are_closed (test_terminal_provider.ProviderTests) ... ok
+test_connect_release_and_close_end_only_helper (test_terminal_provider.ProviderTests) ... ok
+test_content_logging_and_default_logging_refused_before_exec (test_terminal_provider.ProviderTests) ... ok
+test_default_service_configuration_creates_no_credentials_or_socket (test_terminal_provider.ProviderTests) ... ok
+test_disabled_and_wrong_credentials_never_contact_docker (test_terminal_provider.ProviderTests) ... ok
+test_duplicate_binding_and_arbitrary_connected_action_refused (test_terminal_provider.ProviderTests) ... ok
+test_fragmented_docker_header_and_json_frames (test_terminal_provider.ProviderTests) ... ok
+test_identity_change_between_exec_create_and_start_never_starts_helper (test_terminal_provider.ProviderTests) ... ok
+test_partial_frame_deadline_and_eight_pending_peer_limit (test_terminal_provider.ProviderTests) ... ok
+test_partial_runtime_frame_closes_on_absolute_deadline (test_terminal_provider.ProviderTests) ... ok
+test_read_scope_cannot_acquire_or_forward_input (test_terminal_provider.ProviderTests) ... ok
+test_real_lifecycle_token_and_wrong_token_never_contact_docker (test_terminal_provider.ProviderTests) ... ok
+test_runtime_diagnostics_extra_keys_and_wrong_identity_not_relayed (test_terminal_provider.ProviderTests) ... ok
+test_second_writer_and_third_reader_never_exec (test_terminal_provider.ProviderTests) ... ok
+test_sequence_reuse_and_arbitrary_fields_close_before_forwarding (test_terminal_provider.ProviderTests) ... ok
+test_service_refuses_unsafe_parents_without_docker_or_secret_creation (test_terminal_provider.ProviderTests) ... ok
+test_status_strips_private_token_and_uses_fixed_isolated_exec (test_terminal_provider.ProviderTests) ... ok
+test_stderr_and_malformed_docker_stream_never_relay_diagnostics (test_terminal_provider.ProviderTests) ... ok
+test_unknown_profile_image_duplicate_and_unsafe_runtime_never_exec (test_terminal_provider.ProviderTests) ... ok
+test_complete_mux_packets_do_not_extend_unfinished_json_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_continuous_fragmented_helper_json_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_continuous_fragmented_mux_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_continuous_fragmented_peer_json_advances_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_trickling_mux_header_or_payload_does_not_extend_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+test_trickling_peer_json_does_not_extend_partial_deadline (test_terminal_provider.RelayDeadlinesTests) ... ok
+
+----------------------------------------------------------------------
+Ran 29 tests in 16.126s
+
+OK

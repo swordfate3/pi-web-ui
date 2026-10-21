@@ -11,7 +11,7 @@ Repository implementation base: `b3634096bd5b5a2e9c22122ed0b5821eefb59bcf`. Cont
 - `test-evidence.txt`: actual logs, including failures and the diagnostic that explains them. No credentials or terminal content are logged.
 - All external direct edits used permission-aware escalated `apply_patch`. No production policy/state/token/volume changes, production image retags, deployments, broad cleanup, push, worktrees or subagents. The unrelated host-review report and recovery stash are excluded.
 
-## Final verification
+## Original implementation verification (before fix round 1)
 
 | Check | Actual result |
 | --- | --- |
@@ -30,6 +30,22 @@ Gate command: `env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discov
 Actual Docker command from Gate: `env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 tests/docker_terminal_provider.py`. It builds from cached immutable base `sha256:1a23ab4104c1d806a9cd2370f508ed04d83ea79c48ebdf9da8d99ae904cebae8`, no network/package download. Each invocation owns unique labelled test containers, two disposable IPC volumes and a test-only tag; exact cleanup runs on success and failure. The fixture copies the actual Gate Dockerfile (changing only its base to the authorized digest), Gate source and current bundled Task2 runtime into a sanitized context with no production policy/secrets. Synthetic child/adapter and metadata probes are image-owned test fixtures.
 
 The first real-Docker attempt passed permission checks but never reached runtime ready. A second diagnostic isolated rejection of inherited PATH `/opt/huggingface/bin:/home/node/.local/bin:...`. The final attempt set the canonical PATH in the disposable launch, retained the strict production rule, and passed. Logs preserve both failures; no failure is hidden as a green result.
+
+## Review fix round 1 — unfinished-frame deadlines
+
+Base: `104940430f1ae6b5be9d768c7f99559c7bf18aef`. Independent review identified P1 premature closure during healthy continuous fragmentation: the original timestamp survived completion of an old frame whenever the same read began another partial frame. This round changes only external `gate/terminal_provider.py` and `tests/test_terminal_provider.py`; the patch and provenance now describe those amended sources. Original failed/passing logs above remain historical evidence, not post-fix full-suite or Docker results.
+
+The relay now tracks peer JSONL, helper JSONL and Docker multiplex unfinished frames separately. A completed frame followed by a new partial frame advances only that parser's timestamp. Further bytes without completion do not refresh it. Because allowed multiplex payloads are nonempty, demultiplexed payload proves packet completion, but only parsed JSON values prove JSON-frame completion; complete Docker packets cannot keep an unfinished JSON line alive. All two-second bounds, queues, admission, credentials, wire schemas and default-disabled policy are unchanged.
+
+Six deterministic tests exercise the actual relay, JSONL parser, conversation validator and demultiplexer with controlled socket/select/clock boundaries. Healthy helper JSON, peer JSON and multiplex header/payload fragmentation each continue beyond four simulated seconds with every frame completing on the next read. Genuine peer JSON trickling, helper JSON trickling across complete multiplex packets, and multiplex header/payload trickling still expire two seconds after their initial fragment. The existing real-socket stalled-runtime-frame test is retained.
+
+- RED: six tests, four assertion failures (helper JSON, peer JSON, multiplex header and payload subcases), 0.007s; `/tmp/pi-task4-fix1-deadlines-red.log`.
+- Targeted GREEN: six tests passed, 0.007s; `/tmp/pi-task4-fix1-deadlines-green.log`.
+- Focused provider GREEN: **29/29**, 16.126s, exit0, no warnings/errors; `/tmp/pi-task4-fix1-provider-green.log`. Session2845 completed and collected.
+- Command from external Gate: `env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests -p test_terminal_provider.py -v`; RED/targeted GREEN add `-k RelayDeadlinesTests` before `-v`.
+- No repeat of the historical358-test suite or isolated Docker checks: no engine, admission, IPC/permission, image, configuration or supervisor boundary changed. No production or Docker operations occurred in this fix round. All15 patch paths passed baseline dry-run; exact source/baseline hashes are recorded in `provenance.json`.
+
+Ready for independent fix review, not deployment approval. Tasks5–7 gates and all handoff contracts below remain unchanged.
 
 ## Private configuration and narrow mounts — Task5 / Task6
 
@@ -108,6 +124,7 @@ No extra arguments. Fixed exec overrides: canonical PATH above, `PYTHONNOUSERSIT
 - Dedicated Unix listener and bounded transport; no extension of the legacy16KiB buffered lifecycle RPC and no generic exec proxy.
 - Global8 accepted peers (including handshakes/status), at most2 connected readers per run including writer, at most1 writer; active connectionId is unique. Admission is bounded before thread dispatch at the listener and before helper creation.
 - First peer frame deadline2s; runtime readiness, partial frames and queued batches each have2s loop deadlines. Duplex queues cap256KiB each; read blocks cap32KiB. Each Docker stdout multiplex payload caps64KiB, exact8-byte header, zero reserved bytes, stdout only; stderr/invalid/truncated frames close with no forwarded diagnostics. HTTP upgrade header caps8KiB with a3s absolute Engine budget.
+- Partial-frame deadlines are per unfinished peer JSONL, helper JSONL and Docker multiplex frame. Completion/new-partial advances that parser's deadline; byte trickling never does. Multiplex completion alone cannot extend an unfinished JSON frame's deadline.
 - Overall connection cap300s. No automatic reconnect/reacquire/input resend. Task5 must treat expiry/close as loss of connection/authority, not continued readiness.
 - Full immutable identity/safety reinspection before create, between create/start, and periodically every0.5s while streaming; target hash includes ID/image/config/host config/full normalized mounts/StartedAt. Each inspection has a bounded4s budget; synchronous inspection can extend observation of loop deadlines by that bounded duration. Failure/change closes the helper without signalling Pi.
 - `close()` revokes this provider's connections; Hub revokes individual authority by closing its connection. EOF/disconnect is not a release/command-success ACK. No terminal-content or credential diagnostics are emitted.

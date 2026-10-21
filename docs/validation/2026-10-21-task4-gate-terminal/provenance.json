@@ -5,7 +5,7 @@
   "controller_documentation_commit": "cae83e382e8745715a8c9663b2639fe97a27cee4",
   "baseline_directory": "/home/fate/gitproject/codex_project_v2/pi-web-ui/.superpowers/sdd/2026-10-21-trusted-terminal-runtime/host-baseline",
   "patch": "host-source.patch",
-  "patch_sha256": "620c0a56161449cec0d83a0048d42f09346678539f117b19dc5640e37610db0d",
+  "patch_sha256": "da0b9933264f50a1f511b721a9ab33362f6f4223bc11175262dcf9e3d0190818",
   "test_base": "sha256:1a23ab4104c1d806a9cd2370f508ed04d83ea79c48ebdf9da8d99ae904cebae8",
   "successful_disposable_test_image": "sha256:53b47fcdaf050c58a12856ed7ddcb78a963c869dd38084ba2fdc6bb852c7fc4c",
   "terminal_logging_requirement": "HostConfig.LogConfig.Type == 'none'; terminal role only; checked before exec and on active-stream reinspection",
@@ -68,7 +68,7 @@
       "path": "pi-deploy-gate/gate/terminal_provider.py",
       "host_path": "/home/fate/docker_files/pi-deploy-gate/gate/terminal_provider.py",
       "before_sha256": null,
-      "after_sha256": "ef8f84ddb3bfddec19ee20f0dfc7c4831211271792f2c7e0fda260038c0f87f1"
+      "after_sha256": "087c98ca4c523db7494588fb5393f2c1c089da01882f05b0be698fc2aed245d1"
     },
     {
       "path": "pi-deploy-gate/tests/test_terminal_admission.py",
@@ -80,7 +80,7 @@
       "path": "pi-deploy-gate/tests/test_terminal_provider.py",
       "host_path": "/home/fate/docker_files/pi-deploy-gate/tests/test_terminal_provider.py",
       "before_sha256": null,
-      "after_sha256": "4b2ccd3e808b4b4f17459752db8e951c779a8d4fac7f232027c2f9d04dd5dc99"
+      "after_sha256": "38c52c3d6e95b869883f24f113ce197e5edfd5d5876391452b4b5a4dd6f7217d"
     },
     {
       "path": "pi-deploy-gate/tests/docker_terminal_provider.py",
@@ -100,5 +100,15 @@
       "before_sha256": "fb64d171de8cb87263ebc76dec86f536316214a36f53022f97ae315d1fd45031",
       "after_sha256": "722f51e83054187a33d2ef7bcdebf7101870f1fede07bc4dd046b2b8aa27a27b"
     }
-  ]
+  ],
+  "fix_round_1": {
+    "base_commit": "104940430f1ae6b5be9d768c7f99559c7bf18aef",
+    "finding": "P1 unfinished-frame deadlines must advance on completion, independently for JSONL and Docker multiplex",
+    "changed_external_files": [
+      "pi-deploy-gate/gate/terminal_provider.py",
+      "pi-deploy-gate/tests/test_terminal_provider.py"
+    ],
+    "focused_provider_tests": 29,
+    "full_suite_and_real_docker": "Historical pre-fix evidence retained; not rerun in fix round 1"
+  }
 }

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { chromium, expect } from "@playwright/test";
+import { chromium, expect, type WebSocketRoute } from "@playwright/test";
 import { build } from "esbuild";
 import { initializeHub, issueSession, readHubConfig } from "../hub/config.ts";
 import { issueManagementCode } from "../hub/management.ts";
@@ -18,6 +18,119 @@ import { type TerminalProviderConfig, terminalProviderStatus } from "../hub/term
 import { startPiWebUi } from "./harness/pi-process.ts";
 
 const artifacts = process.env.PI_E2E_ARTIFACT_DIR ?? "/tmp/pi-task5-browser";
+test("browser client successive snapshots and delayed input ACK preserve current draft", {
+  timeout: 30000,
+}, async (t) => {
+  // UI scheduling/ownership regression only: real production listener/assets and
+  // actual xterm in Chromium, controlled HTTP/WS boundary. No Gate/Docker proof.
+  const dir = mkdtempSync(path.join(tmpdir(), "task5-browser-fix1-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "hub.json");
+  initializeHub(file, { port: 0, management: { port: 0 }, terminal: { port: 0 } });
+  const hub = await startHub(readHubConfig(file));
+  t.after(() => hub.close());
+  assert.ok(hub.terminalUrl);
+  const target = {
+    v: 1,
+    runId: "a".repeat(32),
+    runtimeId: "browser-fix1",
+    sessionId: "explicit-session",
+    terminalEpoch: "b".repeat(32),
+    profile: "web-terminal-v1",
+    inputState: "none",
+    managedRestartEligible: false,
+  };
+  const browser = await chromium.launch({ headless: true, executablePath: process.env.PI_E2E_BROWSER_EXECUTABLE });
+  t.after(() => browser.close());
+  mkdirSync(artifacts, { recursive: true });
+  for (const width of [1440, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: width === 390 ? 1000 : 1050 } });
+    t.after(() => context.close());
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.name));
+    await page.route("**/api/terminal/status", (route) =>
+      route.fulfill({
+        json: {
+          authorized: true,
+          available: true,
+          csrf: "c".repeat(64),
+          scope: { access: "write" },
+          target,
+        },
+      }),
+    );
+    await page.route("**/api/terminal/attach", (route) => route.fulfill({ json: { nonce: "d".repeat(64) } }));
+    let remote: WebSocketRoute | undefined;
+    let input: Record<string, unknown> | undefined;
+    const inputId = () => input?.id;
+    let connections = 0;
+    const respond = (id: unknown, result: object) => remote?.send(JSON.stringify({ type: "response", id, result }));
+    await page.routeWebSocket("**/api/terminal/ws", (ws) => {
+      connections++;
+      remote = ws;
+      ws.onMessage((message) => {
+        const frame = JSON.parse(String(message));
+        if (frame.type === "attach") {
+          ws.send(JSON.stringify({ type: "ready", target }));
+          // No display wait between two complete, independently valid snapshots.
+          for (const [sequence, data] of ["BURST FIRST", "BURST SECOND 中文画面"].entries()) {
+            const bytes = Buffer.from(data);
+            for (const output of [
+              { type: "screen-start", target, sequence, columns: 80, rows: 24, bytes: bytes.length, chunks: 1 },
+              {
+                type: "screen-chunk",
+                sequence,
+                terminalEpoch: target.terminalEpoch,
+                index: 0,
+                data: bytes.toString("base64"),
+              },
+              { type: "screen-end", sequence, terminalEpoch: target.terminalEpoch },
+            ])
+              ws.send(JSON.stringify(output));
+          }
+        } else if (frame.type === "acquire")
+          respond(frame.id, { ok: true, leaseId: "e".repeat(32), expiresInMs: 30000 });
+        else if (frame.type === "input") input = frame;
+      });
+    });
+    await page.goto(hub.terminalUrl);
+    await expect(page.locator("#connect")).toBeEnabled();
+    await page.locator("#access").selectOption("write");
+    await page.locator("#connect").click();
+    await expect(page.locator("#screen-state")).toContainText("#1");
+    await expect(page.locator("#terminal-screen .xterm-rows")).toContainText("BURST SECOND 中文画面");
+    await page.locator("#acquire").click();
+    await expect(page.locator("#draft")).toBeEnabled();
+    const draft = page.locator("#draft");
+    await draft.fill("未发送的中文草稿");
+    await page.getByRole("button", { name: "Tab", exact: true }).click();
+    await expect.poll(() => input?.data).toBe("\t");
+    respond(inputId(), { ok: true, delivery: "written" });
+    await expect(page.locator("#send")).toBeEnabled();
+    await expect(draft).toHaveValue("未发送的中文草稿");
+    input = undefined;
+    await page.locator("#send").click();
+    await expect.poll(() => input?.data).toBe("未发送的中文草稿");
+    await draft.fill("新的未发送草稿，必须保留");
+    respond(inputId(), { ok: true, delivery: "written" });
+    await expect(page.locator("#send")).toBeEnabled();
+    await expect(draft).toHaveValue("新的未发送草稿，必须保留");
+    await expect(page.locator("#connection-state")).toContainText("控制权已取得");
+    await page.screenshot({ path: path.join(artifacts, `${width}-fix1-draft-preserved.png`), fullPage: true });
+    input = undefined;
+    await page.locator("#send").click();
+    await expect.poll(() => input?.data).toBe("新的未发送草稿，必须保留");
+    respond(inputId(), { ok: true, delivery: "written" });
+    await expect(draft).toHaveValue("");
+    await page.locator("#disconnect").click();
+    await expect(page.locator("#screen-state")).toContainText("画面已清除");
+    assert.equal(connections, 1, "no automatic reconnect");
+    assert.deepEqual(errors, []);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await context.close();
+  }
+});
 test("real Pi startup chat is visibly readonly with nonprivileged terminal link; manual restart outcome is explicit", {
   timeout: 60000,
 }, async (t) => {

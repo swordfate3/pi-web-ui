@@ -40,10 +40,14 @@ let lease: string | undefined,
   generation = 0;
 let assembly: TerminalSnapshotAssembly | undefined,
   terminal: Terminal | undefined,
-  rendering = false;
+  rendering = false,
+  drainingScreens = false,
+  queuedScreenBytes = 0,
+  draftRevision = 0;
+const screenQueue: string[] = [];
 let leaseTimer: ReturnType<typeof setTimeout> | undefined, connectTimer: ReturnType<typeof setTimeout> | undefined;
 let cancelRender: (() => void) | undefined, operation: AbortController | undefined;
-const pending = new Map<number, { type: string; timer: ReturnType<typeof setTimeout> }>();
+const pending = new Map<number, { type: string; timer: ReturnType<typeof setTimeout>; draftRevision?: number }>();
 const notice = (text: string) => {
   element("delivery-state").textContent = text;
 };
@@ -83,6 +87,9 @@ function disconnect(message = "连接已关闭；未收到确认的输入结果�
   operation = undefined;
   assembly?.clear();
   assembly = undefined;
+  screenQueue.length = 0;
+  queuedScreenBytes = 0;
+  drainingScreens = false;
   cancelRender?.();
   cancelRender = undefined;
   rendering = false;
@@ -189,22 +196,48 @@ async function restore(snapshot: TerminalSnapshot) {
   for (const osc of [0, 1, 2, 4, 8, 9, 10, 11, 12, 22, 46, 50, 51, 52, 104, 110, 111, 112, 133, 777, 1337])
     view.parser.registerOscHandler(osc, () => true);
   terminal = view;
+  let renderDeadline: ReturnType<typeof setTimeout> | undefined;
   try {
     view.open(element("terminal-screen"));
     await new Promise<void>((resolve, reject) => {
-      cancelRender = () => reject(new Error());
-      view.write(snapshot.data, resolve);
+      renderDeadline = setTimeout(() => reject(new Error("terminal_render_timeout")), 2000);
+      cancelRender = () => {
+        reject(new Error());
+      };
+      view.write(snapshot.data, () => {
+        resolve();
+      });
     });
     if (own !== generation || !connected) return;
     element("screen-state").textContent = `完整画面快照 #${snapshot.sequence} · ${snapshot.columns} × ${snapshot.rows}`;
   } finally {
+    clearTimeout(renderDeadline);
     if (own === generation) {
       rendering = false;
       cancelRender = undefined;
     }
   }
 }
-function send(type: string, extra: Record<string, unknown> = {}) {
+async function drainScreens() {
+  if (drainingScreens) return;
+  drainingScreens = true;
+  const own = generation;
+  try {
+    while (own === generation && connected && screenQueue.length) {
+      const text = screenQueue.shift();
+      if (text === undefined || !assembly) throw new Error();
+      queuedScreenBytes -= textBytes(text);
+      const snapshot = assembly.accept(parseTerminalJson(text));
+      // Do not begin another assembly/parser until xterm completes this one.
+      if (snapshot) await restore(snapshot);
+    }
+  } catch {
+    if (own === generation) disconnect("画面不可用；已断开，不使用旧 ANSI 尾部恢复。");
+  } finally {
+    if (own === generation) drainingScreens = false;
+  }
+}
+function send(type: string, extra: Record<string, unknown> = {}, submittedRevision?: number) {
   if (
     !socket ||
     !connected ||
@@ -223,19 +256,24 @@ function send(type: string, extra: Record<string, unknown> = {}) {
   }
   pending.set(requestId, {
     type,
+    draftRevision: submittedRevision,
     timer: setTimeout(() => disconnect("未收到确认：输入结果未知，已断开，不会重发。"), 2000),
   });
   socket.send(text);
   controls();
 }
-function sendInput(data: string) {
+function sendInput(data: string, submittedRevision?: number) {
   if (!data || /\p{Cs}/u.test(data) || textBytes(data) > 8192 || !lease || !target) {
     notice("文本必须是有效 UTF-8，且每次最多 8 KiB；未发送。 ");
     return;
   }
   if (/[\r\n]/.test(data) && data !== "\r" && !window.confirm("这段文本包含多行，可能立即执行多个命令。确认逐字发送？"))
     return;
-  send("input", { v: 1, terminalEpoch: target.terminalEpoch, leaseId: lease, sequence: ++sequence, data });
+  send(
+    "input",
+    { v: 1, terminalEpoch: target.terminalEpoch, leaseId: lease, sequence: ++sequence, data },
+    submittedRevision,
+  );
 }
 element("pair-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -308,11 +346,12 @@ button("connect").addEventListener("click", () => {
           }
           if (frame.type === "response") {
             exact(frame, "id,result,type");
-            const call = pending.get(Number(frame.id));
+            if (typeof frame.id !== "number" || !Number.isSafeInteger(frame.id) || frame.id < 1) throw new Error();
+            const call = pending.get(frame.id);
             if (!call) throw new Error();
             const result = parseTerminalResult(call.type, frame.result);
             clearTimeout(call.timer);
-            pending.delete(Number(frame.id));
+            pending.delete(frame.id);
             if (call.type === "acquire") {
               if (result.ok === true) {
                 lease = result.leaseId as string;
@@ -328,7 +367,10 @@ button("connect").addEventListener("click", () => {
             } else if (call.type === "input") {
               if (result.delivery === "written") {
                 notice("已写入终端；这不是命令执行或对话接受的确认。");
-                draft.value = "";
+                if (call.draftRevision !== undefined && call.draftRevision === draftRevision) {
+                  draft.value = "";
+                  draftRevision++;
+                }
               } else {
                 disconnect(
                   result.delivery === "unknown" ? "输入结果未知，已断开；不会重发。" : "输入被拒绝，已断开；不会重发。",
@@ -340,12 +382,13 @@ button("connect").addEventListener("click", () => {
             return;
           }
           if (frame.type === "screen-unavailable") throw new Error();
-          if (rendering) throw new Error();
-          const snapshot = assembly?.accept(frame);
-          if (snapshot)
-            void restore(snapshot).catch(() => {
-              if (own === generation) disconnect("画面不可用；已断开，不使用旧 ANSI 尾部恢复。");
-            });
+          const bytes = textBytes(event.data);
+          if (queuedScreenBytes + bytes > TERMINAL_QUEUE_BYTES) throw new Error();
+          // Retain only byte-counted raw envelopes, not assemblies or a growing
+          // promise chain. Responses remain immediate so control can be fenced.
+          queuedScreenBytes += bytes;
+          screenQueue.push(event.data);
+          void drainScreens();
         } catch {
           disconnect("连接或画面校验失败；未确认的输入结果未知，不会自动恢复。");
         }
@@ -374,7 +417,9 @@ button("logout").addEventListener("click", () => {
     .catch(() => notice("本页已断开；注销结果未知，请在可信 CLI 撤销配对授权。"));
 });
 button("acquire").addEventListener("click", () => send("acquire"));
+draft.addEventListener("input", () => draftRevision++);
 draft.addEventListener("compositionstart", () => {
+  draftRevision++;
   composing = true;
   controls();
 });
@@ -382,7 +427,7 @@ draft.addEventListener("compositionend", () => {
   composing = false;
   controls();
 });
-button("send").addEventListener("click", () => sendInput(draft.value));
+button("send").addEventListener("click", () => sendInput(draft.value, draftRevision));
 for (const key of document.querySelectorAll<HTMLButtonElement>("[data-key]"))
   key.addEventListener("click", () => {
     const data = keys[key.dataset.key ?? ""];

@@ -14,6 +14,7 @@
     "tests/hub-terminal-provider.test.ts",
     "tests/hub-terminal-server.test.ts",
     "tests/hub-terminal-chat.test.ts",
+    "tests/hub-terminal-browser.test.ts",
     "e2e/task5-terminal.integration.ts",
     "extensions/connection-config.ts",
     "extensions/connection-listener.ts",

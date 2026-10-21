@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 190,
-    "sha256": "58b06fd885ada106e9a16f06abac0a227da1a71f2f4325568594bfa9bab4780c",
+    "sha256": "202132b7f751ccd11f8078eb5a3868f6c30c932e07fcfc628f2f93ac0ef3a558",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -738,7 +738,7 @@
       },
       {
         "path": "src/web/terminal/app.ts",
-        "sha256": "1eb1cefef85217a5231523b3fec3bda03fa3381ece13dfb056fde216edb44a3e"
+        "sha256": "a89671b1413119f03627e195700c82de8d2ea9485d6b4196dbd3f016cf283fc5"
       },
       {
         "path": "src/web/terminal/build.mjs",
@@ -768,7 +768,7 @@
   },
   "outputs": {
     "count": 738,
-    "sha256": "4da9ded5a7d42f0a9af8690ea081b668cfa1ca880c0c4b731062f5b6f2377cfe",
+    "sha256": "f04ad7508c5cdeed5880087f079fe9a6c0be15e2e741b210a225ea53b49defbd",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3672,7 +3672,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "0da35ca8ed21fa50407c2b24deacc3d6704ec7d227df51683a7e03f02c454bf3"
+        "sha256": "f35f3b72a7ec9fb64d7b82dfe9265f9340d43d2260f1d3896d2933c9f40ab32d"
       },
       {
         "path": "icons/pi-web-ui-192.png",
@@ -3716,7 +3716,7 @@
       },
       {
         "path": "terminal/app.js",
-        "sha256": "393006d8d764de499504a3b933d5c0808f11c60f3b5a4a036f77533396cb5a44"
+        "sha256": "735d094a1d90da01d3403782f0215468f4aba5e8fdc87b62bc90c7808fa72b2a"
       },
       {
         "path": "terminal/index.html",

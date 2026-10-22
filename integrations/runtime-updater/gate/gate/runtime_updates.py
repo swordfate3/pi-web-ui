@@ -603,26 +603,62 @@ class RuntimeUpdates:
             self.store.db.execute('UPDATE runtime_jobs SET data=? WHERE id=?', (_json(parent), parent['id']))
             self.store.db.execute('INSERT INTO lifecycle_jobs (id,data) VALUES (?,?)', (key, _json(child)))
 
+    def _target_adoption(self, job, target, item, state, child):
+        """A verified child may nominate bytes for probing, never grant a proof."""
+        checked_source_image(job, item)
+        identity = checked_source(state.get('source_identity'), state.get('version'))
+        if (child.get('status') != 'succeeded' or child.get('runtime_update_id') != job['id'] or
+                child.get('policy') != job['policy'] or target.get('restart_id') != child['id'] or
+                child.get('container_id') != item['Id'] or target['container_id'] != item['Id'] or
+                child.get('target_hash') != self.gate.lifecycle._target_hash(item) or
+                child.get('run_id') != state.get('run_id') or target['run_id'] != state.get('run_id') or
+                child.get('requested_version') != job['version'] or
+                child.get('expected_version') != job['version'] or child.get('new_version') != job['version'] or
+                state['version'] != job['version'] or not child.get('new_runtime_id') or
+                child['new_runtime_id'] == child.get('runtime_id') or
+                child.get('old_runtime_id') != child.get('runtime_id') or
+                child['new_runtime_id'] != state.get('runtime_id') or
+                child.get('session_id') != state.get('session_id') or child.get('leaf_id') != state.get('leaf_id')):
+            raise RuntimeError('target source adoption identity changed')
+        old = job.get('sources', {}).get(child.get('source_hash'), {})
+        if (not isinstance(old.get('identity'), dict) or
+                digest(old['identity']) != child.get('source_hash') or
+                old['identity']['version'] != child.get('old_version')):
+            raise RuntimeError('target source adoption lacks original source proof')
+        checked_source_evidence(old.get('evidence'), old['identity'], job['profile'])
+        adoption = {'restart_id': child['id'], 'container_id': item['Id'],
+                    'target_hash': child['target_hash'], 'runtime_id': state['runtime_id'],
+                    'session_id': state['session_id'], 'leaf_id': state['leaf_id'],
+                    'source_hash': digest(identity), 'profile_hash': digest(job['profile'])}
+        if target.get('source_adoption', adoption) != adoption:
+            raise RuntimeError('target source adoption changed')
+        return adoption
+
     def _refresh(self, job):
         key, targets = job['id'], job['targets']
         try:
             self._fence(job)
             checked_evidence(job.get('evidence'), job.get('candidate'), job['release'], job['profile'])
             current = self._inventory(job)
-            for item, state in current:
-                if state is not None:
-                    self.source_proof(job, item, state)
             visible = {item['Id'] for item, _ in current}
             by_container = {item['Id']: (item, state) for item, state in current}
             # Reconcile lifecycle evidence before considering another restart.
             for target in targets:
                 restart = target.get('restart_id')
-                if restart and target['status'] == 'refreshing':
+                if restart and target['status'] in ('refreshing', 'validating_source'):
                     child = self.gate.lifecycle._get(restart)
                     if child['status'] == 'succeeded':
                         if child.get('new_version') != job['version']:
                             raise RuntimeError('runtime version proof mismatch')
-                        target.update(status='succeeded', version=job['version'])
+                        pair = by_container.get(target['container_id'])
+                        if pair is not None and pair[1] is not None:
+                            adoption = self._target_adoption(job, target, *pair, child)
+                            target.update(status='validating_source', source_adoption=adoption,
+                                          wait_reason='target_source_validation')
+                        elif pair is not None:
+                            target.update(status='validating_source', wait_reason='consumer_not_ready')
+                        else:
+                            target.update(status='exited')
                     elif child['status'] == 'stale':
                         if child['stage'] == 'restore_pre_stop_failed':
                             target.update(status='blocked', wait_reason='restore_pre_stop_failed')
@@ -659,6 +695,36 @@ class RuntimeUpdates:
                 if target['container_id'] not in visible and target['status'] != 'succeeded':
                     target.update(status='exited')
             current = list(by_container.values())  # Include the latest retry-proof snapshot.
+            # Only a successful, identity-matched child can nominate an unknown
+            # postactivation source. Persist its exact adoption before creating
+            # the ordinary source helper; unknown unrelated consumers still fail.
+            pending = []
+            for item, state in current:
+                if state is None:
+                    continue
+                try:
+                    self.source_proof(job, item, state)
+                except (ValueError, RuntimeError):
+                    target = next((t for t in targets if t['container_id'] == item['Id']), None)
+                    if not target or target['status'] != 'validating_source' or not target.get('source_adoption'):
+                        raise
+                    self._target_adoption(job, target, item, state,
+                                          self.gate.lifecycle._get(target['restart_id']))
+                    pending.append((item, state))
+            adopting = [t for t in targets if t['status'] == 'validating_source']
+            outstanding = any('evidence' not in record for record in job.get('sources', {}).values())
+            if adopting or outstanding:
+                job = self._update(key, targets=targets, stage='refreshing')
+                if any(by_container[t['container_id']][1] is None for t in adopting):
+                    return
+                if pending or outstanding:
+                    self._ensure_sources(job, pending)
+                    # Even immediate success gets a fresh worker-pass inventory
+                    # and adoption check before another child or completion.
+                    return
+                for target in adopting:
+                    target.update(status='succeeded', version=job['version'])
+                    target.pop('wait_reason', None)
             attempts = {t['container_id']: t.get('attempts', 0) for t in targets}
             for item, state in sorted(current, key=lambda pair: attempts.get(pair[0]['Id'], 0)):
                 target = next((t for t in targets if t['container_id'] == item['Id']), None)

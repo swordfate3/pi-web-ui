@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -427,6 +428,156 @@ class SourceSchedulerTests(unittest.TestCase):
         self.assertEqual(manager.get(base.KEY)['status'], 'recovery_required')
         self.assertEqual(self.gate.lifecycle._jobs(), [])
         self.assertEqual(len(self.install.source_starts), 1)
+
+    def completed_changed_source_child(self, manager, job):
+        manager._refresh(job)
+        child = self.gate.lifecycle._jobs()[0]
+        identity = source('1.4.0', '9')
+        package = '/home/node/.local/.pi-releases/' + base.KEY + '/lib/node_modules/@earendil-works/pi-coding-agent'
+        identity.update(package=package, executable=package + '/dist/cli.js')
+        original = self.docker.lifecycle_control
+        def control(cid, request, timeout=None):
+            response = original(cid, request, timeout)
+            if request['action'] == 'restart':
+                self.docker.states[cid]['source_identity'] = copy.deepcopy(identity)
+            return response
+        self.docker.lifecycle_control = control
+        child = self.gate.lifecycle._update(child['id'], status='running', stage='validating',
+                                           started_at=int(time.time() * 1000))
+        self.gate.lifecycle._execute(child)
+        child = self.gate.lifecycle._get(child['id'])
+        self.assertEqual(child['status'], 'succeeded')
+        self.assertEqual(self.docker.states[child['container_id']]['source_identity'], identity)
+        return child, identity
+
+    def test_successful_child_new_source_is_probed_before_next_child_or_completion(self):
+        manager = self.submit()
+        job = self.install_until(manager, 'refreshing')
+        child, identity = self.completed_changed_source_child(manager, job)
+        phase = 'source-' + digest(identity)
+        self.install.pending_sources.add(phase)
+        manager._refresh(manager._get(base.KEY))
+        result = manager._get(base.KEY)
+        self.assertEqual(result['status'], 'running')
+        self.assertEqual(result['targets'][0]['status'], 'validating_source')
+        self.assertEqual(result['targets'][0]['source_adoption']['source_hash'], digest(identity))
+        self.assertEqual(result['targets'][0]['source_adoption']['restart_id'], child['id'])
+        self.assertIn(phase, self.install.source_starts)
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 1)
+        self.assertEqual(len(self.docker.restarts), 1)
+        self.install.pending_sources.clear()
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 1)
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 2)
+        item = self.docker.items[child['container_id']]
+        state = self.docker.states[child['container_id']]
+        self.assertEqual(manager.source_proof(manager._get(base.KEY), item, state),
+                         proof(identity, result['profile']))
+
+    def test_target_source_adoption_survives_gate_restart_without_restarting_probe(self):
+        manager = self.submit()
+        job = self.install_until(manager, 'refreshing')
+        child, identity = self.completed_changed_source_child(manager, job)
+        phase = 'source-' + digest(identity)
+        self.install.pending_sources.add(phase)
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(manager.get(base.KEY)['status'], 'running')
+        self.gate.close()
+        self.gate = Gate(Path(self.tmp.name))
+        restored = self.gate.runtime_updates
+        restored.runtime_engine = self.install
+        self.gate.lifecycle.engine = self.docker
+        restored._refresh(restored._get(base.KEY))
+        self.assertEqual(self.install.source_starts.count(phase), 1)
+        self.install.pending_sources.clear()
+        restored._refresh(restored._get(base.KEY))
+        restored._refresh(restored._get(base.KEY))
+        self.assertEqual(restored._get(base.KEY)['targets'][0]['status'], 'succeeded')
+        self.assertEqual(self.install.source_starts.count(phase), 1)
+        self.assertEqual(len(self.docker.restarts), 1)
+
+    def test_target_source_adoption_rechecks_exact_identity_after_probe(self):
+        manager = self.submit()
+        job = self.install_until(manager, 'refreshing')
+        child, identity = self.completed_changed_source_child(manager, job)
+        phase = 'source-' + digest(identity)
+        self.install.pending_sources.add(phase)
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(manager.get(base.KEY)['status'], 'running')
+        self.install.pending_sources.clear()
+        original = self.install.poll
+        def poll(job, current_phase=None):
+            outcome = original(job, current_phase)
+            if current_phase == phase:
+                self.docker.states[child['container_id']]['source_identity']['tree_sha256'] = '8' * 64
+            return outcome
+        self.install.poll = poll
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 1)
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(manager.get(base.KEY)['status'], 'recovery_required')
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 1)
+
+    def test_failed_target_source_probe_never_completes_or_dispatches_another_child(self):
+        manager = self.submit()
+        job = self.install_until(manager, 'refreshing')
+        self.completed_changed_source_child(manager, job)
+        self.install.bad_source = True
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(manager.get(base.KEY)['status'], 'recovery_required')
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 1)
+
+    def test_completion_requires_observed_target_source_and_fresh_inventory(self):
+        manager = self.submit()
+        self.docker.items.pop('2' * 64)
+        self.docker.states.pop('2' * 64)
+        job = self.install_until(manager, 'refreshing')
+        child, identity = self.completed_changed_source_child(manager, job)
+        phase = 'source-' + digest(identity)
+        self.install.pending_sources.add(phase)
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(manager.get(base.KEY)['status'], 'running')
+        self.install.pending_sources.clear()
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(manager.get(base.KEY)['status'], 'running')
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(manager.get(base.KEY)['status'], 'succeeded')
+        self.assertEqual(len(self.docker.restarts), 1)
+        self.assertEqual(manager._get(base.KEY)['sources'][digest(identity)]['evidence'],
+                         proof(identity, job['profile']))
+
+    def test_child_adoption_rejects_unverified_or_mismatched_success_claims(self):
+        manager = self.submit()
+        job = self.install_until(manager, 'refreshing')
+        child, identity = self.completed_changed_source_child(manager, job)
+        job = manager._get(base.KEY)
+        target = job['targets'][0]
+        item, state = next(pair for pair in manager._inventory(job) if pair[0]['Id'] == child['container_id'])
+        for change in ({'status': 'running'}, {'runtime_update_id': 'f' * 32},
+                       {'container_id': 'f' * 64}, {'new_runtime_id': 'unobserved-runtime'},
+                       {'expected_version': '99.0.0'}, {'session_id': 'other-session'},
+                       {'leaf_id': 'other-leaf'}, {'source_hash': '0' * 64}):
+            with self.subTest(change=change), self.assertRaises((ValueError, RuntimeError)):
+                manager._target_adoption(job, target, item, state, {**child, **change})
+
+    def test_exited_adoption_consumer_does_not_abandon_pending_source_helper(self):
+        manager = self.submit()
+        job = self.install_until(manager, 'refreshing')
+        child, identity = self.completed_changed_source_child(manager, job)
+        phase = 'source-' + digest(identity)
+        self.install.pending_sources.add(phase)
+        manager._refresh(manager._get(base.KEY))
+        self.docker.items.pop(child['container_id'])
+        self.docker.states.pop(child['container_id'])
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(manager.get(base.KEY)['status'], 'running')
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 1)
+        self.install.pending_sources.clear()
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 1)
+        manager._refresh(manager._get(base.KEY))
+        self.assertEqual(len(self.gate.lifecycle._jobs()), 2)
 
     def test_activation_intent_reconciles_outcome_before_new_source_recovery(self):
         manager = self.submit()

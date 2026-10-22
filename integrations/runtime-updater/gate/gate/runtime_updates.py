@@ -9,7 +9,8 @@ from .lifecycle import Deadline
 from .lifecycle_contract import IMAGE, identifier, snapshot, terminal_profile
 from .registry import fingerprint
 from .runtime_catalog import RegistryUnavailable, RuntimeCatalog, stable_version
-from .runtime_install import checked_candidate, checked_evidence, pinned_release
+from .runtime_install import checked_candidate, checked_evidence, digest, pinned_release
+from .runtime_engine import MAX_SOURCES, checked_source, checked_source_evidence
 from .store import ACTIVE, REQUEST_OPEN, _json
 
 VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
@@ -236,6 +237,7 @@ class RuntimeUpdates:
         deadline = Deadline(time, 4)
         try:
             policy = self.policy()
+            jobs, current_profile = self._jobs(), None
             candidates = life._transport(deadline, self._engine().consumers)
             if not isinstance(candidates, list) or len(candidates) > 128:
                 raise RuntimeError('runtime inventory unavailable')
@@ -264,14 +266,32 @@ class RuntimeUpdates:
                         installed_versions.add(installed)
                     if not stable_version(state['version']):
                         raise RuntimeError('invalid runtime version')
-                    row.update(ready=True, version=state['version'])
+                    row.update(version=state['version'])
                     blocker = self._engine().consumer_blocker(checked, state)
                     if blocker:
                         row.update(ready=False, reason=blocker)
-                    elif state['busy'] or state['pending'] or not state['idle']:
-                        row['reason'] = 'busy_waits_for_idle'
                     else:
-                        row.pop('reason', None)
+                        checked_source(state.get('source_identity'), state['version'])
+                        row.update(ready=True, source_status='evaluable')
+                        # Pure ledger lookup only: HTTP readiness never creates,
+                        # starts, polls or synchronously waits for a probe.
+                        for job in jobs:
+                            try:
+                                if job['policy'] != policy:
+                                    continue
+                                if current_profile is None:
+                                    current_profile = self._profile(job)
+                                if job['profile'] != current_profile:
+                                    continue
+                                self.source_proof(job, checked, state)
+                                row['source_status'] = 'verified'
+                                break
+                            except (ValueError, KeyError, TypeError, RuntimeError):
+                                continue
+                        if state['busy'] or state['pending'] or not state['idle']:
+                            row['reason'] = 'busy_waits_for_idle'
+                        else:
+                            row.pop('reason', None)
                 except Exception:
                     pass
                 deadline.remaining()
@@ -300,6 +320,15 @@ class RuntimeUpdates:
                 not any(t.get('restart_id') == child['id'] and t['container_id'] == child['container_id']
                         for t in parent['targets'])):
             raise RuntimeError('runtime refresh authorization changed')
+        # Re-resolve the actual immutable container and measured launch at the
+        # last Gate authorization boundary, not the enqueue-time version label.
+        life = self.gate.lifecycle
+        item = life._resolve(child['run_id'], parent['policy'], expected=child['container_id'],
+                             expected_hash=child['target_hash'])
+        state = snapshot(life._status(item), child['run_id'])
+        self.source_proof(parent, item, state)
+        if child.get('source_hash') != digest(state['source_identity']):
+            raise RuntimeError('runtime refresh source changed')
 
     def tick(self):
         active = [j for j in self._jobs() if j['status'] in OPEN and not j.get('resolved_at')]
@@ -367,6 +396,84 @@ class RuntimeUpdates:
             inventory.append((item, state))
         return inventory
 
+    def source_proof(self, job, item, state):
+        """Pure lookup of exact, durable Gate-owned source/profile evidence.
+
+        Callers independently resolve trusted container/status and retain their
+        final barrier/restoration checks. No version or package receipt grants
+        compatibility, and this does not grant source origin/integrity.
+        """
+        if (item.get('Image') not in job['policy']['images'] or terminal_profile(item) or
+                not isinstance(state, dict)):
+            raise RuntimeError('source evidence unavailable')
+        identity = checked_source(state.get('source_identity'), state.get('version'))
+        record = job.get('sources', {}).get(digest(identity), {})
+        if record.get('identity') != identity:
+            raise RuntimeError('source evidence unavailable')
+        return checked_source_evidence(record.get('evidence'), identity, job['profile'])
+
+    def _ensure_sources(self, job, inventory):
+        """Drive one bounded offline source job; resume from durable helper intent."""
+        identities = {}
+        for item, state in inventory:
+            if state is None:
+                return job, False
+            identity = checked_source(state.get('source_identity'), state.get('version'))
+            if item.get('Image') not in job['policy']['images'] or terminal_profile(item):
+                raise RuntimeError('source consumer not evaluable')
+            identities[digest(identity)] = identity
+        # An exited consumer does not revoke an already durable helper intent.
+        # Reconcile retained source jobs as well, so no source helper is left
+        # running concurrently with a later writable installation phase.
+        records = job.get('sources', {})
+        if len(records) > MAX_SOURCES:
+            raise RuntimeError('source validation quota')
+        for key, record in records.items():
+            identity = record.get('identity')
+            checked_source(identity, identity.get('version') if isinstance(identity, dict) else None)
+            if digest(identity) != key:
+                raise RuntimeError('source record identity changed')
+            identities.setdefault(key, identity)
+        for key, identity in identities.items():
+            record = job.get('sources', {}).get(key)
+            if record is not None and record.get('identity') != identity:
+                raise RuntimeError('source record identity changed')
+            if record and 'evidence' in record:
+                checked_source_evidence(record['evidence'], identity, job['profile'])
+        for key, identity in identities.items():
+            record = job.get('sources', {}).get(key)
+            if record and 'evidence' in record:
+                continue
+            if record is None:
+                with self.store.lock:
+                    latest = self._get(job['id'])
+                    if latest != job or latest['status'] != 'running':
+                        raise RuntimeError('source authorization changed')
+                    self._fence(latest)
+                    sources = latest.get('sources', {})
+                    if len(sources) >= MAX_SOURCES:
+                        raise RuntimeError('source validation quota')
+                    job = self._update(job['id'], sources={**sources, key: {'identity': identity}})
+            result = self._drive_helper(job, 'source-' + key)
+            job = self._get(job['id'])
+            if result.get('state') == 'running':
+                return job, False
+            if result.get('state') != 'succeeded':
+                raise RuntimeError('source helper outcome unverified')
+            evidence = checked_source_evidence(result.get('evidence'), identity, job['profile'])
+            with self.store.lock:
+                latest = self._get(job['id'])
+                if latest != job or latest['status'] != 'running':
+                    raise RuntimeError('source validation authorization changed')
+                self._fence(latest)
+                sources = latest['sources']
+                job = self._update(job['id'], sources={**sources, key: {
+                    'identity': identity, 'evidence': evidence}})
+            # Bound each worker pass to one source probe. All current identities
+            # must be verified before returning eligibility, even on recovery.
+            return job, all('evidence' in job.get('sources', {}).get(k, {}) for k in identities)
+        return job, True
+
     def _drive_helper(self, job, phase):
         self._fence(job)
         engine, key = self._engine(), job['id']
@@ -377,12 +484,9 @@ class RuntimeUpdates:
             # consumer blockers cannot relabel a possible activation as a clean
             # pre-activation failure or strand it in a readiness wait.
             if not helper or not helper.get('intent_at'):
-                for item, state in self._inventory(job):
-                    if state is None:
-                        return {'state': 'waiting'}
-                    blocker = engine.consumer_blocker(item, state)
-                    if blocker:
-                        return {'state': 'failed', 'stage': blocker}
+                job, verified = self._ensure_sources(job, self._inventory(job))
+                if not verified:
+                    return {'state': 'waiting'}
         if helper is None:
             identity = engine.create(job, phase)
             job = self._update(key, helpers={**job.get('helpers', {}), phase: {'id': identity}})
@@ -391,8 +495,11 @@ class RuntimeUpdates:
             # Only this invocation may send start after committing the intent.
             # A recovered intent always goes straight to polling, even if the
             # helper still says created: the previous start result is unknown.
-            if phase == 'activate' and any(state is None for _, state in self._inventory(job)):
-                return {'state': 'waiting'}
+            if phase == 'activate':
+                job, verified = self._ensure_sources(job, self._inventory(job))
+                if not verified:
+                    return {'state': 'waiting'}
+                helper = job['helpers'][phase]
             with self.store.lock:
                 latest = self._get(key)
                 if latest != job or latest['status'] != 'running':
@@ -416,12 +523,21 @@ class RuntimeUpdates:
                     if any(state is None for _, state in inventory):
                         self._update(key, stage='waiting_for_consumer_readiness')
                         return
+                    for item, state in inventory:
+                        checked_source(state.get('source_identity'), state.get('version'))
+                        blocker = self._engine().consumer_blocker(item, state)
+                        if blocker:
+                            raise RuntimeError(blocker)
                     job = self._update(key, status='running', stage='preparing', helpers={},
                                        install_started_at=int(time.time() * 1000))
             if job['stage'] not in ('preparing', 'prepared', 'validating', 'validated', 'activating'):
                 # Never replay a legacy installing job using the new protocol.
                 self._update(key, status='recovery_required', stage='installation_outcome_unknown')
                 return
+            if job['stage'] == 'preparing':
+                job, verified = self._ensure_sources(job, self._inventory(job))
+                if not verified:
+                    return
             if job['stage'] == 'prepared':
                 checked_candidate(job.get('candidate'), job['release'])
                 job = self._update(key, stage='validating')
@@ -469,6 +585,7 @@ class RuntimeUpdates:
                  'policy': parent['policy'], 'container_id': item['Id'], 'old_version': state['version'],
                  'target_hash': life._target_hash(item), 'created_at': int(time.time() * 1000),
                  'runtime_update_id': parent['id'], 'requested_version': parent['version']}
+        child['source_hash'] = self.source_proof(parent, item, state)['source_hash']
         with self.store.lock, self.store._write_transaction():
             self.store.require_admission()
             if len(life._jobs()) >= 1000:
@@ -488,8 +605,9 @@ class RuntimeUpdates:
             self._fence(job)
             checked_evidence(job.get('evidence'), job.get('candidate'), job['release'], job['profile'])
             current = self._inventory(job)
-            if any(self._engine().consumer_blocker(item, state) for item, state in current if state is not None):
-                raise RuntimeError('source compatibility evidence unavailable')
+            for item, state in current:
+                if state is not None:
+                    self.source_proof(job, item, state)
             visible = {item['Id'] for item, _ in current}
             by_container = {item['Id']: (item, state) for item, state in current}
             # Reconcile lifecycle evidence before considering another restart.
@@ -502,6 +620,11 @@ class RuntimeUpdates:
                             raise RuntimeError('runtime version proof mismatch')
                         target.update(status='succeeded', version=job['version'])
                     elif child['status'] == 'stale':
+                        if child['stage'] == 'restore_pre_stop_failed':
+                            target.update(status='blocked', wait_reason='restore_pre_stop_failed')
+                            self._update(key, targets=targets, status='recovery_required',
+                                         stage='restore_pre_stop_failed')
+                            return
                         target.update(status='waiting_for_idle', wait_reason='awaiting_state_change',
                                       retry_after_state=target.get('attempt_state'))
                         target.pop('restart_id', None)
@@ -512,6 +635,7 @@ class RuntimeUpdates:
                             item, state = pair
                             observed = self.gate.lifecycle._status(item)
                             state = snapshot(observed, child['run_id'])
+                            self.source_proof(job, item, state)
                             by_container[item['Id']] = (item, state)
                             operation = observed.get('operation') or {}
                             if (state['runtime_id'] == child['runtime_id'] and

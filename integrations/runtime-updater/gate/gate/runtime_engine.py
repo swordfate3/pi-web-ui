@@ -6,8 +6,31 @@ import time
 import re
 from urllib.parse import quote
 
-from .lifecycle_contract import CONTAINER
-from .runtime_install import checked_candidate, checked_evidence
+from .lifecycle_contract import CONTAINER, identifier, source_identity
+from .runtime_install import CHECKS, VERSION, checked_candidate, checked_evidence, digest
+
+MAX_SOURCES = 128
+SOURCE_PHASE = re.compile(r'source-([0-9a-f]{64})\Z')
+
+
+def checked_source(value, version):
+    if not isinstance(version, str) or not re.fullmatch(VERSION, version):
+        raise ValueError('invalid source version')
+    return source_identity(value, version)
+
+
+def checked_source_evidence(value, source, profile):
+    checked_source(source, source.get('version'))
+    if (not isinstance(profile, dict) or not isinstance(value, dict) or
+            set(value) != {'ok', 'source_hash', 'profile_hash', 'node', 'checks'} or
+            value['ok'] is not True or value['source_hash'] != digest(source) or
+            value['profile_hash'] != digest(profile) or not isinstance(value['node'], str) or
+            not re.fullmatch(VERSION, value['node']) or
+            tuple(map(int, value['node'].split('.'))) < tuple(map(int, source['node'][2:].split('.'))) or
+            not isinstance(value['checks'], dict) or set(value['checks']) != set(CHECKS) or
+            any(check is not True for check in value['checks'].values())):
+        raise ValueError('source compatibility evidence missing or changed')
+    return value
 
 
 def runtime_volume(value):
@@ -37,17 +60,20 @@ class RuntimeEngine:
         return {'contract': 'pi-runtime-validation-v1', 'image': job['policy']['images'][0],
                 'helper_sha256': sources(here.parent, {'.py'}),
                 'adapter_sha256': sources(runtime, {'.py', '.mjs'}),
-                'web_sha256': sources(extensions, {'.ts', '.mjs'})}
+                'web_sha256': sources(extensions, {'.ts', '.mjs'}),
+                'probe_sha256': hashlib.sha256(json.dumps([
+                    (name, hashlib.sha256((runtime / name).read_bytes()).hexdigest())
+                    for name in sorted(('runtime_probe.py', 'runtime_probe_provider.ts', 'runtime_probe_ws.mjs'))
+                ], separators=(',', ':')).encode()).hexdigest()}
 
     @staticmethod
     def consumer_blocker(item, state):
-        """Legacy status has no attested source tree or pre-stop restore contract.
-
-        Do not grandfather an image, version, status flag or volume receipt.
-        A future implementation needs Gate-owned probe evidence and an
-        image-owned launch identity plus disposable restore proof before stop.
-        """
-        return 'source_evidence_unavailable'
+        """Evaluability only, never a compatibility or pre-stop restoration grant."""
+        try:
+            checked_source(state.get('source_identity'), state.get('version'))
+        except (ValueError, TypeError, AttributeError):
+            return 'source_evidence_unavailable'
+        return None
 
     def consumers(self, *, timeout=3):
         filters = {'volume': [self.volume], 'status': ['running']}
@@ -73,8 +99,17 @@ class RuntimeEngine:
 
     @staticmethod
     def name(job, phase):
+        identifier(job['id'])
         if phase not in ('prepare', 'validate', 'activate'):
-            raise ValueError('invalid helper phase')
+            match = SOURCE_PHASE.fullmatch(phase) if isinstance(phase, str) else None
+            if not match:
+                raise ValueError('invalid helper phase')
+            sources = job.get('sources', {})
+            record = sources.get(match[1], {})
+            value = record.get('identity')
+            checked_source(value, value.get('version') if isinstance(value, dict) else None)
+            if len(sources) > MAX_SOURCES or digest(value) != match[1]:
+                raise ValueError('source helper identity changed')
         return 'pi-runtime-updater-' + job['id'] + '-' + phase
 
     def definition(self, job, phase):
@@ -85,11 +120,27 @@ class RuntimeEngine:
             arguments.update(candidate=job.get('candidate'), profile=job.get('profile'))
         if phase == 'activate':
             arguments['evidence'] = job.get('evidence')
+        command = [script, job['version'], job['id'], phase,
+                   json.dumps(arguments, sort_keys=True, separators=(',', ':'))]
+        if SOURCE_PHASE.fullmatch(phase):
+            arguments = {'source': job['sources'][phase[7:]]['identity'], 'profile': job['profile']}
+            # Execute Gate's fixed launcher code, not a mutable volume module.
+            # Strip only runtime_install's CLI footer; run_probe independently
+            # verifies the immutable probe files before accepting data-only IPC.
+            script = script.rsplit("\nif __name__ == '__main__':", 1)[0] + '''
+try:
+    outcome = run_probe(json.loads(sys.argv[1]), mode='--source')
+except Exception:
+    outcome = {'ok': False, 'stage': 'compatibility_probe_failed'}
+print(json.dumps(outcome, separators=(',', ':')), flush=True)
+sys.exit(0 if outcome.get('ok') is True else 1)
+'''
+            command = [script, json.dumps(arguments, sort_keys=True, separators=(',', ':'))]
         return {
             'Image': job['policy']['images'][0], 'User': '1000:1000',
+            'Healthcheck': {'Test': ['NONE']},
             'Entrypoint': ['/usr/bin/python3', '-I', '-c'],
-            'Cmd': [script, job['version'], job['id'], phase,
-                    json.dumps(arguments, sort_keys=True, separators=(',', ':'))], 'WorkingDir': '/tmp',
+            'Cmd': command, 'WorkingDir': '/tmp',
             'Env': ['HOME=/tmp', 'PATH=/usr/local/bin:/usr/bin:/bin', 'NODE_OPTIONS=',
                     'NPM_CONFIG_USERCONFIG=/dev/null', 'NPM_CONFIG_GLOBALCONFIG=/tmp/npm-globalrc',
                     'NPM_CONFIG_CACHE=/tmp/npm-cache', 'NPM_CONFIG_PREFIX=/home/node/.local'],
@@ -103,7 +154,7 @@ class RuntimeEngine:
                 'RestartPolicy': {'Name': 'no', 'MaximumRetryCount': 0},
                 'Tmpfs': {'/tmp': 'rw,nosuid,nodev,size=512m,mode=1777'},
                 'Mounts': [{'Type': 'volume', 'Source': self.volume,
-                            'Target': '/home/node/.local', 'ReadOnly': phase == 'validate',
+                            'Target': '/home/node/.local', 'ReadOnly': phase != 'prepare' and phase != 'activate',
                             'VolumeOptions': {'NoCopy': True}}],
                 'LogConfig': {'Type': 'json-file', 'Config': {'max-size': '1m', 'max-file': '1'}},
             },
@@ -118,7 +169,7 @@ class RuntimeEngine:
         config, host = item.get('Config', {}), item.get('HostConfig', {})
         mounts = item.get('Mounts') or []
         if (not CONTAINER.fullmatch(item.get('Id', '')) or item['Image'] != definition['Image'] or
-                any(config.get(k) != definition[k] for k in ('User', 'Entrypoint', 'Cmd', 'WorkingDir')) or
+                any(config.get(k) != definition[k] for k in ('User', 'Entrypoint', 'Cmd', 'WorkingDir', 'Healthcheck')) or
                 config.get('Labels', {}).get('cn.swordfate.pi.runtime-update') != job['id'] or
                 config.get('Labels', {}).get('cn.swordfate.pi.runtime-phase') != phase or
                 (saved.get('id') is not None and item['Id'] != saved['id']) or
@@ -133,7 +184,7 @@ class RuntimeEngine:
                 len(mounts) != 1 or mounts[0].get('Type') != 'volume' or
                 mounts[0].get('Name') != self.volume or
                 mounts[0].get('Destination') != '/home/node/.local' or
-                mounts[0].get('RW') is not (phase != 'validate') or
+                mounts[0].get('RW') is not (phase in ('prepare', 'activate')) or
                 mounts[0].get('Propagation', '') not in ('', 'rprivate') or
                 mounts[0].get('SubPath') or mounts[0].get('Subpath')):
             raise RuntimeError('runtime helper identity changed')
@@ -210,6 +261,9 @@ class RuntimeEngine:
         changed = phase == 'activate'
         if state.get('ExitCode') == 0 and isinstance(value, dict) and value.get('ok') is True:
             try:
+                if SOURCE_PHASE.fullmatch(phase):
+                    checked_source_evidence(value, job['sources'][phase[7:]]['identity'], job['profile'])
+                    return {'state': 'succeeded', 'evidence': value}
                 base = {'ok': True, 'version': job['version'], 'changed': changed}
                 if phase == 'prepare' and set(value) == set(base) | {'candidate'} and all(value[k] == v for k, v in base.items()):
                     checked_candidate(value['candidate'], job['release'])
@@ -226,7 +280,7 @@ class RuntimeEngine:
             return {'state': 'succeeded', 'version': job['version'], 'changed': changed}
         if (isinstance(value, dict) and set(value) == {'ok', 'stage'} and value['ok'] is False
                 and value['stage'] in ('install_failed', 'candidate_changed', 'entrypoint_changed',
-                                       'compatibility_probe_unavailable') and state.get('ExitCode') == 1):
+                                       'compatibility_probe_unavailable', 'compatibility_probe_failed') and state.get('ExitCode') == 1):
             return {'state': 'failed', 'stage': value['stage']}
         return {'state': 'unknown'}
 
@@ -235,7 +289,7 @@ class RuntimeEngine:
         filters = {'label': ['cn.swordfate.pi.runtime-update=' + job['id']]}
         items = self.engine.call('GET', '/containers/json?all=1&filters=' +
                                  quote(json.dumps(filters), safe=''), timeout=3, limit=1024 * 1024)
-        if not isinstance(items, list) or len(items) > 8:
+        if not isinstance(items, list) or len(items) > MAX_SOURCES + 3:
             raise RuntimeError('ambiguous runtime helpers')
         keys = {item['Id'] for item in items}
         keys.update(value['id'] for value in job.get('helpers', {}).values())
@@ -246,7 +300,8 @@ class RuntimeEngine:
             if item is None:
                 continue  # Host acknowledgment plus confirmed absence, not installation success.
             phase = item.get('Config', {}).get('Labels', {}).get('cn.swordfate.pi.runtime-phase')
-            if phase not in ('prepare', 'validate', 'activate'):
+            if phase not in ('prepare', 'validate', 'activate') and not (
+                    isinstance(phase, str) and SOURCE_PHASE.fullmatch(phase)):
                 raise RuntimeError('legacy or unrecognized helper requires host removal')
             checked = self.inspect({**job, 'helpers': {phase: {'id': key}}}, phase)
             state = (checked or {}).get('State', {})

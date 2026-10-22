@@ -67,6 +67,20 @@ class RealProbeTests(unittest.TestCase):
         self.assertEqual(value['restored'], {key: request['expected'][key] for key in (
             'session_id', 'leaf_id', 'cwd', 'provider', 'model', 'thinking')})
         self.assertEqual(Path(request['session_path']).read_bytes(), original)
+        work = Path(request['workdir'])
+        self.assertEqual((work / 'restore/session.jsonl').read_bytes(), original)
+        source = Path(request['candidate_prefix'])
+        copied = work / 'candidate'
+        package_path = Path('lib/node_modules/@earendil-works/pi-coding-agent')
+        if (source / package_path / 'package.json').is_file():
+            self.assertEqual(probe.tree_digest(copied), probe.tree_digest(source))
+        else:
+            self.assertEqual(probe.tree_digest(copied / package_path), probe.tree_digest(source))
+            metadata = json.loads((source / 'package.json').read_text())
+            entry = metadata['bin']
+            entry = entry['pi'] if isinstance(entry, dict) else entry
+            self.assertEqual(os.readlink(copied / 'bin/pi'),
+                             os.path.relpath(copied / package_path / entry, copied / 'bin'))
 
     @unittest.skipUnless(os.environ.get('PI_RUNTIME_PROBE_SOURCE_REQUEST'), 'controller measured source required')
     def test_real_source_uses_measured_package_and_observes_all_nine_checks(self):

@@ -585,11 +585,22 @@ def behavioral_checks(root, candidate, version, node):
         pi.send(b'PROBE_BARRIER_DROP\r')
         pi.settle()
         require(len(pi.rows('stdin')) == index and pi.snapshot()['leaf_id'] == idle['leaf_id'] and
-                len(pi.rows('provider_call')) == 1, 'barrier_drop')
+                len(pi.rows('provider_call')) == 1 and not pi.rows('tool_call'), 'barrier_drop')
         require(pi.control('cancel', operation_id=operation).get('ok') is True, 'barrier_cancel')
+        # A barrier must discard input, not defer it until cancellation. Observe
+        # release separately before fresh input can mask a buffered replay.
+        pi.settle(.7)
+        require(len(pi.rows('stdin')) == index and pi.snapshot()['leaf_id'] == idle['leaf_id'] and
+                len(pi.rows('provider_call')) == 1 and not pi.rows('tool_call'), 'barrier_cancel_replay')
         pi.send(b'Z')
         pi.wait(lambda: len(pi.rows('stdin')) > index)
-        require(pi.rows('stdin')[-1]['safe'] is False and pi.snapshot()['busy'] is True, 'barrier_taint')
+        pi.settle()
+        released = pi.rows('stdin')[index:]
+        delivered = b''.join(base64.b64decode(row['data'], validate=True) for row in released)
+        require(delivered == b'Z' and pi.snapshot()['leaf_id'] == idle['leaf_id'] and
+                len(pi.rows('provider_call')) == 1 and not pi.rows('tool_call'), 'barrier_release_replay')
+        require(released[-1]['safe'] is False and released[-1]['intact'] is True and
+                pi.snapshot()['busy'] is True, 'barrier_taint')
         checks['input_barrier'] = True
     for name, data in (('unknown', b'X'), ('fragment', b'\x1b[')):
         with RealPi(root / name, candidate, web) as pi:
@@ -764,6 +775,10 @@ def run_restore(candidate_prefix, session_path, expected, workdir):
             'session_header')
     source_hash = copy_runtime(Path(candidate_prefix), workdir / 'candidate')
     candidate = workdir / 'candidate'
+    # Bind the whole executed prefix before any candidate invocation. For a
+    # measured-package input this also pins the generated bin/pi wrapper and
+    # its entrypoint, in addition to the package bytes verified by copy_runtime.
+    executed_hash = tree_digest(candidate)
     package, version = package_layout(candidate)
     metadata = json.loads((package / 'package.json').read_text())
     node = run_bounded([str(NODE), '--version'], workdir, clean_environment(workdir)).decode().strip().removeprefix('v')
@@ -785,6 +800,10 @@ def run_restore(candidate_prefix, session_path, expected, workdir):
             require(after[key] == expected_fields[key], 'restore_mismatch')
         require(not pi.rows('provider_call') and not pi.rows('tool_call'), 'restore_replay')
     require(not pi.rows('provider_call') and not pi.rows('tool_call'), 'restore_replay')
+    # Inspect after child shutdown too: matching scalar IDs/settings do not
+    # prove that opening the capture preserved its ancestors and message text.
+    require(session_bytes(pi.session) == content, 'restore_history_changed')
+    require(tree_digest(candidate) == executed_hash, 'restore_runtime_changed')
     require(session_bytes(session_path) == content and tree_digest(Path(candidate_prefix)) == source_hash,
             'restore_input_changed')
     return {'ok': True, 'contract': 'pi-runtime-restore-v1', 'candidate_tree_sha256': source_hash,

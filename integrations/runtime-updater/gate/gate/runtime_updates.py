@@ -10,7 +10,7 @@ from .lifecycle_contract import IMAGE, identifier, snapshot, terminal_profile
 from .registry import fingerprint
 from .runtime_catalog import RegistryUnavailable, RuntimeCatalog, stable_version
 from .runtime_install import checked_candidate, checked_evidence, digest, pinned_release
-from .runtime_engine import MAX_SOURCES, checked_source, checked_source_evidence
+from .runtime_engine import MAX_SOURCES, checked_source, checked_source_evidence, checked_source_image
 from .store import ACTIVE, REQUEST_OPEN, _json
 
 VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
@@ -272,6 +272,10 @@ class RuntimeUpdates:
                         row.update(ready=False, reason=blocker)
                     else:
                         checked_source(state.get('source_identity'), state['version'])
+                        if current_profile is None:
+                            current_profile = self._profile({'policy': policy})
+                        row['reason'] = 'image_profile_mismatch'
+                        checked_source_image({'policy': policy, 'profile': current_profile}, checked)
                         row.update(ready=True, source_status='evaluable')
                         # Pure ledger lookup only: HTTP readiness never creates,
                         # starts, polls or synchronously waits for a probe.
@@ -279,8 +283,6 @@ class RuntimeUpdates:
                             try:
                                 if job['policy'] != policy:
                                     continue
-                                if current_profile is None:
-                                    current_profile = self._profile(job)
                                 if job['profile'] != current_profile:
                                     continue
                                 self.source_proof(job, checked, state)
@@ -403,8 +405,8 @@ class RuntimeUpdates:
         final barrier/restoration checks. No version or package receipt grants
         compatibility, and this does not grant source origin/integrity.
         """
-        if (item.get('Image') not in job['policy']['images'] or terminal_profile(item) or
-                not isinstance(state, dict)):
+        checked_source_image(job, item)
+        if terminal_profile(item) or not isinstance(state, dict):
             raise RuntimeError('source evidence unavailable')
         identity = checked_source(state.get('source_identity'), state.get('version'))
         record = job.get('sources', {}).get(digest(identity), {})
@@ -418,8 +420,9 @@ class RuntimeUpdates:
         for item, state in inventory:
             if state is None:
                 return job, False
+            checked_source_image(job, item)
             identity = checked_source(state.get('source_identity'), state.get('version'))
-            if item.get('Image') not in job['policy']['images'] or terminal_profile(item):
+            if terminal_profile(item):
                 raise RuntimeError('source consumer not evaluable')
             identities[digest(identity)] = identity
         # An exited consumer does not revoke an already durable helper intent.
@@ -524,6 +527,7 @@ class RuntimeUpdates:
                         self._update(key, stage='waiting_for_consumer_readiness')
                         return
                     for item, state in inventory:
+                        checked_source_image(job, item)
                         checked_source(state.get('source_identity'), state.get('version'))
                         blocker = self._engine().consumer_blocker(item, state)
                         if blocker:

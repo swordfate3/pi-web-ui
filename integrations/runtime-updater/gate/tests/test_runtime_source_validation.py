@@ -44,7 +44,7 @@ class SourceHelperTests(unittest.TestCase):
         self.key = digest(self.identity)
         self.phase = 'source-' + self.key
         self.job = {'id': 'b' * 32, 'version': '1.4.0', 'policy': {'images': [base.IMAGE]},
-                    'profile': {'contract': 'test-profile', 'probe_sha256': '8' * 64},
+                    'profile': {'contract': 'test-profile', 'probe_sha256': '8' * 64, 'image': base.IMAGE},
                     'sources': {self.key: {'identity': self.identity}}, 'helpers': {}}
 
     def exited(self, value):
@@ -68,6 +68,14 @@ class SourceHelperTests(unittest.TestCase):
             'Target': '/home/node/.local', 'ReadOnly': True, 'VolumeOptions': {'NoCopy': True}}])
         self.assertEqual(set(definition['HostConfig']['Tmpfs']), {'/tmp'})
         self.assertTrue(self.engine.name(self.job, self.phase).endswith(self.phase))
+
+    def test_source_helper_refuses_profile_for_another_approved_image(self):
+        other = 'sha256:' + 'e' * 64
+        self.job['policy']['images'].append(other)
+        self.job['profile']['image'] = other
+        with self.assertRaisesRegex(RuntimeError, 'image_profile_mismatch'):
+            self.engine.create(self.job, self.phase)
+        self.assertEqual(self.docker.calls, [])
 
     def test_embedded_entry_calls_fixed_source_launcher_and_bounds_failure(self):
         definition = self.engine.definition(self.job, self.phase)
@@ -235,6 +243,45 @@ class SourceSchedulerTests(unittest.TestCase):
         for state in self.docker.states.values():
             state.pop('source_identity')
         self.assertEqual(manager.readiness()['status'], 'blocked')
+
+    def test_other_approved_image_is_blocked_in_readiness_without_probing(self):
+        manager = self.manager()
+        other = 'sha256:' + 'e' * 64
+        manager.set_policy({'mode': 'auto', 'images': [base.IMAGE, other]})
+        self.docker.items['2' * 64]['Image'] = other
+        readiness = manager.readiness()
+        self.assertEqual(readiness['status'], 'blocked')
+        rows = {row['run_id']: row for row in readiness['consumers']}
+        self.assertTrue(rows['1' * 32]['ready'])
+        self.assertFalse(rows['2' * 32]['ready'])
+        self.assertEqual(rows['2' * 32]['reason'], 'image_profile_mismatch')
+        self.assertNotEqual(rows['2' * 32].get('source_status'), 'verified')
+        self.assertEqual(self.install.helpers, {})
+
+    def test_other_approved_image_cannot_launch_a_source_probe_or_prepare(self):
+        manager = self.manager()
+        other = 'sha256:' + 'e' * 64
+        manager.set_policy({'mode': 'auto', 'images': [base.IMAGE, other]})
+        manager.submit({'version': '1.4.0', 'idempotency_key': base.KEY})
+        self.docker.items['2' * 64]['Image'] = other
+        manager._install(manager._get(base.KEY))
+        self.assertEqual(self.install.source_starts, [])
+        self.assertEqual(self.install.starts, 0)
+        self.assertEqual(self.docker.installed, '1.1.0')
+
+    def test_proof_is_not_transferable_to_another_policy_approved_image(self):
+        manager = self.submit()
+        job = self.install_until(manager, 'refreshing')
+        item, state = manager._inventory(job)[0]
+        other = 'sha256:' + 'e' * 64
+        job['policy'] = {**job['policy'], 'images': [base.IMAGE, other]}
+        self.assertEqual(manager.source_proof(job, item, state), proof(source(), job['profile']))
+        with self.assertRaisesRegex(RuntimeError, 'image_profile_mismatch'):
+            manager.source_proof(job, {**item, 'Image': other}, state)
+        job['profile'] = {**job['profile'], 'image': other}
+        job['sources'][digest(source())]['evidence'] = proof(source(), job['profile'])
+        with self.assertRaisesRegex(RuntimeError, 'image_profile_mismatch'):
+            manager.source_proof(job, {**item, 'Image': other}, state)
 
     def test_invalid_or_missing_identity_never_prepares_or_activates(self):
         manager = self.submit()

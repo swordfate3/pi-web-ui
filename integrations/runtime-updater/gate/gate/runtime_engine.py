@@ -6,7 +6,7 @@ import time
 import re
 from urllib.parse import quote
 
-from .lifecycle_contract import CONTAINER, identifier, source_identity
+from .lifecycle_contract import CONTAINER, IMAGE, identifier, source_identity
 from .runtime_install import CHECKS, VERSION, checked_candidate, checked_evidence, digest
 
 MAX_SOURCES = 128
@@ -17,6 +17,16 @@ def checked_source(value, version):
     if not isinstance(version, str) or not re.fullmatch(VERSION, version):
         raise ValueError('invalid source version')
     return source_identity(value, version)
+
+
+def checked_source_image(job, item):
+    """A source probe covers one exact image profile, not the policy image set."""
+    images = job.get('policy', {}).get('images')
+    image = job.get('profile', {}).get('image')
+    if (not isinstance(images, list) or not images or not isinstance(image, str) or
+            not IMAGE.fullmatch(image) or image != images[0] or item.get('Image') != image):
+        raise RuntimeError('image_profile_mismatch')
+    return image
 
 
 def checked_source_evidence(value, source, profile):
@@ -114,6 +124,8 @@ class RuntimeEngine:
 
     def definition(self, job, phase):
         self.name(job, phase)
+        if SOURCE_PHASE.fullmatch(phase):
+            checked_source_image(job, {'Image': job['policy']['images'][0]})
         script = Path(__file__).with_name('runtime_install.py').read_text()
         arguments = {'release': job.get('release')}
         if phase != 'prepare':

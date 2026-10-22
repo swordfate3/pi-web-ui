@@ -58,6 +58,19 @@ type RuntimeJob = {
   created_at?: string;
 };
 
+type RuntimeCatalog = {
+  status: "fresh" | "stale" | "unavailable";
+  checked_at?: number;
+  versions: Array<{ version: string }>;
+  next_cursor?: string;
+};
+
+type RuntimeReadiness = {
+  status: "ready" | "blocked" | "unavailable";
+  installed_version?: string;
+  consumers: Array<{ run_id: string; version?: string; ready: boolean; reason?: string }>;
+};
+
 const taskId = "cd".repeat(16);
 const savedTaskId = "ef".repeat(16);
 
@@ -85,6 +98,9 @@ function fixture(
     storageThrows?: boolean;
     cookieJar?: boolean;
     gateway?: boolean;
+    catalog?: RuntimeCatalog;
+    readiness?: RuntimeReadiness;
+    catalogFor?: (query: string, cursor: string) => RuntimeCatalog;
   } = {},
 ) {
   const elements = new Map<string, Element>();
@@ -111,6 +127,10 @@ function fixture(
   let postFailure: "network" | undefined;
   let detailStatus = 200;
   let detailJob: RuntimeJob = initialJob;
+  let catalog: RuntimeCatalog =
+    options.catalog ??
+    ({ status: "fresh", checked_at: 1792630800000, versions: [{ version: "1.3.0" }, { version: "1.2.0" }] } as const);
+  let readiness: RuntimeReadiness = options.readiness ?? { status: "ready", installed_version: "1.3.0", consumers: [] };
   let confirmResult = true;
   const confirmations: string[] = [];
   type FetchOptions = { method: string; headers: Record<string, string>; body?: string };
@@ -189,6 +209,12 @@ function fixture(
         sessions.delete(cookie);
         cookieUpdate = "";
         result = { authorized };
+      } else if (route.includes("/runtime-versions") && fetchOptions.method === "GET") {
+        const url = new URL(route, "https://hub.example");
+        result =
+          options.catalogFor?.(url.searchParams.get("query") ?? "", url.searchParams.get("cursor") ?? "") ?? catalog;
+      } else if (route.endsWith("/runtime-readiness") && fetchOptions.method === "GET") {
+        result = readiness;
       } else if (route.endsWith("/runtime-updates") && fetchOptions.method === "GET") {
         result = { policy: { mode: policy }, jobs, active };
       } else if (route.endsWith("/runtime-updates") && fetchOptions.method === "POST") {
@@ -264,6 +290,12 @@ function fixture(
       jobs = value;
       active = activeValue;
     },
+    setCatalog: (value: RuntimeCatalog) => {
+      catalog = value;
+    },
+    setReadiness: (value: RuntimeReadiness) => {
+      readiness = value;
+    },
     storedBeforePost: () => storedBeforePost,
     holdNextResponse: (route: string, status?: number, method = "GET") => {
       let markCaptured = () => {};
@@ -279,6 +311,221 @@ function fixture(
     },
   };
 }
+
+test("published versions are selectable without claiming compatibility and readiness blockers are visible", async () => {
+  const blockedRun = "9".repeat(32);
+  const f = fixture({
+    authorized: true,
+    catalog: {
+      status: "fresh",
+      checked_at: 1792630800000,
+      versions: [{ version: "1.4.0" }, { version: "1.3.0" }],
+    },
+    readiness: {
+      status: "blocked",
+      installed_version: "1.3.0",
+      consumers: [{ run_id: blockedRun, version: "1.1.0", ready: false, reason: "protocol_unavailable" }],
+    },
+  });
+  await settled();
+
+  assert.match(f.text("runtime-version-list"), /1\.4\.0.*已发布.*未验证/);
+  assert.match(f.text("runtime-version-selected"), /1\.4\.0.*已发布.*未验证/);
+  assert.doesNotMatch(f.text("runtime-version-selected"), /兼容(?:$|[；。])/);
+  assert.equal(f.get("runtime-update-version").value, "1.4.0");
+  assert.match(f.text("runtime-readiness"), /已安装.*1\.3\.0/);
+  assert.match(f.text("runtime-readiness"), new RegExp(blockedRun));
+  assert.match(f.text("runtime-readiness"), /刷新协议不可用|protocol unavailable/);
+  assert.match(f.text("runtime-readiness"), /阻止|未就绪/);
+
+  await f.get("runtime-version-list").children[1].fire("click");
+  assert.equal(f.get("runtime-update-version").value, "1.3.0");
+  assert.match(f.text("runtime-version-selected"), /1\.3\.0.*兼容性.*未知|1\.3\.0.*尚未.*验证/);
+});
+
+test("catalog search and opaque paging stay bounded to the fixed management route", async () => {
+  const f = fixture({
+    authorized: true,
+    catalogFor: (query, cursor) => {
+      if (query === "1.4") return { status: "fresh", versions: [{ version: "1.4.0" }] };
+      if (cursor === "older+stable") return { status: "fresh", versions: [{ version: "1.1.0" }] };
+      return {
+        status: "fresh",
+        versions: [{ version: "1.3.0" }, { version: "1.2.0" }],
+        next_cursor: "older+stable",
+      };
+    },
+  });
+  await settled();
+  assert.equal(f.get("runtime-version-more").hidden, false);
+  await f.get("runtime-version-more").fire("click");
+  await settled();
+  assert.match(f.text("runtime-version-list"), /1\.3\.0/);
+  assert.match(f.text("runtime-version-list"), /1\.1\.0/);
+  assert.ok(f.calls.some((call) => call.route.includes("runtime-versions?query=&cursor=older%2Bstable")));
+
+  f.get("runtime-version-search").value = "1.4";
+  await f.get("runtime-version-search").fire("input");
+  await settled();
+  assert.match(f.text("runtime-version-list"), /1\.4\.0/);
+  assert.doesNotMatch(f.text("runtime-version-list"), /1\.3\.0/);
+  assert.ok(f.calls.some((call) => call.route.endsWith("runtime-versions?query=1.4&cursor=")));
+  assert.ok(f.calls.every((call) => !call.route.includes("registry=")));
+});
+
+test("a third catalog page stays selectable while the bounded window drops only the oldest visible row", async () => {
+  const firstPage = Array.from({ length: 50 }, (_, index) => ({ version: `3.0.${index}` }));
+  const secondPage = Array.from({ length: 50 }, (_, index) => ({ version: `2.0.${index}` }));
+  const f = fixture({
+    authorized: true,
+    catalogFor: (_query, cursor) => {
+      if (cursor === "page-2") return { status: "fresh", versions: secondPage, next_cursor: "page-3" };
+      if (cursor === "page-3") return { status: "fresh", versions: [{ version: "1.0.0" }] };
+      return { status: "fresh", versions: firstPage, next_cursor: "page-2" };
+    },
+  });
+  await settled();
+  assert.equal(f.get("runtime-update-version").value, "3.0.0");
+  await f.get("runtime-version-more").fire("click");
+  await settled();
+  await f.get("runtime-version-more").fire("click");
+  await settled();
+
+  assert.equal(f.get("runtime-version-list").children.length, 100);
+  assert.doesNotMatch(f.text("runtime-version-list"), /Pi 3\.0\.0 /);
+  assert.match(f.text("runtime-version-list"), /Pi 1\.0\.0 /);
+  assert.equal(f.get("runtime-update-version").value, "3.0.0");
+  assert.match(f.text("runtime-version-selected"), /3\.0\.0/);
+
+  const thirdPageOption = f.get("runtime-version-list").children.find((child) => /Pi 1\.0\.0 /.test(child.textContent));
+  assert.ok(thirdPageOption);
+  await thirdPageOption.fire("click");
+  assert.equal(f.get("runtime-update-version").value, "1.0.0");
+});
+
+test("stale and unavailable catalog states remain distinct from Gate policy", async () => {
+  const stale = fixture({
+    authorized: true,
+    policy: "auto",
+    catalog: { status: "stale", checked_at: 1792630800000, versions: [{ version: "1.4.0" }] },
+  });
+  await settled();
+  assert.match(stale.text("runtime-version-catalog-status"), /陈旧|缓存/);
+  assert.match(stale.text("runtime-version-selected"), /已发布.*未验证/);
+  assert.doesNotMatch(stale.text("runtime-update-status"), /策略已禁用/);
+
+  const unavailable = fixture({
+    authorized: true,
+    policy: "auto",
+    catalog: { status: "unavailable", versions: [] },
+  });
+  await settled();
+  assert.match(unavailable.text("runtime-version-catalog-status"), /目录.*不可用|发布版本.*不可用/);
+  assert.match(unavailable.text("runtime-version-catalog-status"), /不同|区别/);
+  assert.doesNotMatch(unavailable.text("runtime-update-status"), /策略已禁用/);
+  assert.equal(unavailable.get("runtime-update-submit").disabled, true);
+});
+
+test("known readiness blockers disable submission before confirmation", async () => {
+  const blockedRun = "8".repeat(32);
+  const f = fixture({
+    readiness: {
+      status: "blocked",
+      installed_version: "1.3.0",
+      consumers: [{ run_id: blockedRun, ready: false, reason: "legacy_supervisor" }],
+    },
+  });
+  await settled();
+  await f.unlock();
+  assert.equal(f.get("runtime-update-submit").disabled, true);
+  assert.match(f.text("runtime-readiness"), new RegExp(blockedRun));
+  await f.submit("1.3.0");
+  assert.equal(f.confirmations.length, 0);
+  assert.equal(
+    f.calls.filter((call) => call.options.method === "POST" && call.route.endsWith("/runtime-updates")).length,
+    0,
+  );
+});
+
+test("unavailable readiness disables submission until Gate can report trusted consumers", async () => {
+  const f = fixture({ readiness: { status: "unavailable", consumers: [] } });
+  await settled();
+  await f.unlock();
+  assert.equal(f.get("runtime-update-submit").disabled, true);
+  assert.match(f.text("runtime-readiness"), /就绪状态不可用/);
+});
+
+test("a trusted busy consumer remains submission-eligible and waits for idle without becoming a blocker", async () => {
+  const busyRun = "7".repeat(32);
+  const f = fixture({
+    readiness: {
+      status: "ready",
+      installed_version: "1.3.0",
+      consumers: [{ run_id: busyRun, version: "1.3.0", ready: true, reason: "busy_waits_for_idle" }],
+    },
+  });
+  await settled();
+  await f.unlock();
+  assert.equal(f.get("runtime-update-submit").disabled, false);
+  assert.match(f.text("runtime-readiness"), /正在生成.*允许提交.*等待空闲/);
+  f.setConfirm(false);
+  await f.submit("1.3.0");
+  assert.doesNotMatch(f.confirmations[0], new RegExp(busyRun));
+});
+
+for (const newerStatus of ["blocked", "unavailable"] as const) {
+  test(`an older ready response cannot overwrite newer ${newerStatus} readiness`, async () => {
+    const f = fixture({ authorized: true });
+    await settled();
+    f.setReadiness({ status: "ready", installed_version: "1.3.0", consumers: [] });
+    const held = f.holdNextResponse("/runtime-readiness");
+    const oldPoll = f.intervals[0]();
+    await held.captured;
+
+    f.setReadiness({
+      status: newerStatus,
+      installed_version: "1.3.0",
+      consumers:
+        newerStatus === "blocked"
+          ? [{ run_id: "6".repeat(32), version: "1.1.0", ready: false, reason: "legacy_supervisor" }]
+          : [],
+    });
+    await f.get("runtime-version-refresh").fire("click");
+    assert.equal(f.get("runtime-update-submit").disabled, true);
+
+    held.release();
+    await oldPoll;
+    assert.equal(f.get("runtime-update-submit").disabled, true);
+    assert.match(
+      f.text("runtime-readiness"),
+      newerStatus === "blocked" ? /存在阻止项|阻止 \/ 未就绪/ : /就绪状态不可用/,
+    );
+  });
+}
+
+test("an older failed readiness request cannot erase a newer ready result", async () => {
+  const currentRun = "5".repeat(32);
+  const f = fixture({ authorized: true });
+  await settled();
+  const held = f.holdNextResponse("/runtime-readiness", 503);
+  const oldPoll = f.intervals[0]();
+  await held.captured;
+
+  f.setReadiness({
+    status: "ready",
+    installed_version: "1.3.0",
+    consumers: [{ run_id: currentRun, version: "1.3.0", ready: true, reason: "busy_waits_for_idle" }],
+  });
+  await f.get("runtime-version-refresh").fire("click");
+  assert.equal(f.get("runtime-update-submit").disabled, false);
+  assert.match(f.text("runtime-readiness"), new RegExp(currentRun));
+
+  held.release();
+  await oldPoll;
+  assert.equal(f.get("runtime-update-submit").disabled, false);
+  assert.match(f.text("runtime-readiness"), new RegExp(currentRun));
+  assert.doesNotMatch(f.text("runtime-readiness"), /就绪状态不可用/);
+});
 
 test("gateway mode automatically uses the verified web login without pairing and respects explicit logout", async () => {
   const f = fixture({ gateway: true, cookieJar: true, restartAvailable: false });
@@ -525,7 +772,10 @@ test("HTTP 400 is an explicit rejection that clears the pending identity and all
     false,
   );
   assert.equal(f.storage.has("pi-hub-runtime-update"), false);
-  assert.match(f.text("management-notice"), /无效|审计/);
+  const notice = f.text("management-notice");
+  assert.doesNotMatch(notice, /已审计|固定.*列表/);
+  assert.match(notice, /精确稳定版本.*无效|请求参数被拒绝/);
+  assert.match(notice, /官方发布目录.*重新选择/);
   assert.equal(f.get("runtime-update-submit").disabled, false);
 });
 
@@ -600,6 +850,8 @@ test("all actual Gate stages have specific operator-facing descriptions", async 
     ["queued_by_policy", "按策略排队"],
     ["approved_by_host", "宿主机已批准"],
     ["policy_changed", "策略已变更"],
+    ["resolving", "解析已发布候选版本"],
+    ["validating", "隔离验证"],
     ["preparing", "准备安装"],
     ["prepared", "安装准备完成"],
     ["activating", "激活新版本"],
@@ -610,6 +862,10 @@ test("all actual Gate stages have specific operator-facing descriptions", async 
     ["install_failed", "安装失败"],
     ["installation_outcome_unknown", "安装结果不确定"],
     ["refresh_requires_inspection", "刷新结果需要管理员检查"],
+    ["incompatible_candidate", "候选版本不兼容"],
+    ["incompatible_session", "当前会话不兼容"],
+    ["candidate_changed", "候选包内容已变化"],
+    ["protocol_unavailable", "刷新协议不可用"],
     ["complete", "任务已完成"],
   ] as const;
   const jobs = stages.map(([stage], index) =>

@@ -4,7 +4,7 @@ Date: 2026-10-22
 
 Branch: `codex/hub-version-picker-updates`
 
-Status: chat design approved; written specification awaiting review. No implementation or production deployment is represented by this document.
+Status: written specification approved by the user; implementation in progress. This specification is not evidence of acceptance or production deployment.
 
 ## 1. User outcome and acceptance boundary
 

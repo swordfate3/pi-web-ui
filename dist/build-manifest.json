@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 173,
-    "sha256": "e74c7a4fdc6388540471f85f0a2b121d9dd02ed6ec3b102642c620f1f53cb45a",
+    "sha256": "72e4e23202d9551a6918ed5f60031865250da4d732994d807f4197d6125ab89b",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -134,19 +134,19 @@
       },
       {
         "path": "hub/portal.ts",
-        "sha256": "e5624a5bc38e8b24e1822020b8bf2ae058e5dcb376aac62cbafc25c5c468c1be"
+        "sha256": "cdd88d85ba14abd345ae83805a6923c22ed6a892d1a33d74efe3284e68fab9a7"
       },
       {
         "path": "hub/restart-api.ts",
-        "sha256": "1e579b768740751b90c70abe904d2138217c1b414ef006ff01b8e108c5c969b9"
+        "sha256": "853fd61b111af1381324291fa241bbf259c5d8e23fbd634f72be919a8147beb1"
       },
       {
         "path": "hub/runtime-portal.ts",
-        "sha256": "42df7a6baef57a33a5165fb2f432c3413149df6b24fcc3aca976f1f7e428e9ad"
+        "sha256": "caa81268987e6ea3267a1ae536c9894d065eb84b91aa54c461780af7f36b6cc1"
       },
       {
         "path": "hub/runtime-updates.ts",
-        "sha256": "17a353604a073103db9a0ff8a14e68807691c39dfd7c7716b560a91ad14010c2"
+        "sha256": "001e7e9480d9e7621c73dd2157c36c5bec9cd51e326eec9d03a60b3f81c9eebd"
       },
       {
         "path": "hub/server.ts",
@@ -700,7 +700,7 @@
   },
   "outputs": {
     "count": 732,
-    "sha256": "2f901aba829a6fc1211e09e09c1212fc55a56f92cf5e792e552b4c6f58389b4b",
+    "sha256": "d27648407fbc02be5fe880de70d5e025d3c0eb4be8ace2b64414ff9e87e69888",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3604,7 +3604,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "affa46b77bbb4c1a074216db65a79610ae828a641bba30a78bb58f3b047cab41"
+        "sha256": "96372e77ccc5a8adbf8cf9bb69b7c3d2c5c5327b1cdd02641f569e03dad167a9"
       },
       {
         "path": "icons/pi-web-ui-192.png",

@@ -209,7 +209,8 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
   return {
     resolve,
     async handle(request: IncomingMessage, response: ServerResponse, sameOrigin: boolean): Promise<boolean> {
-      const pathname = request.url?.split("?")[0] ?? "";
+      const requestUrl = new URL(request.url ?? "/", "http://hub.invalid");
+      const pathname = requestUrl.pathname;
       if (!pathname.startsWith("/api/management/")) return false;
       const reply = (status: number, value: unknown, cookie?: string) => {
         response
@@ -281,6 +282,62 @@ export function createRestartApi(config: HubConfig, hooks: Hooks) {
           return true;
         }
         phase = "provider";
+        if (pathname === "/api/management/runtime-versions" || pathname === "/api/management/runtime-readiness") {
+          if (!runtimeProvider) {
+            reply(503, { error: "Global Pi updates are not configured" });
+            return true;
+          }
+          if (request.method !== "GET") {
+            reply(405, { error: "Method not allowed" });
+            return true;
+          }
+          if (pathname === "/api/management/runtime-readiness" && requestUrl.searchParams.size !== 0) {
+            reply(404, { error: "Management route not found" });
+            return true;
+          }
+          const keys = [...requestUrl.searchParams.keys()];
+          if (
+            pathname === "/api/management/runtime-versions" &&
+            (keys.some((key) => key !== "query" && key !== "cursor") ||
+              requestUrl.searchParams.getAll("query").length > 1 ||
+              requestUrl.searchParams.getAll("cursor").length > 1)
+          ) {
+            reply(404, { error: "Management route not found" });
+            return true;
+          }
+          try {
+            const result =
+              pathname === "/api/management/runtime-versions"
+                ? await runtimeProvider.catalog({
+                    ...(requestUrl.searchParams.has("query")
+                      ? { query: requestUrl.searchParams.get("query") ?? "" }
+                      : {}),
+                    ...(requestUrl.searchParams.has("cursor")
+                      ? { cursor: requestUrl.searchParams.get("cursor") ?? "" }
+                      : {}),
+                  })
+                : await runtimeProvider.readiness();
+            revalidate();
+            reply(200, result);
+          } catch (error) {
+            if (!(error instanceof RuntimeUpdateError)) throw error;
+            revalidate();
+            reply(error.status, {
+              error:
+                error.status === 400
+                  ? "Invalid bounded runtime catalog query"
+                  : "Runtime provider unavailable; catalog or readiness could not be verified",
+            });
+          }
+          return true;
+        }
+        if (
+          pathname.startsWith("/api/management/runtime-versions") ||
+          pathname.startsWith("/api/management/runtime-readiness")
+        ) {
+          reply(404, { error: "Management route not found" });
+          return true;
+        }
         if (
           pathname === "/api/management/runtime-updates" ||
           /^\/api\/management\/runtime-updates\/[a-f0-9]{32}$/.test(pathname)

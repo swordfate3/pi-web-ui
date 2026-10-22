@@ -24,6 +24,17 @@ async function fixture(t: test.TestContext, configured = true) {
   let upstreamStatus = 200;
   let mode = "manual";
   let badResult: unknown;
+  let catalog: unknown = {
+    status: "fresh",
+    checked_at: 1792630800000,
+    versions: [{ version: "1.4.0" }, { version }],
+    next_cursor: "older+stable",
+  };
+  let readiness: unknown = {
+    status: "blocked",
+    installed_version: version,
+    consumers: [{ run_id: runId, version, ready: false, reason: "protocol_unavailable" }],
+  };
   let hold: ((release: () => void) => void) | undefined;
   const calls: { method?: string; route?: string; value?: unknown }[] = [];
   const gate = http.createServer(async (req, res) => {
@@ -52,13 +63,17 @@ async function fixture(t: test.TestContext, configured = true) {
       res.end(
         JSON.stringify(
           badResult ??
-            (req.url === "/v1/runtime-updates" && req.method === "GET"
-              ? {
-                  policy: { mode, images: ["private-image"], policy_hash: "private-policy" },
-                  jobs: [job],
-                  active: [job],
-                }
-              : job),
+            (req.url?.startsWith("/v1/runtime-versions") && req.method === "GET"
+              ? catalog
+              : req.url === "/v1/runtime-readiness" && req.method === "GET"
+                ? readiness
+                : req.url === "/v1/runtime-updates" && req.method === "GET"
+                  ? {
+                      policy: { mode, images: ["private-image"], policy_hash: "private-policy" },
+                      jobs: [job],
+                      active: [job],
+                    }
+                  : job),
         ),
       );
     };
@@ -130,6 +145,12 @@ async function fixture(t: test.TestContext, configured = true) {
     setBad: (value: unknown) => {
       badResult = value;
     },
+    setCatalog: (value: unknown) => {
+      catalog = value;
+    },
+    setReadiness: (value: unknown) => {
+      readiness = value;
+    },
     setStatus: (value: number) => {
       upstreamStatus = value;
     },
@@ -149,6 +170,133 @@ async function fixture(t: test.TestContext, configured = true) {
     },
   };
 }
+
+test("runtime catalog and readiness are protected management projections with bounded fixed queries", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.request("runtime-versions")).status, 401);
+  assert.equal((await fetch(`${f.hub.url}api/management/runtime-versions`)).status, 404);
+  await f.unlock();
+
+  let response = await f.request("runtime-versions?query=1.4&cursor=older%2Bstable");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    status: "fresh",
+    checked_at: 1792630800000,
+    versions: [{ version: "1.4.0" }, { version: "1.3.0" }],
+    next_cursor: "older+stable",
+  });
+  assert.ok(f.calls.some((call) => call.route === "/v1/runtime-versions?query=1.4&cursor=older%2Bstable"));
+
+  response = await f.request("runtime-readiness");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    status: "blocked",
+    installed_version: "1.3.0",
+    consumers: [{ run_id: runId, version: "1.3.0", ready: false, reason: "protocol_unavailable" }],
+  });
+
+  const before = f.calls.length;
+  assert.equal((await f.request("runtime-versions?registry=https%3A%2F%2Fevil.invalid")).status, 404);
+  assert.equal((await f.request("runtime-readiness?details=private")).status, 404);
+  assert.equal(f.calls.length, before);
+});
+
+test("catalog query and opaque cursor bounds fail before Gate", async (t) => {
+  const f = await fixture(t);
+  await f.unlock();
+  const before = f.calls.length;
+  for (const route of [
+    `runtime-versions?query=${"1".repeat(65)}`,
+    "runtime-versions?query=1.4-beta",
+    `runtime-versions?cursor=${"x".repeat(257)}`,
+    "runtime-versions?query=1&query=2",
+  ])
+    assert.equal((await f.request(route)).status, route.includes("query=1&query=2") ? 404 : 400, route);
+  assert.equal(f.calls.length, before);
+});
+
+test("catalog states and readiness blockers are strictly projected without provider internals", async (t) => {
+  const f = await fixture(t);
+  await f.unlock();
+  for (const status of ["fresh", "stale", "unavailable"] as const) {
+    f.setCatalog({
+      status,
+      checked_at: 1792630800000,
+      versions: status === "unavailable" ? [] : [{ version: "1.4.0", tarball: "https://private.invalid/pkg.tgz" }],
+      registry: "https://private.invalid",
+    });
+    const response = await f.request("runtime-versions");
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.status, status);
+    assert.ok(!JSON.stringify(result).includes("private"));
+  }
+
+  f.setReadiness({
+    status: "blocked",
+    installed_version: "1.3.0",
+    consumers: [
+      {
+        run_id: runId,
+        version: "1.1.0",
+        ready: false,
+        reason: "legacy_supervisor",
+        container_id: "private-container",
+        session_file: "/private/session",
+      },
+    ],
+    host_path: "/private/runtime",
+  });
+  const response = await f.request("runtime-readiness");
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.deepEqual(result, {
+    status: "blocked",
+    installed_version: "1.3.0",
+    consumers: [{ run_id: runId, version: "1.1.0", ready: false, reason: "legacy_supervisor" }],
+  });
+  assert.ok(!JSON.stringify(result).includes("private"));
+});
+
+test("malformed catalog and readiness responses fail closed without leaking provider bodies", async (t) => {
+  const f = await fixture(t);
+  await f.unlock();
+  for (const value of [
+    { status: "compatible", versions: [] },
+    { status: "fresh", versions: Array.from({ length: 51 }, () => ({ version: "1.4.0" })) },
+    { status: "fresh", versions: [{ version: "1.4.0-beta.1" }] },
+    { status: "fresh", versions: [], next_cursor: "x".repeat(257) },
+  ]) {
+    f.setCatalog(value);
+    const response = await f.request("runtime-versions");
+    assert.equal(response.status, 503);
+    assert.ok(!JSON.stringify(await response.json()).includes("compatible"));
+  }
+  for (const value of [
+    { status: "ready", consumers: [{ run_id: "bad", ready: true }] },
+    { status: "blocked", consumers: [{ run_id: runId, ready: false, reason: "Not Safe" }] },
+    { status: "ready", installed_version: "latest", consumers: [] },
+    { status: "ready", consumers: Array.from({ length: 129 }, () => ({ run_id: runId, ready: true })) },
+  ]) {
+    f.setReadiness(value);
+    const response = await f.request("runtime-readiness");
+    assert.equal(response.status, 503);
+    assert.ok(!JSON.stringify(await response.json()).includes("Not Safe"));
+  }
+});
+
+test("management revocation while catalog is loading suppresses the late protected projection", async (t) => {
+  const f = await fixture(t);
+  await f.unlock();
+  const held = f.holdNextResponse();
+  const pending = f.request("runtime-versions");
+  const release = await held;
+  revokeManagement(f.config);
+  release();
+  const response = await pending;
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).versions, undefined);
+});
 
 test("runtime updates are separately configured, management-only, locked and CSRF protected", async (t) => {
   const f = await fixture(t);

@@ -19,6 +19,23 @@ export type RuntimeUpdateJob = {
   resolved_at?: number;
   resolved?: boolean;
 };
+export type RuntimeVersionCatalog = {
+  status: "fresh" | "stale" | "unavailable";
+  checked_at?: number;
+  versions: Array<{ version: string }>;
+  next_cursor?: string;
+};
+export type RuntimeReadinessConsumer = {
+  run_id: string;
+  version?: string;
+  ready: boolean;
+  reason?: string;
+};
+export type RuntimeReadiness = {
+  status: "ready" | "blocked" | "unavailable";
+  consumers: RuntimeReadinessConsumer[];
+  installed_version?: string;
+};
 
 export const runtimeVersion = (value: unknown): value is string =>
   typeof value === "string" &&
@@ -31,6 +48,12 @@ const word = (value: unknown): value is string =>
   typeof value === "string" && value.trim() === value && /^[a-z_]{1,64}$/.test(value);
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
+const catalogQuery = (value: unknown): value is string =>
+  typeof value === "string" && value.length <= 64 && /^[0-9.]*$/.test(value);
+const catalogCursor = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.length <= 256 &&
+  [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);
 const states = ["pending", "queued", "running", "succeeded", "failed", "recovery_required", "rejected", "stale"];
 
 /** A bounded error category, never the upstream response body or credential. */
@@ -87,6 +110,64 @@ function job(value: unknown): RuntimeUpdateJob {
   return result;
 }
 
+function catalog(value: unknown): RuntimeVersionCatalog {
+  if (
+    !object(value) ||
+    !["fresh", "stale", "unavailable"].includes(value.status as string) ||
+    !Array.isArray(value.versions) ||
+    value.versions.length > 50
+  )
+    throw new RuntimeUpdateError();
+  const result: RuntimeVersionCatalog = {
+    status: value.status as RuntimeVersionCatalog["status"],
+    versions: value.versions.map((entry) => {
+      if (!object(entry) || !runtimeVersion(entry.version)) throw new RuntimeUpdateError();
+      return { version: entry.version };
+    }),
+  };
+  if (value.checked_at !== undefined) {
+    if (!Number.isSafeInteger(value.checked_at) || Number(value.checked_at) <= 0) throw new RuntimeUpdateError();
+    result.checked_at = Number(value.checked_at);
+  }
+  if (value.next_cursor !== undefined) {
+    if (!catalogCursor(value.next_cursor) || value.next_cursor.length === 0) throw new RuntimeUpdateError();
+    result.next_cursor = value.next_cursor;
+  }
+  return result;
+}
+
+function readiness(value: unknown): RuntimeReadiness {
+  if (
+    !object(value) ||
+    !["ready", "blocked", "unavailable"].includes(value.status as string) ||
+    !Array.isArray(value.consumers) ||
+    value.consumers.length > 128
+  )
+    throw new RuntimeUpdateError();
+  const result: RuntimeReadiness = {
+    status: value.status as RuntimeReadiness["status"],
+    consumers: value.consumers.map((consumer): RuntimeReadinessConsumer => {
+      if (!object(consumer) || !hex(consumer.run_id) || typeof consumer.ready !== "boolean")
+        throw new RuntimeUpdateError();
+      const projected: RuntimeReadinessConsumer = { run_id: consumer.run_id, ready: consumer.ready };
+      if (consumer.version !== undefined) {
+        if (!runtimeVersion(consumer.version)) throw new RuntimeUpdateError();
+        projected.version = consumer.version;
+      }
+      if (consumer.reason !== undefined) {
+        if (!word(consumer.reason)) throw new RuntimeUpdateError();
+        projected.reason = consumer.reason;
+      }
+      return projected;
+    }),
+  };
+  if (value.installed_version !== undefined) {
+    if (!runtimeVersion(value.installed_version)) throw new RuntimeUpdateError();
+    result.installed_version = value.installed_version;
+  }
+  return result;
+}
+
 /** Request-only Gate capability; no policy, approval, Docker or shell operations. */
 export class GateRuntimeUpdates {
   private readonly config: LifecycleConfig;
@@ -98,6 +179,7 @@ export class GateRuntimeUpdates {
     method: "GET" | "POST",
     route: string,
     value?: { version: string; idempotency_key: string },
+    maxBytes = 16 * 1024 * 1024,
   ): Promise<unknown> {
     let credential: unknown;
     try {
@@ -147,7 +229,7 @@ export class GateRuntimeUpdates {
           let bytes = 0;
           response.on("data", (chunk: Buffer) => {
             bytes += chunk.length;
-            if (bytes > 16 * 1024 * 1024) {
+            if (bytes > maxBytes) {
               finish(new RuntimeUpdateError());
               return;
             }
@@ -187,6 +269,22 @@ export class GateRuntimeUpdates {
       jobs: value.jobs.map(job),
       active: value.active.map(job),
     };
+  }
+
+  async catalog(options: { query?: string; cursor?: string } = {}) {
+    if (
+      !object(options) ||
+      Object.keys(options).some((key) => key !== "query" && key !== "cursor") ||
+      (options.query !== undefined && !catalogQuery(options.query)) ||
+      (options.cursor !== undefined && !catalogCursor(options.cursor))
+    )
+      throw new RuntimeUpdateError(400);
+    const search = new URLSearchParams({ query: options.query ?? "", cursor: options.cursor ?? "" });
+    return catalog(await this.request("GET", `/v1/runtime-versions?${search}`, undefined, 128 * 1024));
+  }
+
+  async readiness() {
+    return readiness(await this.request("GET", "/v1/runtime-readiness", undefined, 128 * 1024));
   }
 
   async submit(version: string, id: string) {

@@ -14,3 +14,15 @@ export const mathFormattingReply = String.raw`MATH_ASSISTANT_MARKER Inline \(E =
 \]
 
 Existing dollar math $$x^2$$ and a price of $5 USD.`;
+
+export const mathFormattingThinking =
+  String.raw`MATH_THINKING_MARKER Inline \(a_1 + \alpha\).
+
+\[
+\frac{1}{2} + \sum_{i=1}^{40} x_i = \frac{n(n+1)}{2}
+\]
+
+Existing $$y^2$$. Price: $5 USD. Code: ` +
+  "`" +
+  String.raw`\(ignored\)` +
+  "`";

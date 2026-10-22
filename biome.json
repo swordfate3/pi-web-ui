@@ -26,6 +26,8 @@
       "tests/git-preview-budget.test.ts",
       "tests/live-transport.test.ts",
       "tests/markdown-math.test.ts",
+      "tests/markdown-math-components.test.mjs",
+      "tests/register-tsx.mjs",
       "tests/ordinary-browser-commands.test.ts",
       "tests/browser-mutation-lifecycle.test.ts",
       "tests/terminal-prompt.test.ts",

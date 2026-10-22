@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { mathFormattingReply } from "../math-formatting-data";
+import { fauxAssistantMessage, fauxText, fauxThinking } from "@earendil-works/pi-ai";
+import { mathFormattingReply, mathFormattingThinking } from "../math-formatting-data";
 
-export default [fauxAssistantMessage(mathFormattingReply)];
+export default [fauxAssistantMessage([fauxThinking(mathFormattingThinking), fauxText(mathFormattingReply)])];

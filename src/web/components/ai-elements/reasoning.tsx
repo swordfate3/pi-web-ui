@@ -12,6 +12,7 @@ import { Streamdown } from "streamdown";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { t, useLanguage } from "../../src/core/i18n";
+import { remarkTexMath } from "../../src/core/markdown-math";
 
 import { Shimmer } from "./shimmer";
 
@@ -174,7 +175,7 @@ export type ReasoningContentProps = ComponentProps<typeof CollapsibleContent> & 
   children: string;
 };
 
-const streamdownPlugins = { cjk, code, math, mermaid };
+const streamdownPlugins = { cjk, code, math: { ...math, remarkPlugin: remarkTexMath }, mermaid };
 
 export const ReasoningContent = memo(({ className, children, ...props }: ReasoningContentProps) => {
   return (

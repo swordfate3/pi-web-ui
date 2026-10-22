@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -34,6 +37,8 @@ IDENTITY_KEYS = ("runtime_id", "session_id", "leaf_id")
 RESTART_KEYS = {
     "action", "run_id", "runtime_id", "session_id", "leaf_id", "operation_id",
 }
+RESTORE_PROOF_KEYS = {'session_sha256', 'expected_hash', 'source_hash',
+                      'target_tree_sha256', 'target_task', 'version', 'profile_hash'}
 
 SAFE_BOOLEAN_FLAGS = {
     "--no-tools", "-nt", "--no-builtin-tools", "-nbt", "--no-mcp",
@@ -60,11 +65,26 @@ class ProtocolError(Exception):
     """A generic, externally undisclosed protocol rejection."""
 
 
+def image_module(name):
+    """Load fixed sibling source, never a user import path or environment hook."""
+    if name not in ('runtime_identity', 'runtime_session'):
+        raise ProtocolError
+    source = Path(__file__).resolve().with_name(name + '.py')
+    spec = importlib.util.spec_from_file_location('pi_image_' + name, source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def compact_json(value: Any) -> bytes:
     encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     if len(encoded) + 1 > MAX_MESSAGE:
         raise ProtocolError
     return encoded + b"\n"
+
+
+def content_digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 def read_message(connection: socket.socket) -> Any:
@@ -185,12 +205,15 @@ class PiSupervisor:
         self.server_thread: threading.Thread | None = None
         self.child: subprocess.Popen[Any] | None = None
         self.child_token = ""
+        self.source_identity: dict[str, Any] | None = None
         self.last_snapshot: dict[str, Any] | None = None
         self.operation: dict[str, Any] | None = None
         self.operation_request: dict[str, Any] | None = None
         self.operation_worker_started = False
         self.restart_active = False
         self.checking_deadline: float | None = None
+        self.restore_capture = None
+        self.restore_timer: threading.Timer | None = None
 
     def prepare_runtime(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -236,19 +259,38 @@ class PiSupervisor:
         self.child_token = token
         return environment
 
-    def spawn(self, argv: list[str], cwd: str) -> subprocess.Popen[Any]:
+    def spawn(self, argv: list[str], cwd: str, *, selection: dict[str, Any] | None = None) -> subprocess.Popen[Any]:
         with self.lock:
             self.require_running()
             self.spawning = True
         try:
             self.extension_socket.unlink(missing_ok=True)
+            # Pin the measured path for this launch, rather than measuring one
+            # release and then executing a mutable shared bin/pi symlink.
+            try:
+                measurement = image_module('runtime_identity')
+                identity = measurement.measure_package(argv[0])
+                if selection is not None:
+                    target = Path(selection['target'])
+                    if (identity != selection['identity'] or argv[0] != identity['executable'] or
+                            target.resolve(strict=True) != target or
+                            measurement.tree_digest(target) != selection['tree_sha256']):
+                        raise ProtocolError
+            except (OSError, ValueError):
+                if selection is not None:
+                    raise ProtocolError from None
+                identity = None  # Legacy/unknown source remains unrefreshable.
+            # Pin the image Node too. The private offline copies deliberately
+            # live on a noexec tmpfs; Pi is JavaScript, not a native executable.
+            selected = ['/usr/local/bin/node', identity['executable'], *argv[1:]] if identity else argv
             environment = self.child_environment()
             self.require_running()
             # Do not hold the shutdown lock across Popen. A signal can latch
             # immediately; publication then delivers it to the new child too.
-            child = subprocess.Popen(argv, cwd=cwd, env=environment, close_fds=True)
+            child = subprocess.Popen(selected, cwd=cwd, env=environment, close_fds=True)
             with self.lock:
                 self.child = child
+                self.source_identity = identity
                 self.forward_shutdown_locked()
             return child
         finally:
@@ -333,6 +375,9 @@ class PiSupervisor:
         if snapshot is None:
             raise ProtocolError
         result = self.public_snapshot(snapshot)
+        with self.lock:
+            if self.source_identity is not None and self.source_identity['version'] == snapshot['version']:
+                result['source_identity'] = copy.deepcopy(self.source_identity)
         try:
             result['installed_version'] = self.installed_version()
         except (OSError, ValueError, ProtocolError):
@@ -344,7 +389,12 @@ class PiSupervisor:
     def installed_version(self) -> str:
         # Display/precondition metadata only. Do not execute an unvalidated
         # shared entrypoint with the live consumer's model credentials.
-        entry = Path(self.original_argv[0])
+        executable = self.original_argv[0]
+        if not os.path.isabs(executable):
+            executable = shutil.which(executable)
+            if executable is None:
+                raise ProtocolError
+        entry = Path(executable)
         resolved = entry.resolve(strict=True)
         for directory in list(resolved.parents)[:8]:
             manifest = directory / 'package.json'
@@ -353,6 +403,8 @@ class PiSupervisor:
             if manifest.stat().st_size > 1024 * 1024:
                 raise ProtocolError
             value = json.loads(manifest.read_text())
+            if not isinstance(value, dict):
+                raise ProtocolError
             version = value.get('version')
             if (value.get('name') != '@earendil-works/pi-coding-agent' or
                     not isinstance(version, str) or len(version) > 64 or
@@ -365,7 +417,7 @@ class PiSupervisor:
     def validate_restart_request(self, request: Any) -> str:
         if self.terminal_profile:
             raise ProtocolError('terminal_profile_unaudited')
-        if not isinstance(request, dict) or set(request) != RESTART_KEYS:
+        if not isinstance(request, dict) or set(request) not in (RESTART_KEYS, RESTART_KEYS | {'restore_proof'}):
             raise ProtocolError
         if request.get("action") != "restart":
             raise ProtocolError
@@ -377,9 +429,123 @@ class PiSupervisor:
         for key in ("runtime_id", "session_id"):
             bounded_text(request.get(key))
         bounded_text(request.get("leaf_id"), nullable=True)
+        if 'restore_proof' in request:
+            proof = request['restore_proof']
+            if (not isinstance(proof, dict) or set(proof) != RESTORE_PROOF_KEYS or
+                    not ID_RE.fullmatch(str(proof['target_task'])) or
+                    any(not isinstance(proof[k], str) or not re.fullmatch('[0-9a-f]{64}', proof[k])
+                        for k in ('session_sha256', 'expected_hash', 'source_hash',
+                                  'target_tree_sha256', 'profile_hash')) or
+                    not isinstance(proof['version'], str) or not re.fullmatch(
+                        r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', proof['version'])):
+                raise ProtocolError
         return operation_id
 
-    def check_restart(self, request: dict[str, Any]) -> tuple[dict[str, Any], str, list[str]]:
+    def prepare_restore(self, request: Any) -> dict[str, Any]:
+        if not isinstance(request, dict) or set(request) != RESTART_KEYS or request.get('action') != 'prepare_restore':
+            raise ProtocolError
+        self.validate_restart_request({**request, 'action': 'restart'})
+        with self.lock:
+            if self.restart_active:
+                raise ProtocolError
+            snapshot = self.snapshot()
+            if (any(snapshot[key] != request[key] for key in IDENTITY_KEYS) or
+                    not snapshot['idle'] or snapshot['pending'] or snapshot['busy']):
+                raise ProtocolError
+            if self.restore_capture is not None:
+                if self.restore_capture.operation_id != request['operation_id']:
+                    raise ProtocolError
+                try:
+                    self.restore_capture.verify(snapshot)
+                except ValueError:
+                    raise ProtocolError from None
+                return self.restore_capture.descriptor()
+            expected = {key: snapshot[key] for key in IDENTITY_KEYS}
+            lease_started = time.monotonic()
+            prepared = self.extension_request({'action': 'prepare', 'operation_id': request['operation_id'],
+                                               'expected': expected})
+            if prepared != snapshot:
+                self.cancel(request['operation_id'])
+                raise ProtocolError
+            capture = None
+            try:
+                sessions = image_module('runtime_session')
+                capture = sessions.SessionCapture(self.runtime_dir, prepared, request['operation_id'])
+                # The extension lease began before the reply/capture reads.
+                # Neither slow capture creation nor retries may extend it.
+                capture.deadline = min(capture.deadline, lease_started + sessions.LEASE_SECONDS)
+                capture.fence(prepared)
+                remaining = capture.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProtocolError
+            except (OSError, ValueError):
+                if capture is not None:
+                    capture.close()
+                self.cancel(request['operation_id'])
+                raise ProtocolError from None
+            except ProtocolError:
+                if capture is not None:
+                    capture.close()
+                self.cancel(request['operation_id'])
+                raise
+            self.restore_capture = capture
+            operation_id = request['operation_id']
+            def expire():
+                with self.lock:
+                    if self.restore_capture is not None and self.restore_capture.operation_id == operation_id:
+                        self.cancel_restore(operation_id)
+            self.restore_timer = threading.Timer(remaining, expire)
+            self.restore_timer.daemon = True
+            self.restore_timer.start()
+            return self.restore_capture.descriptor()
+
+    def cancel_restore(self, operation_id: str) -> None:
+        with self.lock:
+            if self.restore_capture is None:
+                return
+            if self.restore_capture.operation_id != operation_id:
+                raise ProtocolError
+            if self.restore_timer is not None:
+                self.restore_timer.cancel()
+                self.restore_timer = None
+            self.restore_capture.close()
+            self.restore_capture = None
+            self.cancel(operation_id)
+
+    def verify_restore_proof(self, request: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        proof = request.get('restore_proof')
+        if proof is None:
+            # A same-version refresh retains the existing lifecycle contract.
+            # Changing executable versions requires the offline restore grant.
+            if self.installed_version() != snapshot['version'] or self.restore_capture is not None:
+                raise ProtocolError
+            return
+        self.validate_restart_request(request)
+        capture = self.restore_capture
+        if capture is None or capture.operation_id != request['operation_id'] or self.source_identity is None:
+            raise ProtocolError
+        try:
+            capture.verify(snapshot)
+            identity = image_module('runtime_identity')
+            if (proof['session_sha256'] != capture.sha256 or
+                    proof['expected_hash'] != content_digest(capture.snapshot) or
+                    proof['source_hash'] != content_digest(self.source_identity) or
+                    identity.measure_package(self.source_identity['executable']) != self.source_identity):
+                raise ProtocolError
+            target = Path('/home/node/.local/.pi-releases') / proof['target_task']
+            selected = identity.measure_package(self.original_argv[0])
+            if (target.resolve(strict=True) != target or
+                    not Path(selected['executable']).is_relative_to(target) or
+                    selected['version'] != proof['version'] or
+                    identity.tree_digest(target) != proof['target_tree_sha256']):
+                raise ProtocolError
+            capture.fence(snapshot)
+            return {'identity': copy.deepcopy(selected), 'target': str(target),
+                    'tree_sha256': proof['target_tree_sha256']}
+        except (OSError, ValueError):
+            raise ProtocolError from None
+
+    def check_restart(self, request: dict[str, Any]) -> tuple[dict[str, Any], str, list[str], dict[str, Any] | None]:
         if self.terminal_profile:
             raise ProtocolError('terminal_profile_unaudited')
         # Refuse unknown, ambiguous, or equals-form argv before preparing or
@@ -394,15 +560,21 @@ class PiSupervisor:
             raise ProtocolError
         if not snapshot["idle"] or snapshot["pending"] or snapshot["busy"]:
             raise ProtocolError
+        selection = self.verify_restore_proof(request, snapshot)
         session_file = Path(snapshot["session_file"])
         cwd = Path(snapshot["cwd"])
         if not session_file.is_file() or not session_file.is_absolute():
             raise ProtocolError
         if not cwd.is_dir() or not cwd.is_absolute():
             raise ProtocolError
-        expected_version = self.installed_version()
+        expected_version = selection['identity']['version'] if selection is not None else self.installed_version()
         self.require_running()
         try:
+            if selection is not None:
+                capture = self.restore_capture
+                if capture is None or capture.operation_id != request['operation_id']:
+                    raise ProtocolError
+                capture.fence(snapshot)
             prepared = self.extension_request({
                 "action": "prepare",
                 "operation_id": request["operation_id"],
@@ -411,11 +583,14 @@ class PiSupervisor:
             self.require_running()
             if any(prepared[key] != snapshot[key] for key in SNAPSHOT_KEYS):
                 raise ProtocolError
-        except (OSError, ProtocolError, TimeoutError):
+        except (OSError, ProtocolError, TimeoutError, ValueError):
             if not self.stop_event.is_set():
                 self.cancel(request["operation_id"])
-            raise
-        return prepared, expected_version, restart_argv(self.original_argv, prepared)
+            raise ProtocolError from None
+        argv = restart_argv(self.original_argv, prepared)
+        if selection is not None:
+            argv[0] = selection['identity']['executable']
+        return prepared, expected_version, argv, selection
 
     def cancel(self, operation_id: str) -> None:
         try:
@@ -463,6 +638,8 @@ class PiSupervisor:
             self.operation_worker_started = False
             self.restart_active = True
             self.checking_deadline = time.monotonic() + 15.0
+            if request.get('restore_proof') is not None and self.restore_capture is not None:
+                self.checking_deadline = min(self.checking_deadline, self.restore_capture.deadline)
         return ({"operation_id": operation_id, "status": "running", "stage": "checking"}, True)
 
     def start_reserved_restart(self, operation_id: str) -> None:
@@ -508,6 +685,8 @@ class PiSupervisor:
             if self.operation is not None:
                 self.operation.update(status=status, stage=stage, **changes)
             self.restart_active = False
+            if self.restore_capture is not None:
+                self.cancel_restore(self.restore_capture.operation_id)
 
     def perform_restart(self, request: dict[str, Any]) -> None:
         if self.restart_cancelled():
@@ -520,7 +699,7 @@ class PiSupervisor:
             self.finish_operation("failed", "checking_timeout")
             return
         try:
-            prepared, expected_version, argv = self.check_restart(request)
+            prepared, expected_version, argv, selection = self.check_restart(request)
         except (OSError, ProtocolError, TimeoutError, subprocess.SubprocessError):
             self.finish_operation("failed", "checking_rejected")
             return
@@ -547,13 +726,27 @@ class PiSupervisor:
             return
         self.set_operation(stage="stopping")
         try:
-            # Last check after prepare and all local work, immediately before
-            # the single signal. A delayed worker must never stop the old Pi.
-            if time.monotonic() >= checking_deadline:
-                self.cancel(operation_id)
-                self.finish_operation("failed", "checking_timeout")
-                return
             with self.lock:
+                # Complete all history/source/target hashing BEFORE the last
+                # live observation. Input taints synchronously during hashing,
+                # even when the barrier drops delivery to the parser.
+                if selection is not None:
+                    if self.verify_restore_proof(request, prepared) != selection:
+                        raise ProtocolError
+                fresh = self.snapshot()
+                if fresh != prepared:
+                    raise ProtocolError
+                if selection is not None:
+                    capture = self.restore_capture
+                    if capture is None or capture.operation_id != operation_id:
+                        raise ProtocolError
+                    capture.fence(fresh)
+                # Only short metadata/clock checks follow the live snapshot.
+                # The checking window never extends the original freeze lease.
+                if time.monotonic() >= checking_deadline:
+                    self.cancel(operation_id)
+                    self.finish_operation("failed", "checking_timeout")
+                    return
                 if self.restart_cancelled():
                     return
                 child.send_signal(signal.SIGTERM)
@@ -563,7 +756,7 @@ class PiSupervisor:
                 self.cancel(operation_id)
             self.finish_operation("recovery_required", "stopping_timeout")
             return
-        except OSError:
+        except (OSError, ProtocolError, ValueError):
             self.finish_operation("failed", "stopping_failed")
             return
 
@@ -579,7 +772,7 @@ class PiSupervisor:
                 return
             if time.monotonic() >= spawn_deadline:
                 raise TimeoutError
-            new_child = self.spawn(argv, prepared["cwd"])
+            new_child = self.spawn(argv, prepared["cwd"], selection=selection)
             if self.restart_cancelled():
                 return
             if time.monotonic() >= spawn_deadline:
@@ -623,6 +816,7 @@ class PiSupervisor:
                 and candidate["session_file"] == prepared["session_file"]
                 and candidate["cwd"] == prepared["cwd"]
                 and candidate["version"] == expected_version
+                and all(candidate[key] == prepared[key] for key in ('provider', 'model', 'thinking'))
             )
             if matches:
                 self.finish_operation("succeeded", "complete", **changes)
@@ -652,6 +846,12 @@ class PiSupervisor:
             raise ProtocolError
         if request == {"action": "status"}:
             return self.status(), False, None
+        if request.get('action') == 'prepare_restore':
+            return self.prepare_restore(request), False, None
+        if (set(request) == {'action', 'run_id', 'operation_id'} and request.get('action') == 'cancel_restore'
+                and request.get('run_id') == self.run_id and ID_RE.fullmatch(str(request.get('operation_id')))):
+            self.cancel_restore(request['operation_id'])
+            return {'cancelled': True}, False, None
         if request.get("action") == "restart":
             result, dispatch = self.accept_restart(request)
             return result, dispatch, result["operation_id"] if dispatch else None
@@ -727,6 +927,8 @@ class PiSupervisor:
                 time.sleep(0.03)
         finally:
             self.stop_event.set()
+            if self.restore_capture is not None:
+                self.cancel_restore(self.restore_capture.operation_id)
             if self.server is not None:
                 self.server.close()
             if self.server_thread is not None:

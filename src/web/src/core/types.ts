@@ -236,8 +236,6 @@ export type TerminalPrompt = {
 };
 
 export type StateSyncPayload = {
-  /** Bounded display policy, not RuntimeMetadata, adapter state or a control latch. */
-  browserInputPolicy?: "ordinary" | "terminal-readonly";
   terminalPrompt?: TerminalPrompt | null;
   history?: HistoryMetadata;
   entries?: SessionEntry[];

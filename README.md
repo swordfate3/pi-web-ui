@@ -3,7 +3,7 @@
 给 [Pi coding agent](https://github.com/badlogic/pi-mono) 使用的浏览器界面：在电脑或手机上查看消息、工具执行、思考过程和会话分支，与终端操作同一个 Pi 会话。
 
 > 本分支维护于 [swordfate3/pi-web-ui](https://github.com/swordfate3/pi-web-ui)，基于 [kkkiio/pi-web-ui](https://github.com/kkkiio/pi-web-ui)，上游最初派生自 [deflating/tau](https://github.com/deflating/tau)。感谢原作者，保留 MIT 许可及来源说明。
-> 本测试分支基于 **1.0.1**，包含尚未合入 `main` 的数学／终端提示与隔离终端试验。**网页终端尚未接生产 Pi**；宿主机协作测试先读 [交接说明](docs/validation/terminal-host-handoff.md)。下列日常教程不代表测试分支已经部署。本 fork 未发布到上游 npm 包。
+> 本分支基于 **1.0.1**，保留普通网页聊天、模型选择、数学显示与 Hub 运行管理。独立原生终端已归档至 `codex/archive-native-terminal-20261022`，不属于当前 main 的安装内容；见[归档与部署边界](docs/native-terminal-archive.md)。本 fork 未发布到上游 npm 包。
 
 ![Pi Web UI example](docs/images/pi-web-ui-example.png)
 
@@ -36,7 +36,7 @@
 pi install git:github.com/swordfate3/pi-web-ui
 ```
 
-Git 安装包含预构建资源，安装运行依赖 `ws` 及固定版本的 `@xterm/headless`／`@xterm/addon-serialize`；不用手动编译、安装开发依赖或设置 `npm_config_include=dev`。`prepare` 会核验随包文件。宿主机终端试验必须使用完整源码和开发依赖，不能只安装运行包；见交接说明。
+Git 安装包含预构建资源，只安装运行依赖 `ws`；不用手动编译、安装开发依赖或设置 `npm_config_include=dev`。`prepare` 会核验随包文件。
 
 然后：
 

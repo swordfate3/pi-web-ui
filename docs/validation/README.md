@@ -2,6 +2,10 @@
 
 人工报告集中在此目录：
 
+2026-10-22：独立原生终端已从 main 撤回，其完整实现与部署记录保留在
+`codex/archive-native-terminal-20261022`。下列终端试验报告仅用于历史追溯，
+不代表 main 当前提供这些入口。参见[归档与部署边界](../native-terminal-archive.md)。
+
 - [宿主机 Codex 测试交接](terminal-host-handoff.md)：测试分支拉取、隔离验证命令、runtime只读调查、禁止自动部署及回传格式。
 
 - [独立隔离终端入口与受控输入](terminal-browser.md)：真实 Browser→WS→同一测试 Pi PTY、配对scope、单writer／撤权／unknown、跨源SW/opener验证与桌面手机截图；未接生产。

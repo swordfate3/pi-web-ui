@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import net, { Socket, isIP } from "node:net";
+import net, { isIP } from "node:net";
 import http from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { fileURLToPath } from "node:url";
@@ -103,10 +103,10 @@ function lifecycleConfig(value) {
 		credentialFile: v.credentialFile
 	};
 }
-var hex$5, text$1, GateLifecycle;
+var hex$4, text$1, GateLifecycle;
 var init_lifecycle = __esmMin((() => {
 	init_config();
-	hex$5 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+	hex$4 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
 	text$1 = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
 	GateLifecycle = class {
 		config;
@@ -162,7 +162,7 @@ var init_lifecycle = __esmMin((() => {
 			});
 		}
 		async target(runId) {
-			if (!hex$5(runId)) throw new Error("Invalid lifecycle identity");
+			if (!hex$4(runId)) throw new Error("Invalid lifecycle identity");
 			const value = await this.request("GET", `/v1/pi-lifecycle/runs/${runId}`);
 			if (value.managed === false) return { managed: false };
 			if (value.managed !== true || value.run_id !== runId || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id) || !text$1(value.version) || typeof value.idle !== "boolean" || typeof value.pending !== "boolean" || typeof value.busy !== "boolean" || ![
@@ -184,7 +184,7 @@ var init_lifecycle = __esmMin((() => {
 			};
 		}
 		job(value) {
-			if (!hex$5(value.id) || !hex$5(value.run_id) || typeof value.status !== "string" || ![
+			if (!hex$4(value.id) || !hex$4(value.run_id) || typeof value.status !== "string" || ![
 				"pending",
 				"queued",
 				"running",
@@ -223,13 +223,13 @@ var init_lifecycle = __esmMin((() => {
 			return result;
 		}
 		async restart(value) {
-			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$5(value.run_id) || !hex$5(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
+			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$4(value.run_id) || !hex$4(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
 			const result = this.job(await this.request("POST", "/v1/pi-lifecycle/restarts", value));
 			if (result.run_id !== value.run_id) throw new Error("Lifecycle target changed");
 			return result;
 		}
 		async operation(id) {
-			if (!hex$5(id)) throw new Error("Invalid lifecycle identity");
+			if (!hex$4(id)) throw new Error("Invalid lifecycle identity");
 			const job = this.job(await this.request("GET", `/v1/pi-lifecycle/restarts/${id}`));
 			if (job.id !== id) throw new Error("Lifecycle operation changed");
 			return job;
@@ -398,7 +398,7 @@ var init_state_budget = __esmMin((() => {
 			if (this.totals.activeGrants > 512 || this.totals.logicalBytes > 8388608) throw new StateBudgetError();
 		}
 		destination(relative) {
-			if (!/^(?:grants\/[a-f0-9]{32}\.json|generations\/[a-f0-9]{32}\.json|bounded\/[a-f0-9]{32}\.json|restarts\/[a-f0-9]{32}(?:\.started|\.verified)?\.json|management\.json|terminal-auth\.json|registry\.json)$/.test(relative)) throw new Error("Invalid Hub state destination");
+			if (!/^(?:grants\/[a-f0-9]{32}\.json|generations\/[a-f0-9]{32}\.json|bounded\/[a-f0-9]{32}\.json|restarts\/[a-f0-9]{32}(?:\.started|\.verified)?\.json|management\.json|registry\.json)$/.test(relative)) throw new Error("Invalid Hub state destination");
 			const file = path.join(this.root, relative);
 			privateStateDirectory(path.dirname(file));
 			return file;
@@ -465,463 +465,6 @@ var init_state_budget = __esmMin((() => {
 	storageDiagnostics = (config) => withStateWriter(config, (writer) => writer.diagnostics());
 }));
 //#endregion
-//#region hub/terminal-contract.ts
-function record$1(value, keys) {
-	return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === keys;
-}
-function terminalId(value) {
-	return typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
-}
-function identityText(value) {
-	return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\p{Cc}\p{Cs}]/u.test(value);
-}
-function parseTerminalTarget(value) {
-	if (!record$1(value, "inputState,managedRestartEligible,profile,runId,runtimeId,sessionId,terminalEpoch,v") || value.v !== 1 || !terminalId(value.runId) || !identityText(value.runtimeId) || !identityText(value.sessionId) || !terminalId(value.terminalEpoch) || value.profile !== "web-terminal-v1" || value.managedRestartEligible !== false || ![
-		"local",
-		"none",
-		"remote",
-		"fenced"
-	].includes(value.inputState)) throw new Error("Invalid terminal target");
-	return {
-		v: 1,
-		runId: value.runId,
-		runtimeId: value.runtimeId,
-		sessionId: value.sessionId,
-		terminalEpoch: value.terminalEpoch,
-		profile: "web-terminal-v1",
-		inputState: value.inputState,
-		managedRestartEligible: false
-	};
-}
-function sameTerminal(left, right) {
-	return left.runId === right.runId && left.runtimeId === right.runtimeId && left.sessionId === right.sessionId && left.terminalEpoch === right.terminalEpoch;
-}
-function validTerminalBinding(value) {
-	return record$1(value, "authorizationId,connectionId") && terminalId(value.authorizationId) && terminalId(value.connectionId);
-}
-var init_terminal_contract = __esmMin((() => {}));
-//#endregion
-//#region hub/terminal-wire.ts
-function exact(value, keys) {
-	if (!record(value) || Object.keys(value).sort().join(",") !== keys) throw new Error("terminal_invalid_frame");
-}
-function terminalSize(columns, rows) {
-	return Number.isInteger(columns) && Number(columns) >= 20 && Number(columns) <= 240 && Number.isInteger(rows) && Number(rows) >= 5 && Number(rows) <= 120;
-}
-/** Bounded JSON with duplicate-key, depth, nonfinite and lone-surrogate rejection. */
-function parseTerminalJson(text) {
-	if (textBytes(text) + 1 > 65536) throw new Error("terminal_invalid_frame");
-	let at = 0;
-	const space = () => {
-		while (/[\t\r\n ]/.test(text[at] ?? "x")) at++;
-	};
-	const string = () => {
-		const start = at++;
-		while (at < text.length) {
-			if (text[at] === "\\") {
-				at += 2;
-				continue;
-			}
-			if (text[at++] === "\"") {
-				const result = JSON.parse(text.slice(start, at));
-				if (/\p{Cs}/u.test(result)) throw new Error();
-				return result;
-			}
-		}
-		throw new Error();
-	};
-	const value = (depth) => {
-		if (depth > 16) throw new Error();
-		space();
-		if (text[at] === "\"") return string();
-		if (text[at] === "{") {
-			at++;
-			space();
-			const result = Object.create(null);
-			if (text[at] === "}") {
-				at++;
-				return result;
-			}
-			for (;;) {
-				space();
-				if (text[at] !== "\"") throw new Error();
-				const key = string();
-				space();
-				if (text[at++] !== ":" || Object.hasOwn(result, key)) throw new Error();
-				result[key] = value(depth + 1);
-				space();
-				const delimiter = text[at++];
-				if (delimiter === "}") return result;
-				if (delimiter !== ",") throw new Error();
-			}
-		}
-		if (text[at] === "[") {
-			at++;
-			space();
-			const result = [];
-			if (text[at] === "]") {
-				at++;
-				return result;
-			}
-			for (;;) {
-				result.push(value(depth + 1));
-				space();
-				const delimiter = text[at++];
-				if (delimiter === "]") return result;
-				if (delimiter !== ",") throw new Error();
-			}
-		}
-		const token = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(text.slice(at))?.[0];
-		if (!token) throw new Error();
-		at += token.length;
-		const result = JSON.parse(token);
-		if (typeof result === "number" && !Number.isFinite(result)) throw new Error();
-		return result;
-	};
-	try {
-		const result = value(0);
-		space();
-		if (at !== text.length || !record(result)) throw new Error();
-		return result;
-	} catch {
-		throw new Error("terminal_invalid_frame");
-	}
-}
-function parseTerminalRequest(frame) {
-	if (!Number.isSafeInteger(frame.id) || Number(frame.id) < 1) throw new Error("terminal_invalid_request");
-	if (frame.type === "acquire" || frame.type === "release") exact(frame, "id,type");
-	else if (frame.type === "resize") {
-		exact(frame, "columns,id,leaseId,rows,type");
-		if (!terminalId(frame.leaseId) || !terminalSize(frame.columns, frame.rows)) throw new Error("terminal_invalid_request");
-	} else {
-		exact(frame, "data,id,leaseId,sequence,terminalEpoch,type,v");
-		if (frame.v !== 1 || frame.type !== "input" || !terminalId(frame.terminalEpoch) || !terminalId(frame.leaseId) || !Number.isSafeInteger(frame.sequence) || Number(frame.sequence) < 1 || typeof frame.data !== "string" || !frame.data || /\p{Cs}/u.test(frame.data) || textBytes(frame.data) > 8192) throw new Error("terminal_invalid_request");
-	}
-	return frame;
-}
-function parseTerminalResult(action, result) {
-	if (!record(result)) throw new Error("terminal_invalid_result");
-	if (action === "acquire") if (result.ok === true) {
-		exact(result, "expiresInMs,leaseId,ok");
-		if (!terminalId(result.leaseId) || result.expiresInMs !== 3e4) throw new Error();
-	} else {
-		exact(result, "error,ok");
-		if (result.ok !== false || !["local_owns_input", "control_unavailable"].includes(String(result.error))) throw new Error();
-	}
-	else if (action === "input") if (result.ok === true) {
-		exact(result, "delivery,ok");
-		if (result.delivery !== "written") throw new Error();
-	} else {
-		exact(result, "delivery,error,ok");
-		if (result.ok !== false || !(result.delivery === "unknown" && result.error === "input_delivery_unknown") && !(result.delivery === "rejected" && result.error === "input_rejected")) throw new Error();
-	}
-	else if (action === "release") {
-		exact(result, "ok");
-		if (result.ok !== true) throw new Error();
-	} else if (result.error === void 0) {
-		exact(result, "ok");
-		if (typeof result.ok !== "boolean") throw new Error();
-	} else {
-		exact(result, "error,ok");
-		if (result.ok !== false || !["resize_rejected", "resize_unknown"].includes(String(result.error))) throw new Error();
-	}
-	return result;
-}
-var TERMINAL_FRAME_BYTES, utf8, textBytes, record, TerminalSnapshotAssembly;
-var init_terminal_wire = __esmMin((() => {
-	init_terminal_contract();
-	TERMINAL_FRAME_BYTES = 65536;
-	utf8 = new TextEncoder();
-	textBytes = (value) => utf8.encode(value).length;
-	record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-	TerminalSnapshotAssembly = class {
-		current;
-		sequence = -1;
-		target;
-		constructor(target) {
-			this.target = target;
-		}
-		clear() {
-			this.current = void 0;
-		}
-		accept(frame) {
-			if (frame.type === "screen-start") {
-				exact(frame, "bytes,chunks,columns,rows,sequence,target,type");
-				if (this.current || !sameTerminal(parseTerminalTarget(frame.target), this.target) || !Number.isSafeInteger(frame.sequence) || Number(frame.sequence) <= this.sequence || !terminalSize(frame.columns, frame.rows) || !Number.isInteger(frame.bytes) || Number(frame.bytes) < 0 || Number(frame.bytes) > 1048576 || frame.chunks !== Math.ceil(Number(frame.bytes) / 20480)) throw new Error("terminal_invalid_snapshot");
-				this.current = {
-					sequence: Number(frame.sequence),
-					columns: Number(frame.columns),
-					rows: Number(frame.rows),
-					bytes: new Uint8Array(Number(frame.bytes)),
-					chunks: Number(frame.chunks),
-					index: 0,
-					offset: 0
-				};
-				return;
-			}
-			const current = this.current;
-			if (!current || frame.terminalEpoch !== this.target.terminalEpoch || frame.sequence !== current.sequence) throw new Error("terminal_invalid_snapshot");
-			if (frame.type === "screen-chunk") {
-				exact(frame, "data,index,sequence,terminalEpoch,type");
-				if (frame.index !== current.index || current.index >= current.chunks || typeof frame.data !== "string" || frame.data.length > 27308 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(frame.data)) throw new Error("terminal_invalid_snapshot");
-				const binary = atob(frame.data);
-				if (btoa(binary) !== frame.data || binary.length !== Math.min(20480, current.bytes.length - current.offset)) throw new Error("terminal_invalid_snapshot");
-				for (let i = 0; i < binary.length; i++) current.bytes[current.offset++] = binary.charCodeAt(i);
-				current.index++;
-				return;
-			}
-			exact(frame, "sequence,terminalEpoch,type");
-			if (frame.type !== "screen-end" || current.index !== current.chunks || current.offset !== current.bytes.length) throw new Error("terminal_invalid_snapshot");
-			const data = new TextDecoder("utf-8", { fatal: true }).decode(current.bytes);
-			if (/\p{Cs}/u.test(data)) throw new Error("terminal_invalid_snapshot");
-			this.sequence = current.sequence;
-			this.current = void 0;
-			return {
-				sequence: current.sequence,
-				columns: current.columns,
-				rows: current.rows,
-				data
-			};
-		}
-	};
-}));
-//#endregion
-//#region hub/terminal-provider.ts
-/** Dedicated read-only secret mount only; never loosens the generic 0600 reader. */
-function readTerminalProviderSecret(file) {
-	if (!path.isAbsolute(file) || realpathSync(file) !== file) throw unavailable();
-	const parent = lstatSync(path.dirname(file));
-	const uid = process.getuid?.();
-	if (!parent.isDirectory() || parent.isSymbolicLink()) throw unavailable();
-	const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-	try {
-		const stat = fstatSync(fd);
-		const local = stat.uid === uid && (stat.mode & 4095) === 384 && parent.uid === uid && (parent.mode & 63) === 0;
-		const mounted = stat.uid === 0 && stat.gid === 1e3 && (stat.mode & 4095) === 416 && parent.uid === 0 && parent.gid === 1e3 && (parent.mode & 4095) === 1528;
-		if (!stat.isFile() || stat.nlink !== 1 || stat.size !== 64 || !local && !mounted) throw unavailable();
-		if (mounted && (process.platform !== "linux" || !readFileSync("/proc/self/mountinfo", "utf8").split("\n").some((line) => {
-			const fields = line.split(" ");
-			return fields[4] === path.dirname(file).replaceAll(" ", "\\040") && fields[5]?.split(",").includes("ro");
-		}))) throw unavailable();
-		let ancestor = path.dirname(path.dirname(file));
-		for (;;) {
-			const directory = lstatSync(ancestor);
-			if (!directory.isDirectory() || directory.isSymbolicLink() || ![0, uid].includes(directory.uid) || (directory.mode & 18) !== 0 && !(directory.uid === 0 && directory.mode & 512)) throw unavailable();
-			if (ancestor === path.dirname(ancestor)) break;
-			ancestor = path.dirname(ancestor);
-		}
-		const token = readFileSync(fd, "utf8");
-		if (!/^[a-f0-9]{64}$/.test(token)) throw unavailable();
-		return token;
-	} finally {
-		closeSync(fd);
-	}
-}
-function terminalProviderConfig(value) {
-	exact(value, "credentialFile,socketPath");
-	for (const key of ["socketPath", "credentialFile"]) if (typeof value[key] !== "string" || !path.isAbsolute(value[key]) || value[key].includes("\0") || path.normalize(value[key]) !== value[key]) throw unavailable();
-	return {
-		socketPath: value.socketPath,
-		credentialFile: value.credentialFile
-	};
-}
-async function terminalProviderStatus(config, runId) {
-	if (!terminalId(runId)) throw unavailable();
-	const client = new ProviderConnection(terminalProviderConfig(config), {
-		v: 1,
-		op: "status",
-		runId
-	});
-	try {
-		return await client.ready;
-	} finally {
-		client.close();
-	}
-}
-async function connectTerminalProvider(config, value, scope, binding, callbacks) {
-	const target = parseTerminalTarget(value);
-	if (!["read", "write"].includes(scope) || !validTerminalBinding(binding)) throw unavailable();
-	const client = new ProviderConnection(terminalProviderConfig(config), {
-		v: 1,
-		op: "connect",
-		target,
-		scope,
-		binding
-	}, callbacks);
-	try {
-		await client.ready;
-		return client;
-	} catch {
-		client.close();
-		throw unavailable();
-	}
-}
-var unavailable, active, ProviderConnection;
-var init_terminal_provider = __esmMin((() => {
-	init_terminal_contract();
-	init_terminal_wire();
-	unavailable = () => /* @__PURE__ */ new Error("terminal_backend_unavailable");
-	active = /* @__PURE__ */ new Set();
-	ProviderConnection = class {
-		ready;
-		socket;
-		buffer = Buffer.alloc(0);
-		partialAt = 0;
-		startedAt = Date.now();
-		readyTarget;
-		assembly;
-		closed = false;
-		lastId = 0;
-		pending = /* @__PURE__ */ new Map();
-		resolveReady;
-		rejectReady;
-		timer;
-		abort = () => this.close();
-		opening;
-		callbacks;
-		constructor(config, opening, callbacks) {
-			this.opening = opening;
-			this.callbacks = callbacks;
-			if (active.size >= 8) throw unavailable();
-			const token = readTerminalProviderSecret(config.credentialFile);
-			this.ready = new Promise((resolve, reject) => {
-				this.resolveReady = resolve;
-				this.rejectReady = reject;
-			});
-			this.socket = new Socket({ onread: {
-				buffer: Buffer.alloc(32768),
-				callback: (length, buffer) => {
-					const chunk = Buffer.from(buffer.subarray(0, length));
-					this.consume(chunk).then(() => {
-						if (!this.closed) this.socket.resume();
-					}).catch(() => this.close());
-					return false;
-				}
-			} });
-			active.add(this.socket);
-			this.timer = setInterval(() => {
-				const now = Date.now();
-				if (!this.readyTarget && now - this.startedAt >= 2e3 || this.partialAt && now - this.partialAt >= 2e3 || now - this.startedAt >= 3e5) this.close();
-			}, 20);
-			this.timer.unref();
-			this.socket.once("connect", () => this.write({
-				...opening,
-				token
-			}));
-			this.socket.on("error", () => this.close());
-			this.socket.on("end", () => this.close());
-			this.socket.on("close", () => this.close());
-			callbacks?.signal?.addEventListener("abort", this.abort, { once: true });
-			if (callbacks?.signal?.aborted) this.close();
-			else this.socket.connect(config.socketPath);
-		}
-		write(frame) {
-			const bytes = Buffer.from(`${JSON.stringify(frame)}\n`);
-			if (this.closed || bytes.length > 65536 || this.socket.writableLength + bytes.length > 262144) {
-				this.close();
-				return;
-			}
-			this.socket.write(bytes);
-		}
-		async consume(chunk) {
-			let start = 0;
-			while (!this.closed && start < chunk.length) {
-				const newline = chunk.indexOf(10, start);
-				const end = newline < 0 ? chunk.length : newline;
-				if (this.buffer.length === 0 && end > start) this.partialAt = Date.now();
-				if (this.buffer.length + end - start + 1 > 65536) throw unavailable();
-				this.buffer = Buffer.concat([this.buffer, chunk.subarray(start, end)]);
-				if (newline < 0) break;
-				const text = new TextDecoder("utf-8", { fatal: true }).decode(this.buffer);
-				const length = this.buffer.length + 1;
-				this.buffer = Buffer.alloc(0);
-				this.partialAt = 0;
-				const frame = parseTerminalJson(text);
-				if (frame.type === "screen-chunk" && length > 32768) throw unavailable();
-				await this.frame(frame);
-				start = newline + 1;
-			}
-		}
-		async frame(frame) {
-			if (!this.readyTarget) {
-				exact(frame, "target,type");
-				if (frame.type !== "ready") throw unavailable();
-				const target = parseTerminalTarget(frame.target);
-				if (this.opening.op === "status" ? target.runId !== this.opening.runId : !sameTerminal(target, this.opening.target)) throw unavailable();
-				this.readyTarget = target;
-				this.assembly = new TerminalSnapshotAssembly(target);
-				this.resolveReady(target);
-				if (this.opening.op === "status") this.close();
-				return;
-			}
-			if (frame.type === "response") {
-				exact(frame, "id,result,type");
-				const pending = this.pending.get(Number(frame.id));
-				if (!pending || frame.id !== Number(frame.id)) throw unavailable();
-				const result = parseTerminalResult(pending.action, frame.result);
-				clearTimeout(pending.timer);
-				this.pending.delete(Number(frame.id));
-				pending.resolve(result);
-				return;
-			}
-			if (frame.type === "screen-unavailable") {
-				exact(frame, "type");
-				this.assembly?.clear();
-				this.callbacks?.onUnavailable();
-				return;
-			}
-			const snapshot = this.assembly?.accept(frame);
-			if (snapshot) {
-				let timer;
-				try {
-					await Promise.race([this.callbacks?.onSnapshot(snapshot), new Promise((_, reject) => {
-						timer = setTimeout(() => reject(unavailable()), 2e3);
-					})]);
-				} finally {
-					clearTimeout(timer);
-				}
-			}
-		}
-		request(value) {
-			const frame = parseTerminalRequest(value);
-			if (this.closed || !this.readyTarget || this.opening.scope !== "write" || frame.id <= this.lastId || this.pending.size >= 64) return Promise.reject(unavailable());
-			this.lastId = frame.id;
-			return new Promise((resolve, reject) => {
-				const timer = setTimeout(() => this.close(), 2e3);
-				this.pending.set(frame.id, {
-					action: frame.type,
-					resolve,
-					reject,
-					timer
-				});
-				this.write(frame);
-			});
-		}
-		close() {
-			if (this.closed) return;
-			this.closed = true;
-			clearInterval(this.timer);
-			this.callbacks?.signal?.removeEventListener("abort", this.abort);
-			active.delete(this.socket);
-			this.buffer = Buffer.alloc(0);
-			this.assembly?.clear();
-			this.rejectReady(unavailable());
-			this.socket.destroy();
-			for (const pending of this.pending.values()) {
-				clearTimeout(pending.timer);
-				if (pending.action === "input") pending.resolve({
-					ok: false,
-					delivery: "unknown",
-					error: "input_delivery_unknown"
-				});
-				else pending.reject(unavailable());
-			}
-			this.pending.clear();
-			this.callbacks?.onUnavailable();
-		}
-	};
-}));
-//#endregion
 //#region hub/config.ts
 var config_exports = /* @__PURE__ */ __exportAll({
 	initializeHub: () => initializeHub,
@@ -931,8 +474,7 @@ var config_exports = /* @__PURE__ */ __exportAll({
 	readGrant: () => readGrant,
 	readHubConfig: () => readHubConfig,
 	readPrivateJson: () => readPrivateJson,
-	revokeSession: () => revokeSession,
-	terminalConfig: () => terminalConfig
+	revokeSession: () => revokeSession
 });
 function privateDirectory(directory) {
 	privateStateDirectory(directory);
@@ -974,7 +516,6 @@ function readHubConfig(file) {
 	const lifecycle = value.lifecycle === void 0 ? void 0 : lifecycleConfig(value.lifecycle);
 	const runtimeUpdates = value.runtimeUpdates === void 0 ? void 0 : lifecycleConfig(value.runtimeUpdates);
 	const management = value.management === void 0 ? void 0 : managementConfig(value.management, port, publicUrl);
-	const terminal = value.terminal === void 0 ? void 0 : terminalConfig(value.terminal, port, publicUrl, management);
 	return {
 		stateDir,
 		runtimeDir,
@@ -985,26 +526,7 @@ function readHubConfig(file) {
 		publicUrl,
 		...lifecycle ? { lifecycle } : {},
 		...runtimeUpdates ? { runtimeUpdates } : {},
-		...management ? { management } : {},
-		...terminal ? { terminal } : {}
-	};
-}
-/** Separate listener and authorization domain; no terminal backend is implied. */
-function terminalConfig(value, chatPort, chatPublicUrl, management) {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid terminal configuration");
-	const v = value;
-	if (Object.keys(v).some((key) => ![
-		"port",
-		"publicUrl",
-		"provider"
-	].includes(key)) || !Number.isInteger(v.port) || Number(v.port) < 0 || Number(v.port) > 65535 || v.port !== 0 && (v.port === chatPort || v.port === management?.port)) throw new Error("Terminal requires a distinct port");
-	const publicUrl = v.publicUrl === void 0 ? void 0 : validatedPublicUrl(v.publicUrl);
-	if (publicUrl && (!chatPublicUrl || !publicUrl.startsWith("https:") || new URL(publicUrl).pathname !== "/" || [chatPublicUrl, management?.publicUrl].some((other) => other && new URL(other).hostname === new URL(publicUrl).hostname))) throw new Error("Terminal requires a distinct canonical HTTPS origin");
-	const provider = v.provider === void 0 ? void 0 : terminalProviderConfig(v.provider);
-	return {
-		port: Number(v.port),
-		...publicUrl ? { publicUrl } : {},
-		...provider ? { provider } : {}
+		...management ? { management } : {}
 	};
 }
 function managementConfig(value, chatPort, chatPublicUrl) {
@@ -1085,7 +607,6 @@ var init_config = __esmMin((() => {
 	init_connection_config();
 	init_lifecycle();
 	init_state_budget();
-	init_terminal_provider();
 }));
 //#endregion
 //#region hub/gateway-auth.ts
@@ -1108,18 +629,18 @@ function gatewayIdentity(config, request) {
 //#region hub/management.ts
 init_config();
 init_state_budget();
-var digest$1 = (value) => createHash("sha256").update(value).digest("hex");
-var hex$4 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
-var equal$2 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-var stateFile$1 = (config) => path.join(config.stateDir, "management.json");
-function readState$1(config) {
-	const file = stateFile$1(config);
+var digest = (value) => createHash("sha256").update(value).digest("hex");
+var hex$3 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var equal$1 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+var stateFile = (config) => path.join(config.stateDir, "management.json");
+function readState(config) {
+	const file = stateFile(config);
 	if (!existsSync(file)) return void 0;
 	const value = readPrivateJson(file);
-	if (!hex$4(value.epoch, 64) || value.pairHash !== null && !hex$4(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
+	if (!hex$3(value.epoch, 64) || value.pairHash !== null && !hex$3(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
 	return value;
 }
-function saveState$1(writer, value, security = false) {
+function saveState(writer, value, security = false) {
 	writer.write("management.json", value, { security });
 }
 /** Trusted CLI only: return a short-lived code to its administrator's terminal. */
@@ -1127,11 +648,11 @@ function issueManagementCode(config, now = Date.now()) {
 	if (config.management?.gateway) throw new Error("Management uses the configured gateway login, not pairing codes");
 	return withStateWriter(config, (writer) => {
 		const code = randomBytes(16).toString("hex");
-		const epoch = readState$1(config)?.epoch ?? randomBytes(32).toString("hex");
+		const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
 		const expires = now + 6e5;
-		saveState$1(writer, {
+		saveState(writer, {
 			epoch,
-			pairHash: digest$1(code),
+			pairHash: digest(code),
 			expires,
 			failures: 0
 		});
@@ -1142,7 +663,7 @@ function issueManagementCode(config, now = Date.now()) {
 	});
 }
 function revokeManagement(config) {
-	withStateWriter(config, (writer) => saveState$1(writer, {
+	withStateWriter(config, (writer) => saveState(writer, {
 		epoch: randomBytes(32).toString("hex"),
 		pairHash: null,
 		expires: 0,
@@ -1166,12 +687,12 @@ var HubManagement = class {
 		const values = (request.headers.cookie ?? "").split(";").map((item) => item.trim()).filter((item) => item.startsWith(`${this.cookieName}=`));
 		if (values.length !== 1) return void 0;
 		const token = values[0].slice(this.cookieName.length + 1);
-		if (!hex$4(token, 64)) return void 0;
-		const key = digest$1(token);
+		if (!hex$3(token, 64)) return void 0;
+		const key = digest(token);
 		const session = this.sessions.get(key);
 		let state;
 		try {
-			state = readState$1(this.config);
+			state = readState(this.config);
 		} catch {
 			return;
 		}
@@ -1195,7 +716,7 @@ var HubManagement = class {
 	authorize(request, write = false) {
 		const session = this.session(request);
 		const csrf = request.headers["x-pi-hub-csrf"];
-		if (!session || write && (typeof csrf !== "string" || !hex$4(csrf, 64) || !equal$2(csrf, session.csrf))) throw new Error("Management authorization required");
+		if (!session || write && (typeof csrf !== "string" || !hex$3(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Management authorization required");
 		return session;
 	}
 	revalidate(request, expected, write = false) {
@@ -1205,16 +726,16 @@ var HubManagement = class {
 	unlock(code) {
 		if (this.config.management?.gateway) throw new Error("Gateway login required");
 		return withStateWriter(this.config, (writer) => {
-			const state = readState$1(this.config);
+			const state = readState(this.config);
 			if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10) throw new Error("Management unlock rejected");
-			if (!hex$4(code, 32) || !equal$2(digest$1(code), state.pairHash)) {
-				saveState$1(writer, {
+			if (!hex$3(code, 32) || !equal$1(digest(code), state.pairHash)) {
+				saveState(writer, {
 					...state,
 					failures: state.failures + 1
 				}, true);
 				throw new Error("Management unlock rejected");
 			}
-			saveState$1(writer, {
+			saveState(writer, {
 				...state,
 				pairHash: null,
 				expires: 0
@@ -1226,7 +747,7 @@ var HubManagement = class {
 		const identity = gatewayIdentity(this.config, request);
 		if (!identity) throw new Error("Verified gateway login required");
 		return withStateWriter(this.config, (writer) => {
-			let state = readState$1(this.config);
+			let state = readState(this.config);
 			if (!state) {
 				state = {
 					epoch: randomBytes(32).toString("hex"),
@@ -1234,7 +755,7 @@ var HubManagement = class {
 					expires: 0,
 					failures: 0
 				};
-				saveState$1(writer, state);
+				saveState(writer, state);
 			}
 			return this.createSession(state, identity);
 		});
@@ -1245,7 +766,7 @@ var HubManagement = class {
 		const token = randomBytes(32).toString("hex");
 		const csrf = randomBytes(32).toString("hex");
 		const expires = this.now() + 18e5;
-		this.sessions.set(digest$1(token), {
+		this.sessions.set(digest(token), {
 			epoch: state.epoch,
 			expires,
 			csrf,
@@ -1413,7 +934,7 @@ function proxySessionResponse(request, response, upstream, resource) {
 //#region hub/bounded-registry.ts
 init_config();
 var ZERO = "0000000000000000";
-var hex$3 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var hex$2 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
 var RegistryError = class extends Error {
 	code;
 	constructor(code = "ENDED_GENERATION") {
@@ -1422,7 +943,7 @@ var RegistryError = class extends Error {
 	}
 };
 var relative = (runId) => {
-	if (!hex$3(runId, 32)) throw new RegistryError("AUTH_FAILED");
+	if (!hex$2(runId, 32)) throw new RegistryError("AUTH_FAILED");
 	return `bounded/${runId}.json`;
 };
 var hasBoundedRecord = (config, runId) => existsSync(path.join(config.stateDir, relative(runId)));
@@ -1436,10 +957,10 @@ function boundedRecord(config, runId, boot) {
 		revision: 0
 	};
 	const value = readPrivateJson(file);
-	if (value.schema !== 2 || value.run_id !== runId || !hex$3(value.boot, 32) || !hex$3(value.slot, 16) || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new RegistryError("STATE_UNAVAILABLE");
+	if (value.schema !== 2 || value.run_id !== runId || !hex$2(value.boot, 32) || !hex$2(value.slot, 16) || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new RegistryError("STATE_UNAVAILABLE");
 	for (const tuple of [value.current, value.pending]) {
 		if (tuple === void 0) continue;
-		if (!isBoundedGeneration(tuple.generation) || !tuple.generation.startsWith(`b2-${value.boot}-`) || tuple.generation.split("-")[2] > value.slot || !hex$3(tuple.request_id, 32) || !Number.isInteger(tuple.port) || tuple.port < 1 || tuple.port > 65535 || !Number.isSafeInteger(tuple.expires)) throw new RegistryError("STATE_UNAVAILABLE");
+		if (!isBoundedGeneration(tuple.generation) || !tuple.generation.startsWith(`b2-${value.boot}-`) || tuple.generation.split("-")[2] > value.slot || !hex$2(tuple.request_id, 32) || !Number.isInteger(tuple.port) || tuple.port < 1 || tuple.port > 65535 || !Number.isSafeInteger(tuple.expires)) throw new RegistryError("STATE_UNAVAILABLE");
 	}
 	return value.boot === boot ? value : {
 		schema: 2,
@@ -1455,7 +976,7 @@ function saveBounded(writer, record, security = false) {
 	writer.write(relative(record.run_id), record, { security });
 }
 function issueBounded(writer, record, value, live) {
-	if (value.boot !== record.boot || !hex$3(value.slot, 16) || !hex$3(value.request_id, 32) || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new RegistryError("ISSUANCE_STALE");
+	if (value.boot !== record.boot || !hex$2(value.slot, 16) || !hex$2(value.request_id, 32) || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new RegistryError("ISSUANCE_STALE");
 	const now = Date.now();
 	const result = (tuple) => ({
 		generation: tuple.generation,
@@ -1605,7 +1126,7 @@ var ForwardQueue = class {
 var runtimePortalJs = String.raw`
   const runtimeUpdates = (() => {
     const storageKey = 'pi-hub-runtime-update';
-    const terminalStatuses = new Set(['succeeded', 'failed', 'recovery_required', 'rejected', 'stale', 'manual_restart_required']);
+    const terminalStatuses = new Set(['succeeded', 'failed', 'recovery_required', 'rejected', 'stale']);
     const activeStatuses = new Set(['pending', 'queued', 'running']);
     const jobs = new Map();
     let policy;
@@ -1647,20 +1168,16 @@ var runtimePortalJs = String.raw`
       unmanaged_or_unavailable_consumer: '存在未受管或不可用的共享运行时使用者，需要迁移或检查',
       install_failed: '安装失败', installation_outcome_unknown: '安装结果不确定，需要管理员检查',
       refresh_requires_inspection: '刷新结果需要管理员检查', complete: '任务已完成',
-      installed_manual_restart_required: '共享包已安装；终端需要手动退出并重新启动',
     })[stage] || String(stage || 'unknown').replaceAll('_', ' ');
     const statusLabel = (status) => ({
       pending: '等待处理', queued: '已排队', running: '任务进行中', succeeded: '安装成功；所有受管 Pi 进程已刷新或退出', failed: '安装失败',
       recovery_required: '结果不确定，需要管理员检查', rejected: '任务已拒绝', stale: '任务已过期',
-      manual_restart_required: '共享包已安装；终端子进程尚未刷新，请手动退出并重新启动',
     })[status] || '结果未知';
     const targetLabel = (status) => ({
       waiting_for_idle: '等待目标空闲', refreshing: '正在刷新 Pi 进程', succeeded: '已加载新版本', exited: '已退出',
-      manual_restart_required: '需要手动退出并重新启动；正在运行的子进程版本未知，未计为已刷新',
     })[status] || String(status || 'unknown').replaceAll('_', ' ');
     const reasonLabel = (reason) => ({
       consumer_not_ready: '共享运行时使用者尚未就绪', awaiting_state_change: '等待运行状态变化', busy_race: '空闲确认期间再次忙碌',
-      terminal_profile_unaudited: '终端进程不允许受管重启',
     })[reason] || String(reason || '').replaceAll('_', ' ');
     function renderJob(value) {
       const row = document.createElement('div'); row.className = 'runtime-update-result';
@@ -1687,7 +1204,7 @@ var runtimePortalJs = String.raw`
         let text = '目标 ' + target.run_id + ' · ' + targetLabel(target.status);
         if (typeof target.old_version === 'string') text += ' · 原版本 ' + target.old_version;
         if (typeof target.version === 'string') text += ' · 当前版本 ' + target.version;
-        if (['waiting_for_idle', 'manual_restart_required'].includes(target.status) && typeof target.wait_reason === 'string') text += ' · ' + reasonLabel(target.wait_reason);
+        if (target.status === 'waiting_for_idle' && typeof target.wait_reason === 'string') text += ' · ' + reasonLabel(target.wait_reason);
         line.textContent = text; row.append(line);
       }
       return row;
@@ -2091,7 +1608,7 @@ var portalCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkM
 init_config();
 init_lifecycle();
 var runtimeVersion = (value) => typeof value === "string" && value.length <= 64 && value.trim() === value && /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value);
-var hex$2 = (value) => typeof value === "string" && value.length === 32 && /^[a-f0-9]{32}$/.test(value);
+var hex$1 = (value) => typeof value === "string" && value.length === 32 && /^[a-f0-9]{32}$/.test(value);
 var word = (value) => typeof value === "string" && value.trim() === value && /^[a-z_]{1,64}$/.test(value);
 var object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 var states = [
@@ -2102,8 +1619,7 @@ var states = [
 	"failed",
 	"recovery_required",
 	"rejected",
-	"stale",
-	"manual_restart_required"
+	"stale"
 ];
 /** A bounded error category, never the upstream response body or credential. */
 var RuntimeUpdateError = class extends Error {
@@ -2114,18 +1630,13 @@ var RuntimeUpdateError = class extends Error {
 	}
 };
 function job(value) {
-	if (!object(value) || !hex$2(value.id) || !runtimeVersion(value.version) || !states.includes(value.status) || !word(value.stage) || !Array.isArray(value.targets)) throw new RuntimeUpdateError();
+	if (!object(value) || !hex$1(value.id) || !runtimeVersion(value.version) || !states.includes(value.status) || !word(value.stage) || !Array.isArray(value.targets)) throw new RuntimeUpdateError();
 	const targets = value.targets.map((target) => {
-		if (!object(target) || !hex$2(target.run_id) || !word(target.status)) throw new RuntimeUpdateError();
+		if (!object(target) || !hex$1(target.run_id) || !word(target.status)) throw new RuntimeUpdateError();
 		const result = {
 			run_id: target.run_id,
 			status: target.status
 		};
-		if (target.profile !== void 0) {
-			if (target.profile !== "web-terminal-v1") throw new RuntimeUpdateError();
-			result.profile = target.profile;
-		}
-		if (target.status === "manual_restart_required" && (target.old_version !== void 0 || target.version !== void 0 || target.restart_id !== void 0 || target.wait_reason !== "terminal_profile_unaudited")) throw new RuntimeUpdateError();
 		for (const key of ["old_version", "version"]) if (target[key] !== void 0) {
 			if (!runtimeVersion(target[key])) throw new RuntimeUpdateError();
 			result[key] = target[key];
@@ -2236,7 +1747,7 @@ var GateRuntimeUpdates = class {
 		};
 	}
 	async submit(version, id) {
-		if (!runtimeVersion(version) || !hex$2(id)) throw new RuntimeUpdateError(400);
+		if (!runtimeVersion(version) || !hex$1(id)) throw new RuntimeUpdateError(400);
 		const result = job(await this.request("POST", "/v1/runtime-updates", {
 			version,
 			idempotency_key: id
@@ -2245,7 +1756,7 @@ var GateRuntimeUpdates = class {
 		return result;
 	}
 	async operation(id) {
-		if (!hex$2(id)) throw new RuntimeUpdateError(400);
+		if (!hex$1(id)) throw new RuntimeUpdateError(400);
 		const result = job(await this.request("GET", `/v1/runtime-updates/${id}`));
 		if (result.id !== id) throw new RuntimeUpdateError();
 		return result;
@@ -2256,7 +1767,7 @@ var GateRuntimeUpdates = class {
 init_config();
 init_lifecycle();
 init_state_budget();
-var hex$1 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+var hex = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
 var text = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
 async function body(request) {
 	if (request.headers["content-type"]?.split(";")[0].trim() !== "application/json") throw new Error();
@@ -2297,12 +1808,12 @@ function createRestartApi(config, hooks) {
 	const receipts = path.join(config.stateDir, "restarts");
 	if (provider) privateDirectory(receipts);
 	const file = (id) => {
-		if (!hex$1(id)) throw new Error();
+		if (!hex(id)) throw new Error();
 		return path.join(receipts, `${id}.json`);
 	};
 	const read = (id) => {
 		const value = readPrivateJson(file(id));
-		if (value.id !== id || !hex$1(value.run_id) || !isHubGeneration(value.generation) || value.idempotency_key !== id || !text(value.runtime_id) || !text(value.session_id) || value.leaf_id !== null && !text(value.leaf_id)) throw new Error();
+		if (value.id !== id || !hex(value.run_id) || !isHubGeneration(value.generation) || value.idempotency_key !== id || !text(value.runtime_id) || !text(value.session_id) || value.leaf_id !== null && !text(value.leaf_id)) throw new Error();
 		return value;
 	};
 	const save = (value, publish) => withStateWriter(config, (writer) => {
@@ -2496,7 +2007,7 @@ function createRestartApi(config, hooks) {
 								return true;
 							}
 							revalidate();
-							if (Object.keys(value).sort().join(",") !== "idempotencyKey,version" || !runtimeVersion(value.version) || !hex$1(value.idempotencyKey)) {
+							if (Object.keys(value).sort().join(",") !== "idempotencyKey,version" || !runtimeVersion(value.version) || !hex(value.idempotencyKey)) {
 								reply(400, { error: "Exact stable Pi version and idempotency identity required" });
 								return true;
 							}
@@ -2548,7 +2059,7 @@ function createRestartApi(config, hooks) {
 				if (request.method === "POST" && pathname === "/api/management/restarts") {
 					const value = await body(request);
 					revalidate();
-					if (Object.keys(value).sort().join(",") !== "generation,idempotencyKey,leafId,runtimeId,sessionId" || !isHubGeneration(value.generation) || !hex$1(value.idempotencyKey) || !text(value.runtimeId) || !text(value.sessionId) || value.leafId !== null && !text(value.leafId)) {
+					if (Object.keys(value).sort().join(",") !== "generation,idempotencyKey,leafId,runtimeId,sessionId" || !isHubGeneration(value.generation) || !hex(value.idempotencyKey) || !text(value.runtimeId) || !text(value.sessionId) || value.leafId !== null && !text(value.leafId)) {
 						reply(400, { error: "Invalid restart request" });
 						return true;
 					}
@@ -2609,601 +2120,6 @@ function createRestartApi(config, hooks) {
 				reply(phase === "authorization" ? 401 : 409, { error: phase === "authorization" ? "Management authorization required" : "Restart unavailable or outcome unknown; refresh status before retrying" });
 			}
 			return true;
-		}
-	};
-}
-//#endregion
-//#region hub/terminal-auth.ts
-init_config();
-init_state_budget();
-init_terminal_contract();
-var digest = (value) => createHash("sha256").update(value).digest("hex");
-var hex = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
-var equal$1 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-var stateFile = (config) => path.join(config.stateDir, "terminal-auth.json");
-function parseTerminalScope(value) {
-	if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "access,runId,runtimeId,sessionId,terminalEpoch") throw new Error("Invalid terminal scope");
-	const v = value;
-	if (v.access !== "read" && v.access !== "write") throw new Error("Invalid terminal scope");
-	const target = parseTerminalTarget({
-		v: 1,
-		runId: v.runId,
-		runtimeId: v.runtimeId,
-		sessionId: v.sessionId,
-		terminalEpoch: v.terminalEpoch,
-		profile: "web-terminal-v1",
-		inputState: "none",
-		managedRestartEligible: false
-	});
-	return {
-		runId: target.runId,
-		runtimeId: target.runtimeId,
-		sessionId: target.sessionId,
-		terminalEpoch: target.terminalEpoch,
-		access: v.access
-	};
-}
-function readState(config) {
-	if (!existsSync(stateFile(config))) return void 0;
-	const v = readPrivateJson(stateFile(config));
-	if (!v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).sort().join(",") !== "epoch,expires,failures,pairHash,scope" || !hex(v.epoch, 64) || v.pairHash !== null && !hex(v.pairHash, 64) || !Number.isSafeInteger(v.expires) || v.expires < 0 || !Number.isInteger(v.failures) || v.failures < 0 || v.failures > 10 || v.pairHash !== null && v.scope === null) throw new Error("Terminal authorization unavailable");
-	return {
-		...v,
-		scope: v.scope === null ? null : parseTerminalScope(v.scope)
-	};
-}
-function saveState(writer, value, security = false) {
-	writer.write("terminal-auth.json", value, { security });
-}
-/** Trusted CLI only. Scope names a child, but does not prove that it is live. */
-function issueTerminalCode(config, value, now = Date.now()) {
-	if (!config.terminal) throw new Error("Terminal listener is disabled");
-	const scope = parseTerminalScope(value);
-	if (readGrant(config, scope.runId).revoked) throw new Error("Terminal run revoked");
-	const code = randomBytes(16).toString("hex");
-	return withStateWriter(config, (writer) => {
-		if (readGrant(config, scope.runId).revoked) throw new Error("Terminal run revoked");
-		const epoch = readState(config)?.epoch ?? randomBytes(32).toString("hex");
-		const expiresAt = now + 6e5;
-		saveState(writer, {
-			epoch,
-			pairHash: digest(code),
-			expires: expiresAt,
-			failures: 0,
-			scope
-		});
-		return {
-			code,
-			expiresAt
-		};
-	});
-}
-function revokeTerminal(config) {
-	withStateWriter(config, (writer) => {
-		saveState(writer, {
-			epoch: randomBytes(32).toString("hex"),
-			pairHash: null,
-			expires: 0,
-			failures: 0,
-			scope: null
-		}, true);
-	});
-}
-/** Independent of management/chat auth. Caller MUST enforce terminal Host/Origin. */
-var HubTerminalAuth = class {
-	sessions = /* @__PURE__ */ new Map();
-	config;
-	now;
-	secure;
-	cookieName;
-	constructor(config, now = Date.now) {
-		if (!config.terminal) throw new Error("Terminal listener is disabled");
-		this.config = config;
-		this.now = now;
-		this.secure = !!config.terminal.publicUrl;
-		this.cookieName = this.secure ? "__Host-pi-hub-terminal" : "pi_hub_terminal_local";
-	}
-	session(request) {
-		const values = (request.headers.cookie ?? "").split(";").map((item) => item.trim()).filter((item) => item.startsWith(`${this.cookieName}=`));
-		if (values.length !== 1) return void 0;
-		const token = values[0].slice(this.cookieName.length + 1);
-		if (!hex(token, 64)) return void 0;
-		const key = digest(token);
-		const session = this.sessions.get(key);
-		if (!session) return void 0;
-		try {
-			const state = readState(this.config);
-			if (session.expires <= this.now() || !state || session.epoch !== state.epoch || readGrant(this.config, session.scope.runId).revoked) throw new Error();
-		} catch {
-			this.sessions.delete(key);
-			return;
-		}
-		return {
-			key,
-			...session,
-			scope: { ...session.scope }
-		};
-	}
-	status(request) {
-		const session = this.session(request);
-		return session ? {
-			authorized: true,
-			csrf: session.csrf,
-			expiresAt: session.expires,
-			scope: session.scope
-		} : { authorized: false };
-	}
-	authorize(request, requireCsrf = false, access = "read") {
-		const session = this.session(request);
-		const csrf = request.headers["x-pi-hub-terminal-csrf"];
-		if (!session || access === "write" && session.scope.access !== "write" || requireCsrf && (!hex(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Terminal authorization required");
-		return session;
-	}
-	/** Target check is mandatory before any future provider/PTY operation. */
-	authorizeTarget(request, expected, requireCsrf = true, access = "read") {
-		const session = this.authorize(request, requireCsrf, access);
-		if (!sameTerminal(session.scope, expected)) throw new Error("Terminal target authorization required");
-		return session;
-	}
-	revalidate(request, expected, requireCsrf = false, access = "read") {
-		const current = this.authorize(request, requireCsrf, access);
-		if (current.key !== expected.key || current.epoch !== expected.epoch || current.expires !== expected.expires) throw new Error("Terminal authorization changed");
-	}
-	unlock(code) {
-		return withStateWriter(this.config, (writer) => this.unlockLocked(writer, code));
-	}
-	unlockLocked(writer, code) {
-		const state = readState(this.config);
-		if (!state?.scope || !state.pairHash || state.expires <= this.now() || state.failures >= 10) throw new Error("Terminal unlock rejected");
-		if (!hex(code, 32) || !equal$1(digest(code), state.pairHash)) {
-			saveState(writer, {
-				...state,
-				failures: state.failures + 1
-			}, true);
-			throw new Error("Terminal unlock rejected");
-		}
-		if (readGrant(this.config, state.scope.runId).revoked) throw new Error("Terminal unlock rejected");
-		for (const [key, session] of this.sessions) try {
-			if (session.expires <= this.now() || session.epoch !== state.epoch || readGrant(this.config, session.scope.runId).revoked) this.sessions.delete(key);
-		} catch {
-			this.sessions.delete(key);
-		}
-		if (this.sessions.size >= 64) throw new Error("Terminal unlock rejected");
-		saveState(writer, {
-			...state,
-			pairHash: null,
-			expires: 0,
-			scope: null
-		});
-		const token = randomBytes(32).toString("hex");
-		const session = {
-			epoch: state.epoch,
-			expires: this.now() + 18e5,
-			csrf: randomBytes(32).toString("hex"),
-			authorizationId: randomBytes(16).toString("hex"),
-			scope: { ...state.scope }
-		};
-		this.sessions.set(digest(token), session);
-		return {
-			csrf: session.csrf,
-			expiresAt: session.expires,
-			cookie: this.cookie(token, 1800)
-		};
-	}
-	logout(request) {
-		return withStateWriter(this.config, () => {
-			const session = this.authorize(request, true);
-			this.sessions.delete(session.key);
-			return this.cookie("", 0);
-		});
-	}
-	close() {
-		this.sessions.clear();
-	}
-	cookie(token, maxAge) {
-		return `${this.cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${this.secure ? "; Secure" : ""}`;
-	}
-};
-//#endregion
-//#region hub/terminal-server.ts
-init_terminal_contract();
-init_terminal_provider();
-init_terminal_wire();
-/** Third-origin listener; only this fixed asset bundle and the private provider. */
-async function startTerminalServer(config, otherOrigins) {
-	if (!config.terminal) throw new Error("Terminal listener is disabled");
-	const terminal = config.terminal;
-	const auth = new HubTerminalAuth(config);
-	const connections = /* @__PURE__ */ new Set();
-	const nonces = /* @__PURE__ */ new Map();
-	const peers = /* @__PURE__ */ new Set();
-	const wss = new WebSocketServer({
-		noServer: true,
-		maxPayload: TERMINAL_FRAME_BYTES,
-		perMessageDeflate: false
-	});
-	let url = "", closed = false, pending = 0;
-	const assets = /* @__PURE__ */ new Map();
-	const assetRoot = new URL(import.meta.url.endsWith(".ts") ? "../dist/terminal/" : "../terminal/", import.meta.url);
-	for (const [route, name, mime] of [
-		[
-			"/",
-			"index.html",
-			"text/html"
-		],
-		[
-			"/terminal.js",
-			"app.js",
-			"text/javascript"
-		],
-		[
-			"/terminal.css",
-			"app.css",
-			"text/css"
-		]
-	]) try {
-		const bytes = readFileSync(fileURLToPath(new URL(name, assetRoot)));
-		if (bytes.length <= 2 * 1024 * 1024) assets.set(route, [mime, bytes]);
-	} catch {}
-	const allowed = (request, write) => {
-		if (closed || !url || request.headers["service-worker"] !== void 0 || request.headers["sec-fetch-site"] === "cross-site") return false;
-		const matched = [new URL(url).origin, ...terminal.publicUrl ? [new URL(terminal.publicUrl).origin] : []].find((candidate) => new URL(candidate).host === request.headers.host);
-		return !!matched && (request.headers.origin === void 0 ? !write : request.headers.origin === matched);
-	};
-	const respond = (res, status, value) => {
-		if (!res.destroyed && !res.writableEnded) res.writeHead(status, { "Content-Type": "application/json" }).end(value === void 0 ? void 0 : JSON.stringify(value));
-	};
-	const validate = (req, expected, target, access) => {
-		if (!allowed(req, true)) throw new Error();
-		const current = auth.authorizeTarget(req, target, true, access);
-		auth.revalidate(req, expected, true, access);
-		if (current.authorizationId !== expected.authorizationId) throw new Error();
-	};
-	const prune = () => {
-		for (const [key, nonce] of nonces) if (nonce.expires <= Date.now()) nonces.delete(key);
-		for (const peer of peers) peer.check();
-	};
-	const admit = (target, access) => {
-		const all = [...nonces.values(), ...[...peers].flatMap((peer) => peer.reservation ? [peer.reservation] : [])].filter((r) => r.target.runId === target.runId);
-		return all.length < 2 && (access !== "write" || !all.some((r) => r.access === "write"));
-	};
-	const handle = async (req, res) => {
-		res.setHeader("Cache-Control", "no-store");
-		res.setHeader("Referrer-Policy", "no-referrer");
-		res.setHeader("X-Content-Type-Options", "nosniff");
-		res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'");
-		res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
-		res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-		if (!allowed(req, req.method !== "GET")) return respond(res, 403);
-		const route = req.url;
-		const asset = assets.get(route ?? "");
-		if (req.method === "GET" && asset) {
-			const [mime, bytes] = asset;
-			res.writeHead(200, { "Content-Type": `${mime}; charset=utf-8` }).end(bytes);
-			return;
-		}
-		if (req.method === "GET" && route === "/api/terminal/status") {
-			const status = auth.status(req);
-			if (!status.authorized || !terminal.provider) return respond(res, 200, {
-				...status,
-				available: false,
-				reason: "terminal_backend_unavailable"
-			});
-			if (pending >= 8) return respond(res, 503);
-			pending++;
-			try {
-				const session = auth.authorize(req);
-				const target = await terminalProviderStatus(terminal.provider, session.scope.runId);
-				auth.revalidate(req, session);
-				if (!allowed(req, false) || !sameTerminal(target, session.scope)) throw new Error();
-				return respond(res, 200, {
-					...auth.status(req),
-					available: true,
-					target
-				});
-			} catch {
-				return respond(res, 200, {
-					...auth.status(req),
-					available: false,
-					reason: "terminal_backend_unavailable"
-				});
-			} finally {
-				pending--;
-			}
-		}
-		if (req.method !== "POST" || ![
-			"/api/terminal/unlock",
-			"/api/terminal/logout",
-			"/api/terminal/attach"
-		].includes(route ?? "")) return respond(res, 404);
-		if (req.headers["content-type"] !== "application/json" || req.headers["transfer-encoding"] !== void 0 || !/^[0-9]{1,4}$/.test(req.headers["content-length"] ?? "") || Number(req.headers["content-length"]) > 2048) {
-			res.setHeader("Connection", "close");
-			return respond(res, 413);
-		}
-		const timer = setTimeout(() => req.destroy(), 2e3);
-		try {
-			const chunks = [];
-			let length = 0;
-			for await (const chunk of req) {
-				length += chunk.length;
-				if (length > 2048) throw new Error();
-				chunks.push(chunk);
-			}
-			if (!allowed(req, true)) throw new Error();
-			const data = parseTerminalJson(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
-			if (route === "/api/terminal/unlock") {
-				exact(data, "code");
-				const result = auth.unlock(data.code);
-				res.setHeader("Set-Cookie", result.cookie);
-				return respond(res, 200, {
-					csrf: result.csrf,
-					expiresAt: result.expiresAt
-				});
-			}
-			if (route === "/api/terminal/logout") {
-				exact(data, "");
-				res.setHeader("Set-Cookie", auth.logout(req));
-				prune();
-				return respond(res, 200, { authorized: false });
-			}
-			exact(data, "access,target");
-			if (data.access !== "read" && data.access !== "write") throw new Error();
-			const target = parseTerminalTarget(data.target), access = data.access;
-			const session = auth.authorizeTarget(req, target, true, access);
-			if (!terminal.provider) return respond(res, 503, {
-				available: false,
-				reason: "terminal_backend_unavailable"
-			});
-			prune();
-			if (nonces.size >= 8 || !admit(target, access)) return respond(res, 409);
-			const nonce = randomBytes(32).toString("hex"), expiresAt = Date.now() + 1e4;
-			nonces.set(nonce, {
-				session,
-				target,
-				access,
-				expires: expiresAt
-			});
-			return respond(res, 200, {
-				nonce,
-				expiresAt
-			});
-		} catch {
-			return respond(res, 403);
-		} finally {
-			clearTimeout(timer);
-		}
-	};
-	const server = http.createServer({
-		maxHeaderSize: 8192,
-		headersTimeout: 5e3,
-		requestTimeout: 5e3
-	}, (req, res) => {
-		handle(req, res).catch(() => respond(res, 403));
-	});
-	server.maxConnections = 32;
-	server.on("connection", (socket) => {
-		connections.add(socket);
-		socket.on("error", () => socket.destroy());
-		socket.once("close", () => connections.delete(socket));
-	});
-	server.on("clientError", (_error, socket) => socket.destroy());
-	server.on("connect", (_request, socket) => socket.destroy());
-	server.on("upgrade", (request, socket, head) => {
-		try {
-			if (!allowed(request, true) || request.url !== "/api/terminal/ws" || pending >= 8 || peers.size >= 8) throw new Error();
-			auth.authorize(request);
-			wss.handleUpgrade(request, socket, head, (ws) => attachSocket(ws, request));
-		} catch {
-			socket.destroy();
-		}
-	});
-	function attachSocket(ws, request) {
-		let reservation;
-		let provider;
-		let dead = false, initialized = false, inputAllowed = false, acquiring = false, lastId = 0, generation = 0;
-		const abort = new AbortController();
-		const peer = {
-			close,
-			check: () => {
-				if (reservation) try {
-					validate(request, reservation.session, reservation.target, reservation.access);
-				} catch {
-					close();
-				}
-			},
-			get reservation() {
-				return reservation;
-			}
-		};
-		peers.add(peer);
-		pending++;
-		const timer = setTimeout(close, 2e3);
-		const lifespan = setTimeout(close, 3e5);
-		function close() {
-			if (dead) return;
-			dead = true;
-			inputAllowed = false;
-			generation++;
-			abort.abort();
-			provider?.close();
-			peers.delete(peer);
-			if (!initialized) {
-				initialized = true;
-				pending--;
-			}
-			clearTimeout(timer);
-			clearTimeout(lifespan);
-			ws.terminate();
-		}
-		const check = () => {
-			if (dead || !reservation || ws.readyState !== WebSocket.OPEN) throw new Error();
-			validate(request, reservation.session, reservation.target, reservation.access);
-		};
-		const send = (frame) => new Promise((resolve, reject) => {
-			try {
-				check();
-				const text = JSON.stringify(frame);
-				if (Buffer.byteLength(text) > 65536 || ws.bufferedAmount + Buffer.byteLength(text) > 262144) throw new Error();
-				const timeout = setTimeout(() => {
-					close();
-					reject(/* @__PURE__ */ new Error());
-				}, 2e3);
-				ws.send(text, (error) => {
-					clearTimeout(timeout);
-					if (error) {
-						close();
-						reject(/* @__PURE__ */ new Error());
-					} else resolve();
-				});
-			} catch {
-				close();
-				reject(/* @__PURE__ */ new Error());
-			}
-		});
-		const snapshot = async (value) => {
-			check();
-			if (!reservation) throw new Error();
-			const bytes = Buffer.from(value.data), target = reservation.target;
-			await send({
-				type: "screen-start",
-				target,
-				sequence: value.sequence,
-				columns: value.columns,
-				rows: value.rows,
-				bytes: bytes.length,
-				chunks: Math.ceil(bytes.length / 20480)
-			});
-			for (let index = 0; index * 20480 < bytes.length; index++) await send({
-				type: "screen-chunk",
-				terminalEpoch: target.terminalEpoch,
-				sequence: value.sequence,
-				index,
-				data: bytes.subarray(index * 20480, (index + 1) * 20480).toString("base64")
-			});
-			await send({
-				type: "screen-end",
-				terminalEpoch: target.terminalEpoch,
-				sequence: value.sequence
-			});
-		};
-		ws.on("error", close);
-		ws.on("close", close);
-		ws.on("message", (raw, binary) => {
-			(async () => {
-				if (dead || binary) throw new Error();
-				const frame = parseTerminalJson(new TextDecoder("utf-8", { fatal: true }).decode(raw));
-				if (!reservation) {
-					exact(frame, "access,csrf,nonce,target,type");
-					if (frame.type !== "attach" || typeof frame.nonce !== "string") throw new Error();
-					const nonce = nonces.get(frame.nonce);
-					nonces.delete(frame.nonce);
-					if (!nonce || nonce.expires <= Date.now() || frame.access !== nonce.access || !sameTerminal(parseTerminalTarget(frame.target), nonce.target)) throw new Error();
-					request.headers["x-pi-hub-terminal-csrf"] = frame.csrf;
-					validate(request, nonce.session, nonce.target, nonce.access);
-					reservation = nonce;
-					const identity = generation;
-					let sentReady = false;
-					const ensureReady = async () => {
-						if (!sentReady) {
-							sentReady = true;
-							await send({
-								type: "ready",
-								target: nonce.target
-							});
-						}
-					};
-					if (!terminal.provider) throw new Error();
-					const live = await connectTerminalProvider(terminal.provider, nonce.target, nonce.access, {
-						authorizationId: nonce.session.authorizationId,
-						connectionId: randomBytes(16).toString("hex")
-					}, {
-						signal: abort.signal,
-						onSnapshot: async (value) => {
-							check();
-							await ensureReady();
-							await snapshot(value);
-						},
-						onUnavailable: close
-					});
-					if (dead || generation !== identity) {
-						live.close();
-						return;
-					}
-					provider = live;
-					check();
-					if (!initialized) {
-						initialized = true;
-						pending--;
-						clearTimeout(timer);
-					}
-					await ensureReady();
-					return;
-				}
-				check();
-				const { csrf, target, ...action } = frame;
-				if (csrf !== request.headers["x-pi-hub-terminal-csrf"] || !sameTerminal(parseTerminalTarget(target), reservation.target) || reservation.access !== "write" || !provider) throw new Error();
-				const command = parseTerminalRequest(action);
-				if (command.id <= lastId) throw new Error();
-				lastId = command.id;
-				if (command.type === "release") {
-					close();
-					return;
-				}
-				if (command.type === "acquire") {
-					if (acquiring || inputAllowed) throw new Error();
-					acquiring = true;
-				} else if (!inputAllowed) throw new Error();
-				const identity = generation;
-				const result = await provider.request(command);
-				check();
-				if (identity !== generation) throw new Error();
-				if (command.type === "acquire") {
-					acquiring = false;
-					inputAllowed = result.ok === true;
-				}
-				if (command.type === "input" && result.delivery !== "written") inputAllowed = false;
-				await send({
-					type: "response",
-					id: command.id,
-					result
-				});
-			})().catch(close);
-		});
-	}
-	const sweep = setInterval(prune, 100);
-	sweep.unref();
-	try {
-		await new Promise((resolve, reject) => {
-			server.once("error", reject);
-			server.listen(terminal.port, "127.0.0.1", () => {
-				server.off("error", reject);
-				resolve();
-			});
-		});
-		url = `http://127.0.0.1:${server.address().port}/`;
-		if ([url, terminal.publicUrl].some((origin) => origin && otherOrigins.some((other) => terminal.publicUrl && new URL(origin).protocol === "https:" ? new URL(other).hostname === new URL(origin).hostname : new URL(other).origin === new URL(origin).origin))) throw new Error("Terminal origin must differ from chat and management");
-	} catch (error) {
-		closed = true;
-		clearInterval(sweep);
-		auth.close();
-		for (const socket of connections) socket.destroy();
-		await new Promise((resolve) => server.close(() => resolve()));
-		wss.close();
-		throw error;
-	}
-	let closing;
-	return {
-		url,
-		close() {
-			if (closing) return closing;
-			closed = true;
-			clearInterval(sweep);
-			for (const peer of peers) peer.close();
-			nonces.clear();
-			auth.close();
-			for (const socket of connections) socket.destroy();
-			closing = Promise.all([new Promise((resolve) => server.close(() => resolve())), new Promise((resolve) => wss.close(() => resolve()))]).then(() => {});
-			return closing;
 		}
 	};
 }
@@ -3464,7 +2380,7 @@ function captureHubMetadata(moduleUrl = import.meta.url) {
 	{
 		const embedded = {
 			"version": "1.0.1",
-			"build": "0c26c986bc6f800373bfb269299b1055651c2119a9299e63b4b5ae4bb93e854f"
+			"build": "e74c7a4fdc6388540471f85f0a2b121d9dd02ed6ec3b102642c620f1f53cb45a"
 		};
 		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
 			version: embedded.version,
@@ -3710,7 +2626,6 @@ function boundedDeflateOffer(header) {
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 async function startHub(config, options = {}) {
 	if (config.management) managementConfig(config.management, config.port, config.publicUrl);
-	if (config.terminal) terminalConfig(config.terminal, config.port, config.publicUrl, config.management);
 	const serving = acquireStateLock(config, ".serving.lock");
 	config = {
 		...config,
@@ -3811,7 +2726,6 @@ async function startLockedHub(config, options) {
 	const versionStatus = createVersionStatus(options.versions);
 	let url = "";
 	let managementUrl;
-	let terminalServer;
 	const restarting = /* @__PURE__ */ new Map();
 	const activateRestart = (generation) => {
 		const restart = restarting.get(generation);
@@ -4347,13 +3261,6 @@ async function startLockedHub(config, options) {
 				}));
 				return;
 			}
-			if (!admin && pathname === "/api/terminal-link") {
-				response.writeHead(200, {
-					"Content-Type": "application/json",
-					"Cache-Control": "no-store"
-				}).end(JSON.stringify({ url: terminalServer ? config.terminal?.publicUrl ?? terminalServer.url : null }));
-				return;
-			}
 			const asset = pathname === "/sessions/" ? ["text/html", renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl)] : pathname === "/hub.js" ? ["text/javascript", portalJs] : admin && pathname === "/hub-management.js" ? ["text/javascript", portalManagementJs] : pathname === "/hub.css" ? ["text/css", portalCss + portalManagementCss] : void 0;
 			if (!asset) {
 				fail(response, pathname?.startsWith("/s/") ? 410 : 404);
@@ -4581,16 +3488,9 @@ async function startLockedHub(config, options) {
 			const chatOrigins = [new URL(url).origin, ...config.publicUrl ? [new URL(config.publicUrl).origin] : []];
 			if ([managementUrl, config.management.publicUrl].some((value) => value && chatOrigins.includes(new URL(value).origin))) throw new Error("Management origin must differ from chat origin");
 		}
-		if (config.terminal) terminalServer = await startTerminalServer(config, [
-			url,
-			config.publicUrl,
-			managementUrl,
-			config.management?.publicUrl
-		].filter((value) => !!value));
 	} catch (error) {
 		stopped = true;
 		versionStatus.close();
-		await terminalServer?.close();
 		for (const peer of peers) peer.destroy();
 		for (const connection of connections) connection.destroy();
 		await Promise.all([
@@ -4610,7 +3510,6 @@ async function startLockedHub(config, options) {
 	return {
 		url,
 		...managementUrl ? { managementUrl } : {},
-		...terminalServer ? { terminalUrl: terminalServer.url } : {},
 		socketPath: config.socketPath,
 		close() {
 			if (closing) return closing;
@@ -4628,7 +3527,6 @@ async function startLockedHub(config, options) {
 				new Promise((resolve) => registry.close(() => resolve())),
 				new Promise((resolve) => wss.close(() => resolve())),
 				...managementServer ? [new Promise((resolve) => managementServer.close(() => resolve()))] : [],
-				...terminalServer ? [terminalServer.close()] : [],
 				pending
 			]).then(() => {});
 			return closing;
@@ -4642,24 +3540,11 @@ var help = `Pi Web Hub — independent multi-session portal
 
   pi-web-hub init [--port 16180] [--public-url https://pi.example.com/]
     [--management-port 16181] [--management-public-url https://admin.example.com/]
-    [--terminal-port 16182] [--terminal-public-url https://terminal.example.com/]
-    [--terminal-provider-socket /run/pi-terminal-provider/provider.sock]
-    [--terminal-provider-credential-file /run/pi-terminal-credentials/provider.token]
   pi-web-hub serve
   pi-web-hub issue --label "Project A" --output /private/session-a.json [--backend-host 127.0.0.1]
   pi-web-hub revoke --run-id <session-capability-id>
   pi-web-hub pair                     Generate a single-use management code (10 minutes)
   pi-web-hub revoke-management        Revoke all browser management sessions
-  pi-web-hub pair-terminal --run-id <id> --runtime-id <id> --session-id <id>
-    --terminal-epoch <id> --access <read|write>  Generate a scoped terminal code (10 minutes)
-  pi-web-hub revoke-terminal          Revoke all browser terminal sessions
-
-Terminal is opt-in and requires a real private Gate provider. Configure a distinct
-public HTTPS hostname, not another port on the chat/admin hostname. Paste the
-terminal code manually into that origin; no automatic attach, retry or renewal.
-Hub UID/GID1000:1000 mounts only dedicated provider IPC/credential volumes read-only;
-no Docker socket on Hub, no provider credential or authority on Pi. Keep cap-drop
-ALL and no-new-privileges; no sudo. Missing input ACK means unknown, never resend.
 
 All commands accept --config <file> (default ~/.pi/web-hub/config.json).
 The hub never launches agents or deploys SSH/TLS/login. See docs/hub.md.
@@ -4678,11 +3563,7 @@ async function main(args) {
 			"--port",
 			"--public-url",
 			"--management-port",
-			"--management-public-url",
-			"--terminal-port",
-			"--terminal-public-url",
-			"--terminal-provider-socket",
-			"--terminal-provider-credential-file"
+			"--management-public-url"
 		]],
 		["serve", ["--config"]],
 		["issue", [
@@ -4693,16 +3574,7 @@ async function main(args) {
 		]],
 		["revoke", ["--config", "--run-id"]],
 		["pair", ["--config"]],
-		["revoke-management", ["--config"]],
-		["pair-terminal", [
-			"--config",
-			"--run-id",
-			"--runtime-id",
-			"--session-id",
-			"--terminal-epoch",
-			"--access"
-		]],
-		["revoke-terminal", ["--config"]]
+		["revoke-management", ["--config"]]
 	]).get(command);
 	if (!permitted) throw new Error("Unknown hub command; use --help");
 	const options = /* @__PURE__ */ new Map();
@@ -4730,27 +3602,10 @@ async function main(args) {
 				...options.has("--management-public-url") ? { publicUrl: options.get("--management-public-url") } : {}
 			}, port, publicUrl);
 		}
-		let terminal;
-		const providerSocket = options.get("--terminal-provider-socket");
-		const providerCredential = options.get("--terminal-provider-credential-file");
-		if (Boolean(providerSocket) !== Boolean(providerCredential) || providerSocket && !options.has("--terminal-port")) throw new Error("Both private provider paths and terminal port are required");
-		if (options.has("--terminal-public-url") && !options.has("--terminal-port")) throw new Error("Terminal port required");
-		if (options.has("--terminal-port")) {
-			const { terminalConfig } = await Promise.resolve().then(() => (init_config(), config_exports));
-			terminal = terminalConfig({
-				port: Number(options.get("--terminal-port")),
-				...options.has("--terminal-public-url") ? { publicUrl: options.get("--terminal-public-url") } : {},
-				...providerSocket ? { provider: {
-					socketPath: providerSocket,
-					credentialFile: providerCredential
-				} } : {}
-			}, port, publicUrl, management);
-		}
 		initializeHub(configFile, {
 			port,
 			...publicUrl ? { publicUrl } : {},
-			...management ? { management } : {},
-			...terminal ? { terminal } : {}
+			...management ? { management } : {}
 		});
 		process.stdout.write(`${JSON.stringify({
 			configured: true,
@@ -4759,17 +3614,7 @@ async function main(args) {
 		return;
 	}
 	const config = readHubConfig(configFile);
-	if (command === "pair-terminal") process.stdout.write(`${JSON.stringify(issueTerminalCode(config, {
-		runId: options.get("--run-id"),
-		runtimeId: options.get("--runtime-id"),
-		sessionId: options.get("--session-id"),
-		terminalEpoch: options.get("--terminal-epoch"),
-		access: options.get("--access")
-	}))}\n`);
-	else if (command === "revoke-terminal") {
-		revokeTerminal(config);
-		process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
-	} else if (command === "pair") process.stdout.write(`${JSON.stringify(issueManagementCode(config))}\n`);
+	if (command === "pair") process.stdout.write(`${JSON.stringify(issueManagementCode(config))}\n`);
 	else if (command === "revoke-management") {
 		revokeManagement(config);
 		process.stdout.write(`${JSON.stringify({ revoked: true })}\n`);
@@ -4795,8 +3640,7 @@ async function main(args) {
 			localUrl: hub.url,
 			portalUrl: `${config.publicUrl ?? hub.url}sessions/`,
 			socketPath: hub.socketPath,
-			...hub.managementUrl ? { managementUrl: hub.managementUrl } : {},
-			...hub.terminalUrl ? { terminalUrl: hub.terminalUrl } : {}
+			...hub.managementUrl ? { managementUrl: hub.managementUrl } : {}
 		})}\n`);
 		let closing = false;
 		const stop = () => {

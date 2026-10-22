@@ -11,7 +11,6 @@ export default defineConfig({
   testDir,
   fullyParallel: false,
   workers: 1,
-  grepInvert: process.env.PI_TASK6_NATIVE_E2E === "1" ? undefined : /@native-terminal/,
   timeout: 90_000,
   expect: {
     timeout: 15_000,

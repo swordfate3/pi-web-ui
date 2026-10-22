@@ -13,27 +13,6 @@ const id = "a".repeat(32);
 const version = "1.3.0";
 const runId = "b".repeat(32);
 
-test("terminal runtime update reports installed package separately from unrefreshed child", async (t) => {
-  const f = await fixture(t);
-  await f.unlock();
-  const target = {
-    run_id: runId,
-    status: "manual_restart_required",
-    profile: "web-terminal-v1",
-    wait_reason: "terminal_profile_unaudited",
-  };
-  f.setJob({
-    id,
-    version,
-    status: "manual_restart_required",
-    stage: "installed_manual_restart_required",
-    targets: [target],
-  });
-  const response = await f.request(`runtime-updates/${id}`);
-  assert.equal(response.status, 200);
-  assert.deepEqual((await response.json()).targets, [target]);
-});
-
 async function fixture(t: test.TestContext, configured = true) {
   const dir = mkdtempSync(path.join(tmpdir(), "hub-runtime-api-"));
   const credentialFile = path.join(dir, "request.json");

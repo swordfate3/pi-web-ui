@@ -37,7 +37,6 @@ export type ConnectionSlice = {
   error: UiText | null;
   advancedFeatures: boolean;
   archAvailable: boolean;
-  browserInputPolicy: "unknown" | "ordinary" | "terminal-readonly";
   setClient: (client: PiClient | null) => void;
   send: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
   getWebConnection: () => Promise<WebConnectionInfo>;

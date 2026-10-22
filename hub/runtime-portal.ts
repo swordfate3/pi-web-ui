@@ -2,7 +2,7 @@
 export const runtimePortalJs = String.raw`
   const runtimeUpdates = (() => {
     const storageKey = 'pi-hub-runtime-update';
-    const terminalStatuses = new Set(['succeeded', 'failed', 'recovery_required', 'rejected', 'stale', 'manual_restart_required']);
+    const terminalStatuses = new Set(['succeeded', 'failed', 'recovery_required', 'rejected', 'stale']);
     const activeStatuses = new Set(['pending', 'queued', 'running']);
     const jobs = new Map();
     let policy;
@@ -44,20 +44,16 @@ export const runtimePortalJs = String.raw`
       unmanaged_or_unavailable_consumer: '存在未受管或不可用的共享运行时使用者，需要迁移或检查',
       install_failed: '安装失败', installation_outcome_unknown: '安装结果不确定，需要管理员检查',
       refresh_requires_inspection: '刷新结果需要管理员检查', complete: '任务已完成',
-      installed_manual_restart_required: '共享包已安装；终端需要手动退出并重新启动',
     })[stage] || String(stage || 'unknown').replaceAll('_', ' ');
     const statusLabel = (status) => ({
       pending: '等待处理', queued: '已排队', running: '任务进行中', succeeded: '安装成功；所有受管 Pi 进程已刷新或退出', failed: '安装失败',
       recovery_required: '结果不确定，需要管理员检查', rejected: '任务已拒绝', stale: '任务已过期',
-      manual_restart_required: '共享包已安装；终端子进程尚未刷新，请手动退出并重新启动',
     })[status] || '结果未知';
     const targetLabel = (status) => ({
       waiting_for_idle: '等待目标空闲', refreshing: '正在刷新 Pi 进程', succeeded: '已加载新版本', exited: '已退出',
-      manual_restart_required: '需要手动退出并重新启动；正在运行的子进程版本未知，未计为已刷新',
     })[status] || String(status || 'unknown').replaceAll('_', ' ');
     const reasonLabel = (reason) => ({
       consumer_not_ready: '共享运行时使用者尚未就绪', awaiting_state_change: '等待运行状态变化', busy_race: '空闲确认期间再次忙碌',
-      terminal_profile_unaudited: '终端进程不允许受管重启',
     })[reason] || String(reason || '').replaceAll('_', ' ');
     function renderJob(value) {
       const row = document.createElement('div'); row.className = 'runtime-update-result';
@@ -84,7 +80,7 @@ export const runtimePortalJs = String.raw`
         let text = '目标 ' + target.run_id + ' · ' + targetLabel(target.status);
         if (typeof target.old_version === 'string') text += ' · 原版本 ' + target.old_version;
         if (typeof target.version === 'string') text += ' · 当前版本 ' + target.version;
-        if (['waiting_for_idle', 'manual_restart_required'].includes(target.status) && typeof target.wait_reason === 'string') text += ' · ' + reasonLabel(target.wait_reason);
+        if (target.status === 'waiting_for_idle' && typeof target.wait_reason === 'string') text += ' · ' + reasonLabel(target.wait_reason);
         line.textContent = text; row.append(line);
       }
       return row;

@@ -330,14 +330,6 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
 
       set({
         artifacts,
-        browserInputPolicy:
-          sync.browserInputPolicy === "ordinary" || sync.browserInputPolicy === "terminal-readonly"
-            ? sync.browserInputPolicy
-            : Object.hasOwn(sync, "browserInputPolicy")
-              ? "unknown"
-              : !sessionChanged && !runtimeChanged && get().browserInputPolicy === "terminal-readonly"
-                ? "terminal-readonly"
-                : "ordinary",
         conversationSyncError: decodedTree.error,
         chatStatus: sync.isStreaming ? "streaming" : "ready",
         connection: "connected",

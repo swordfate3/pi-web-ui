@@ -16,17 +16,7 @@ test("root service worker never intercepts proxied sessions, APIs or another app
     fetch: () => Promise.resolve(new Response("ok", { status: 503 })),
     caches: {},
   });
-  for (const route of [
-    "/s/session/",
-    "/s/session/assets/a.js",
-    "/api/export/a",
-    "/ws",
-    "/another-app/",
-    "/terminal/",
-    "/terminal/app.js",
-    "/terminal.js",
-    "/terminal.css",
-  ]) {
+  for (const route of ["/s/session/", "/s/session/assets/a.js", "/api/export/a", "/ws", "/another-app/"]) {
     handlers.get("fetch")?.({
       request: { url: `https://web.example${route}`, method: "GET" },
       respondWith: () => intercepted++,

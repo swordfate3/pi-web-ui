@@ -72,12 +72,11 @@ export async function copyFixture(destination) {
     "docs/remote-access.md",
     "docs/hub.md",
     "scripts/web-dist.mjs",
-    "scripts/stage-terminal-image.mjs",
     "vite.config.ts",
     "vite.hub.config.ts",
     "tsconfig.json",
   ];
-  const dirs = ["bin", "hub", "extensions", "runtime/terminal", "src/web", "public", "dist", "docs/images"];
+  const dirs = ["bin", "hub", "extensions", "src/web", "public", "dist", "docs/images"];
   for (const file of files) {
     await mkdir(path.dirname(path.join(destination, file)), { recursive: true });
     await cp(path.join(project, file), path.join(destination, file));
@@ -164,15 +163,13 @@ async function assertProductionInstall(agentDir, expectedHash) {
   const installed = path.join(agentDir, "git", "github.com", "pi-web-ui-install-test", "pi-web-ui");
   assert.equal(await distHash(installed), expectedHash, "installed dist integrity check");
   const pkg = JSON.parse(await readFile(path.join(installed, "package.json"), "utf8"));
-  assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ["@xterm/addon-serialize", "@xterm/headless", "ws"]);
-  assert.equal(pkg.dependencies["@xterm/addon-serialize"], "0.14.0");
-  assert.equal(pkg.dependencies["@xterm/headless"], "6.0.0");
+  assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ["ws"]);
   const modules = path.join(installed, "node_modules");
   for (const forbidden of ["vite", "typescript", "react", "pi-coding-agent", "@earendil-works/pi-coding-agent", "@xterm/xterm"]) {
     await assert.rejects(stat(path.join(modules, forbidden)), { code: "ENOENT" });
   }
   const count = await packageCount(modules);
-  assert.equal(count, 3, "Git install must contain only ws and the fixed headless/serialize runtime pair");
+  assert.equal(count, 1, "Git install must contain only ws");
   assert.match(
     checked(process.execPath, [path.join(installed, pkg.bin["pi-web-hub"]), "--help"]).stdout,
     /independent multi-session portal/,
@@ -233,14 +230,7 @@ async function main() {
       "extensions/workspace-uploads.ts",
       "extensions/runtime-control.ts",
       "extensions/runtime-metadata.ts",
-      "extensions/terminal-barrier.ts",
       "extensions/runtime-stdin-guard.mjs",
-      "runtime/terminal/broker.ts",
-      "runtime/terminal/protocol.ts",
-      "runtime/terminal/supervisor.py",
-      "runtime/terminal/client.py",
-      "runtime/terminal/build.mjs",
-      "scripts/stage-terminal-image.mjs",
       "src/web/src/core/incremental-sha256.ts",
     ];
     for (const [index, input] of staleInputs.entries()) {
@@ -286,21 +276,11 @@ async function main() {
       "docs/hub.md",
       "bin/pi-web-hub.mjs",
       "dist/hub/pi-web-hub.mjs",
-      "dist/runtime/broker.cjs",
-      "dist/runtime/supervisor.py",
-      "dist/runtime/client.py",
-      "runtime/terminal/broker.ts",
-      "runtime/terminal/protocol.ts",
-      "runtime/terminal/supervisor.py",
-      "runtime/terminal/client.py",
-      "runtime/terminal/build.mjs",
-      "scripts/stage-terminal-image.mjs",
       "hub/server.ts",
       "extensions/connection-config.ts",
       "extensions/connection-listener.ts",
       "extensions/runtime-control.ts",
       "extensions/runtime-metadata.ts",
-      "extensions/terminal-barrier.ts",
       "extensions/runtime-stdin-guard.mjs",
       "extensions/workspace-uploads.ts",
       "extensions/session-registration.ts",
@@ -320,9 +300,9 @@ async function main() {
       "Tarball must include a working hub CLI",
     );
     assert.equal(packedManifest.outputs.sha256, initialHash);
-    assert.deepEqual(Object.keys(packedPkg.dependencies ?? {}).sort(), ["@xterm/addon-serialize", "@xterm/headless", "ws"]);
+    assert.deepEqual(Object.keys(packedPkg.dependencies ?? {}).sort(), ["ws"]);
     const count = await packageCount(path.join(consumer, "node_modules"));
-    assert.equal(count, 4, "Tarball consumer must contain only the root package, ws and headless/serialize");
+    assert.equal(count, 2, "Tarball consumer must contain only the root package and ws");
     const lockChanged =
       sha(await readFile(path.join(second.installed, "package-lock.json"))) !==
       sha(await readFile(path.join(fixture, "package-lock.json")));

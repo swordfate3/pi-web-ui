@@ -1,5 +1,12 @@
 # Pi Web UI 开发日志
 
+## 2026-10-22 · 独立原生终端归档
+
+- 按用户要求，将完整终端实现与部署证据保留在 `codex/archive-native-terminal-20261022`。
+- main 撤回独立入口、provider、PTY 与聊天只读接管；保留普通网页模型弹窗、Hub
+  管理、有界历史、压缩、数学显示、等待提示和后续独立安全修复。
+- 此为源码回退，不自动变更线上 Hub/Gate/Pi、隧道或服务器配置。下方终端记录是历史证据。
+
 ## 2026-10-21 · Trusted terminal Task 1：源码整合与可复现依赖（未接生产运行层）
 
 - 将实验提交 `9e45efa` 合入 `codex/trusted-terminal-runtime`，保留本地 AGENTS、main 的

@@ -8,12 +8,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { copyFixture } from "../scripts/test-git-install.mjs";
 import { verifyManifest } from "../scripts/web-dist.mjs";
 
-test("Git-install fixture contains verified runtime build inputs and rejects their stale content offline", async (t) => {
+test("Git-install fixture verifies ordinary Web and Hub sources and rejects stale content offline", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "pi-install-runtime-fixture-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   await copyFixture(dir);
   await verifyManifest(dir, { install: true });
-  for (const file of ["runtime/terminal/broker.ts", "runtime/terminal/protocol.ts", "runtime/terminal/supervisor.py", "runtime/terminal/client.py", "runtime/terminal/build.mjs", "scripts/stage-terminal-image.mjs"]) {
+  for (const file of ["extensions/mirror-server.ts", "extensions/terminal-prompt.ts", "hub/server.ts", "src/web/src/core/markdown-math.ts"]) {
     const source = path.join(dir, file);
     const original = readFileSync(source);
     writeFileSync(source, Buffer.concat([original, Buffer.from("\nchanged-source\n")]));
@@ -23,7 +23,7 @@ test("Git-install fixture contains verified runtime build inputs and rejects the
   await verifyManifest(dir, { install: true });
 });
 
-test("offline package inventory includes runtime artifacts but excludes interpreter caches", async (t) => {
+test("offline package ships ordinary Web and Hub without archived terminal or interpreter caches", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "pi-install-runtime-pack-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   await copyFixture(dir);
@@ -40,8 +40,9 @@ test("offline package inventory includes runtime artifacts but excludes interpre
   const start = result.stdout.indexOf("[\n");
   assert.ok(start >= 0);
   const files = JSON.parse(result.stdout.slice(start))[0].files.map((entry) => entry.path);
-  for (const file of ["dist/runtime/broker.cjs", "dist/runtime/client.py", "dist/runtime/supervisor.py", "runtime/terminal/build.mjs", "scripts/stage-terminal-image.mjs"])
+  for (const file of ["dist/index.html", "dist/hub/pi-web-hub.mjs", "extensions/mirror-server.ts", "extensions/terminal-prompt.ts"])
     assert.ok(files.includes(file), `required package artifact: ${file}`);
+  assert.equal(files.some((file) => /^(runtime\/|dist\/(runtime|terminal)\/)/.test(file)), false);
   assert.equal(files.some((file) => file.includes("__pycache__")), false, "unverified interpreter caches must not ship");
 });
 

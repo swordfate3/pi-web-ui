@@ -27,7 +27,6 @@ import { useConversationTree } from "./use-conversation-tree";
 const EMPTY_TREE: SessionTreeNode[] = [];
 
 interface ConversationSidebarProps {
-  readOnly?: boolean;
   branchEnabled: boolean;
   connection: ConnectionState;
   tree: SessionTreeNode[];
@@ -45,7 +44,6 @@ interface ConversationSidebarProps {
 }
 
 export function ConversationSidebar({
-  readOnly = false,
   branchEnabled,
   connection,
   tree,
@@ -183,11 +181,10 @@ export function ConversationSidebar({
 
       <SidebarFooter>
         <Button
-          disabled={readOnly}
           className="w-full justify-start gap-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0"
           onClick={() => {
             closeMobile();
-            if (!readOnly) onOpenSettings();
+            onOpenSettings();
           }}
           type="button"
           variant="ghost"

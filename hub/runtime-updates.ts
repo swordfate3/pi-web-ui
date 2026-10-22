@@ -8,7 +8,6 @@ export type RuntimeUpdateTarget = {
   old_version?: string;
   version?: string;
   wait_reason?: string;
-  profile?: "web-terminal-v1";
 };
 export type RuntimeUpdateJob = {
   id: string;
@@ -32,17 +31,7 @@ const word = (value: unknown): value is string =>
   typeof value === "string" && value.trim() === value && /^[a-z_]{1,64}$/.test(value);
 const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
-const states = [
-  "pending",
-  "queued",
-  "running",
-  "succeeded",
-  "failed",
-  "recovery_required",
-  "rejected",
-  "stale",
-  "manual_restart_required",
-];
+const states = ["pending", "queued", "running", "succeeded", "failed", "recovery_required", "rejected", "stale"];
 
 /** A bounded error category, never the upstream response body or credential. */
 export class RuntimeUpdateError extends Error {
@@ -66,18 +55,6 @@ function job(value: unknown): RuntimeUpdateJob {
   const targets = value.targets.map((target): RuntimeUpdateTarget => {
     if (!object(target) || !hex(target.run_id) || !word(target.status)) throw new RuntimeUpdateError();
     const result: RuntimeUpdateTarget = { run_id: target.run_id, status: target.status };
-    if (target.profile !== undefined) {
-      if (target.profile !== "web-terminal-v1") throw new RuntimeUpdateError();
-      result.profile = target.profile;
-    }
-    if (
-      target.status === "manual_restart_required" &&
-      (target.old_version !== undefined ||
-        target.version !== undefined ||
-        target.restart_id !== undefined ||
-        target.wait_reason !== "terminal_profile_unaudited")
-    )
-      throw new RuntimeUpdateError();
     for (const key of ["old_version", "version"] as const) {
       if (target[key] !== undefined) {
         if (!runtimeVersion(target[key])) throw new RuntimeUpdateError();

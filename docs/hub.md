@@ -621,34 +621,6 @@ backend 挑战与请求证明用来防误登记和失效链接复用，不保证
 间仍存在端口/目标变化的时序边界；不要据此承诺绝对防逃逸或零泄露。
 总管的 portal 不显示 token、宿主绝对路径或对话内容。
 
-## 开发中：独立终端授权入口（不等于终端可用）
-
-同一 WebUI 包的 Hub 新增可选 `terminal` 配置；默认不启动第三监听器。当前仅实现独立、绑定精确目标的授权与状态，**尚无终端页面、PTY/provider、输出流或按键输入**。即使配对成功，`GET /api/terminal/status` 也返回 `available:false` 和 `terminal_backend_unavailable`；不能用它批准正在等待的记忆确认或操作 `/mcp`。
-
-隔离开发环境可在新配置中显式选择，以下不是生产启用指令：
-
-```json
-{
-  "port": 16180,
-  "publicUrl": "https://chat.example/",
-  "management": { "port": 16181, "publicUrl": "https://admin.example/" },
-  "terminal": { "port": 16182, "publicUrl": "https://terminal.example/" }
-}
-```
-
-本地测试可省略所有publicUrl并将三个port设为0取得空闲端口；终端固定绑定127.0.0.1，local/public origin均不能与chat/admin重复。公网终端必须独立HTTPS origin；不能把 `/api/terminal` 通过已有聊天origin转发。未配置公网入口时不自动配置DNS/TLS/隧道；终端暂不支持management.gateway自动登录。
-
-可信Hub CLI新增：
-
-- `init --terminal-port <port> [--terminal-public-url <HTTPS root URL>]`：只在新配置中记录，不打开监听器。
-- `serve`：显式配置时在现有Hub进程内启动terminal listener，ready JSON增加 `terminalUrl`。
-- `pair-terminal --run-id <32hex> --runtime-id <id> --session-id <id> --terminal-epoch <32hex> --access <read|write>`：由管理员选择准确child scope并生成10分钟单次码；stdout含配对秘密，**不可粘到模型聊天/日志/URL**。现阶段没有broker提供真实terminalEpoch，只有合成fixture可以端到端验证这条命令；不要为当前生产Pi编造epoch。grant存在不证明child存活/可接终端。
-- `revoke-terminal`：撤销全部terminal浏览器会话与未消费配对码，不撤销management登录或普通Pi登记。
-
-终端认证使用Hub私有 `terminal-auth.json`（0600）和独立cookie/session/CSRF，session最长30分钟；read权限不会升级write，授权不自动跟随新Pi或会话。Cookie不按端口隔离，聊天转发仍剥离Cookie/Authorization/`x-pi-hub-*`。配对／签发／撤销使用同一 `terminal-auth.lock/` 保护完整读改写；竞争直接失败，不假报撤销成功。进程异常退出可能留下锁，须管理员确认Hub及相关CLI已停止后处理**该配置stateDir下的这个空锁目录**，不自动抢锁或删除授权state，不靠等待清除权限。
-
-目前所有Upgrade/CONNECT、Pi静态资源/HTTP代理、Service Worker、attach/write接口均拒绝。接入真实终端前仍须完成runtime/Gate源码开发、主动流式撤权、同进程证明与真实Browser边界验证；本段不是上线承诺。设计、实际测试和未测范围见 [ADR0018](adr/0018-trusted-terminal-extension-compatibility.md)。
-
 ### 应用会话交接修复
 
 自动交接需要同时更新独立 Hub 和 Pi 提供的网页资源。只更新 Pi 扩展或

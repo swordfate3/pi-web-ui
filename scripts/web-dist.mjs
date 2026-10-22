@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const DEFAULT_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const MANIFEST_NAME = "build-manifest.json";
 const SCHEMA_VERSION = 1;
-const REQUIRED_OUTPUTS = ["index.html", "hub/pi-web-hub.mjs", "runtime/broker.cjs", "runtime/supervisor.py", "runtime/client.py", "terminal/index.html", "terminal/app.js", "terminal/app.css"];
+const REQUIRED_OUTPUTS = ["index.html", "hub/pi-web-hub.mjs"];
 const SOURCE_DIRECTORIES = ["src/web", "public", "hub", "bin"];
 const SOURCE_FILES = [
   "vite.config.ts",
@@ -30,7 +30,6 @@ const SOURCE_FILES = [
   "extensions/hub-generation.ts",
   "extensions/live-transport.ts",
   "extensions/terminal-prompt.ts",
-  "extensions/terminal-barrier.ts",
   "extensions/message-revision.ts",
   "extensions/message-versions.ts",
   "extensions/session-usage.ts",
@@ -39,12 +38,6 @@ const SOURCE_FILES = [
   "extensions/remote-access/plan.ts",
   "extensions/remote-access/gateway.py",
   "scripts/web-dist.mjs",
-  "scripts/stage-terminal-image.mjs",
-  "runtime/terminal/broker.ts",
-  "runtime/terminal/protocol.ts",
-  "runtime/terminal/supervisor.py",
-  "runtime/terminal/client.py",
-  "runtime/terminal/build.mjs",
 ];
 const SOURCE_POLICY_PATHS = new Set(SOURCE_FILES);
 const SOURCE_POLICY_PREFIXES = SOURCE_DIRECTORIES.map((directory) => `${directory}/`);

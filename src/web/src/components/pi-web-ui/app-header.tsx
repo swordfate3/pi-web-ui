@@ -8,7 +8,6 @@ import type { ConnectionState } from "../../core/types";
 import { ConnectionDot } from "./connection-dot";
 
 type AppHeaderProps = {
-  readOnly?: boolean;
   title: string;
   connection: ConnectionState;
   modelLabel: string;
@@ -36,7 +35,6 @@ type AppHeaderProps = {
 };
 
 export function AppHeader({
-  readOnly = false,
   title,
   connection,
   modelLabel,
@@ -110,7 +108,6 @@ export function AppHeader({
         </Button>
         <Button
           data-testid="open-settings"
-          disabled={readOnly}
           aria-label={t("Open settings")}
           onClick={onOpenSettings}
           size="icon-sm"
@@ -122,7 +119,6 @@ export function AppHeader({
         </Button>
         <Button
           aria-label={t("Open command palette")}
-          disabled={readOnly}
           onClick={onOpenCommandPalette}
           size="icon-sm"
           title={t("Commands (Ctrl/⌘ K)")}
@@ -144,7 +140,6 @@ export function AppHeader({
       <div className="flex w-full min-w-0 items-center justify-end gap-0.5 text-muted-foreground sm:w-auto">
         <Button
           aria-label={modelLabel}
-          disabled={readOnly}
           className="min-w-0 shrink px-2"
           onClick={onOpenModelPicker}
           size="sm"
@@ -157,7 +152,6 @@ export function AppHeader({
         </Button>
         <Button
           className="shrink-0 px-2"
-          disabled={readOnly}
           onClick={onCycleThinking}
           size="sm"
           title={t("Cycle thinking level")}
@@ -185,14 +179,7 @@ export function AppHeader({
           <div className="hidden px-2 py-1 text-muted-foreground text-xs lg:block">${totalCost.toFixed(4)}</div>
         )}
         {shouldSuggestCompaction && (
-          <Button
-            disabled={readOnly}
-            className="shrink-0 px-2"
-            onClick={onCompactContext}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
+          <Button className="shrink-0 px-2" onClick={onCompactContext} size="sm" type="button" variant="ghost">
             {t("Compact")}
           </Button>
         )}

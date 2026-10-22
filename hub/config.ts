@@ -5,7 +5,6 @@ import path from "node:path";
 import { validatedPublicUrl } from "../extensions/connection-config.ts";
 import { type LifecycleConfig, lifecycleConfig } from "./lifecycle.ts";
 import { privateStateDirectory, publishCredential, readStateJson, withStateWriter } from "./state-budget.ts";
-import { type TerminalProviderConfig, terminalProviderConfig } from "./terminal-provider.ts";
 
 export type HubConfig = {
   stateDir: string;
@@ -18,7 +17,6 @@ export type HubConfig = {
   lifecycle?: LifecycleConfig;
   runtimeUpdates?: LifecycleConfig;
   management?: { port: number; publicUrl?: string; gateway?: { credentialFile: string } };
-  terminal?: { port: number; publicUrl?: string; provider?: TerminalProviderConfig };
 };
 export type Grant = {
   run_id: string;
@@ -39,7 +37,7 @@ export function readPrivateJson(file: string) {
 
 export function initializeHub(
   file: string,
-  options: Partial<Pick<HubConfig, "port" | "publicUrl" | "leaseMs" | "management" | "terminal">> = {},
+  options: Partial<Pick<HubConfig, "port" | "publicUrl" | "leaseMs" | "management">> = {},
 ) {
   // The config parent may be an existing project; only hub state must be private.
   mkdirSync(path.dirname(path.resolve(file)), { recursive: true, mode: 0o700 });
@@ -84,8 +82,6 @@ export function readHubConfig(file: string): HubConfig {
   const lifecycle = value.lifecycle === undefined ? undefined : lifecycleConfig(value.lifecycle);
   const runtimeUpdates = value.runtimeUpdates === undefined ? undefined : lifecycleConfig(value.runtimeUpdates);
   const management = value.management === undefined ? undefined : managementConfig(value.management, port, publicUrl);
-  const terminal =
-    value.terminal === undefined ? undefined : terminalConfig(value.terminal, port, publicUrl, management);
   return {
     stateDir,
     runtimeDir,
@@ -97,40 +93,7 @@ export function readHubConfig(file: string): HubConfig {
     ...(lifecycle ? { lifecycle } : {}),
     ...(runtimeUpdates ? { runtimeUpdates } : {}),
     ...(management ? { management } : {}),
-    ...(terminal ? { terminal } : {}),
   };
-}
-
-/** Separate listener and authorization domain; no terminal backend is implied. */
-export function terminalConfig(
-  value: unknown,
-  chatPort: number,
-  chatPublicUrl?: string,
-  management?: HubConfig["management"],
-): NonNullable<HubConfig["terminal"]> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid terminal configuration");
-  const v = value as Record<string, unknown>;
-  if (
-    Object.keys(v).some((key) => !["port", "publicUrl", "provider"].includes(key)) ||
-    !Number.isInteger(v.port) ||
-    Number(v.port) < 0 ||
-    Number(v.port) > 65535 ||
-    (v.port !== 0 && (v.port === chatPort || v.port === management?.port))
-  )
-    throw new Error("Terminal requires a distinct port");
-  const publicUrl = v.publicUrl === undefined ? undefined : validatedPublicUrl(v.publicUrl);
-  if (
-    publicUrl &&
-    (!chatPublicUrl ||
-      !publicUrl.startsWith("https:") ||
-      new URL(publicUrl).pathname !== "/" ||
-      [chatPublicUrl, management?.publicUrl].some(
-        (other) => other && new URL(other).hostname === new URL(publicUrl).hostname,
-      ))
-  )
-    throw new Error("Terminal requires a distinct canonical HTTPS origin");
-  const provider = v.provider === undefined ? undefined : terminalProviderConfig(v.provider);
-  return { port: Number(v.port), ...(publicUrl ? { publicUrl } : {}), ...(provider ? { provider } : {}) };
 }
 
 export function managementConfig(

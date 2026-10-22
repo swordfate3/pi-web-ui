@@ -24,7 +24,6 @@ import {
   privateDirectory,
   readGrant,
   readPrivateJson,
-  terminalConfig,
 } from "./config.ts";
 import { ForwardQueue } from "./forward-queue.ts";
 import { gatewayIdentity } from "./gateway-auth.ts";
@@ -32,7 +31,6 @@ import { HUB_LIMITS } from "./limits.ts";
 import { portalCss, portalJs, portalManagementCss, portalManagementJs, renderPortalHtml } from "./portal.ts";
 import { createRestartApi } from "./restart-api.ts";
 import { acquireStateLock, StateBudgetError, type StateWriter, withStateWriter } from "./state-budget.ts";
-import { startTerminalServer } from "./terminal-server.ts";
 import { createVersionStatus, type VersionStatusOptions } from "./version-status.ts";
 
 type Session = {
@@ -168,7 +166,6 @@ function boundedDeflateOffer(header: string | undefined) {
 /** Explicitly launched independent process; never imported as a Pi extension entry. */
 export async function startHub(config: HubConfig, options: { versions?: VersionStatusOptions } = {}) {
   if (config.management) managementConfig(config.management, config.port, config.publicUrl);
-  if (config.terminal) terminalConfig(config.terminal, config.port, config.publicUrl, config.management);
   const serving = acquireStateLock(config, ".serving.lock");
   config = { ...config, stateDir: serving.root };
   try {
@@ -268,7 +265,6 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   const versionStatus = createVersionStatus(options.versions);
   let url = "";
   let managementUrl: string | undefined;
-  let terminalServer: Awaited<ReturnType<typeof startTerminalServer>> | undefined;
   const restarting = new Map<string, { id: string; runtimeId: string; deadline?: number }>();
   const activateRestart = (generation: string) => {
     const restart = restarting.get(generation);
@@ -893,12 +889,6 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
           .end(JSON.stringify({ sessions: items, versions: versionStatus.snapshot() }));
         return;
       }
-      if (!admin && pathname === "/api/terminal-link") {
-        response
-          .writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" })
-          .end(JSON.stringify({ url: terminalServer ? (config.terminal?.publicUrl ?? terminalServer.url) : null }));
-        return;
-      }
       const asset =
         pathname === "/sessions/"
           ? [
@@ -1168,18 +1158,9 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
       )
         throw new Error("Management origin must differ from chat origin");
     }
-    if (config.terminal) {
-      terminalServer = await startTerminalServer(
-        config,
-        [url, config.publicUrl, managementUrl, config.management?.publicUrl].filter(
-          (value): value is string => !!value,
-        ),
-      );
-    }
   } catch (error) {
     stopped = true;
     versionStatus.close();
-    await terminalServer?.close();
     for (const peer of peers) peer.destroy();
     for (const connection of connections) connection.destroy();
     await Promise.all([
@@ -1203,7 +1184,6 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   return {
     url,
     ...(managementUrl ? { managementUrl } : {}),
-    ...(terminalServer ? { terminalUrl: terminalServer.url } : {}),
     socketPath: config.socketPath,
     close() {
       if (closing) return closing;
@@ -1221,7 +1201,6 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         new Promise<void>((resolve) => registry.close(() => resolve())),
         new Promise<void>((resolve) => wss.close(() => resolve())),
         ...(managementServer ? [new Promise<void>((resolve) => managementServer.close(() => resolve()))] : []),
-        ...(terminalServer ? [terminalServer.close()] : []),
         pending,
       ]).then(() => {});
       return closing;

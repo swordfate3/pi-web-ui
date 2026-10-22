@@ -67,14 +67,6 @@ Playwright Browser
 
 Vite dev server is not part of canonical E2E. It may be useful for local debugging, but CI E2E should build `dist` and set `PI_WEB_UI_STATIC_DIR` so mirror-server serves the same asset shape as production.
 
-## 隔离 TUI PTY 伴随验证（ADR 0018 M2a）
-
-`python3 -B e2e/harness/test-isolated-pty.py` 通过Python标准库forkpty启动唯一真实Pi TUI，配置/会话/工作目录使用临时数据，仅加载合成扩展和faux provider。它验证confirm/custom按键交互、同PID/controllingTTY、resize、测试连接输入围栏及退出清理；`PI_E2E_BIN`选择已有Pi，`PI_PTY_TUI_MODE=fullscreen`可选。此切片不修改默认RPC/Playwright测试流程，不加载mirror、不接Hub，不要求Gate或新依赖。
-
-后续 `node --import ./tests/register-ts.mjs --test e2e/pty-transport.integration.ts` 在独立临时Unix socket、私有JSONL worker pipe及真实Pi PTY上验证lease单writer、断线/到期、sink排队撤权和停滞清理；`python3 -B e2e/harness/test-pty-stream-worker.py`覆盖直接pipe失败路径。均不接产品Hub或浏览器，见[实际连接验证](../validation/pty-transport.md)。
-
-这是浏览器终端实现前的基础链路验证，**不是下面定义的产品Browser E2E**；没有浏览器、真实授权、产品broker/WS、screen snapshot、本机relay或受管重启证据。不将测试程序对合成fixture发送Yes当作真实用户批准。结果与限制见[隔离PTY验证](../validation/isolated-pty.md)。
-
 ## E2E Definition
 
 An E2E test must include:
@@ -389,52 +381,7 @@ Desktop/mobile screenshots are inspected separately, not counted as E2E proof.
 
 The real Hub scenarios cover desktop/mobile return-home links, unsent text and attachment cancellation, immediate rename acknowledgement followed by Hub return without waiting for the 15s lease renewal, stable cards/focus across polls, native browser back and immediate text submission after lifecycle handoff. `pageshow(persisted)` is also dispatched deterministically for the refresh handler; this does not certify that every browser used BFCache. New proof-gap/deadline tests use real HTTP and Unix IPC; a limited browser trace diagnosis does not claim visibility of the registry IPC timeline. See [navigation validation](../validation/hub-navigation.md).
 
-## Isolated framebuffer/browser fixture
-
-`e2e/terminal-screen.integration.ts` optionally connects the real isolated PTY transport to a persistent headless parser. It checks startup/read reconnect snapshots, ordered resize and actual sink disconnect fencing. A separate read-only xterm browser fixture restores selected real frames at desktop/mobile sizes; screenshot inspection is visual evidence, not a Browser-to-PTY product E2E. It does not load mirror-server, provide browser input, authorize real extensions or attach the current Pi. Full frames never mix raw deltas; experimental serialize fidelity, small-screen scrolling and missing emoji glyphs remain explicit limits. See [framebuffer validation](../validation/terminal-screen.md).
-
-## Isolated browser-to-PTY interaction
-
-`e2e/terminal-browser.integration.ts` uses an isolated loopback terminal origin, actual HubTerminalAuth scope and cookie, real WebSocket and Unix transport to the same synthetic Pi PTY. Unlike the earlier read-only framebuffer fixture, input and live screens both cross the network path. It covers explicit writer acquisition, native confirmation rejection/custom navigation, read-only access, disconnect/reconnect, fixed lease expiry, in-flight fencing/unknown, strict framing budgets, and browser cross-origin/SW/frame/opener rejection. It does not use the production mirror-server path, attach the current Pi, grant real extension approvals or certify runtime/provider identity. See [browser terminal validation](../validation/terminal-browser.md) for executed matrix, visual evidence and limitations. This isolated suite is invoked explicitly and is not silently added to the existing product BDD CI.
-
 ## References
-
-### Approved installed native-terminal exception (Task6)
-
-`e2e/features/native-terminal.feature` is a narrowly scoped exception to the
-RPC launch convention: native `ctx.ui.confirm` and `ctx.ui.custom` must run in
-the actual installed Pi TUI/PTY. Its Playwright-BDD steps use Browser → real Hub
-→ real Gate provider/Engine → fixed installed helper/broker/supervisor → one
-real Pi child with the real mirror adapter. Only the model is faux. No synthetic
-PTY child, mocked product WebSocket, browser state injection, or RPC process
-substitutes for this chain. Existing RPC scenarios and their default command are
-unchanged; this Docker-dependent scenario is explicitly opt-in.
-
-After building dist and generating BDD, run with `PI_TASK6_NATIVE_E2E=1`,
-`PI_TASK6_GATE_SOURCE` and `PI_TASK6_DOCKER_SOURCE` pointing to the reviewed host
-sources, and `PI_E2E_BROWSER_EXECUTABLE` pointing to an already cached browser:
-
-```bash
-PI_TASK6_NATIVE_E2E=1 npx playwright test -c e2e/playwright.config.ts --grep @native-terminal
-```
-
-The test owns uniquely labelled images/containers/volumes and a temporary git
-workspace/private Hub state; it supplies no user credentials or production
-volumes. It invokes the actual closed root-admin preflight before Pi creation,
-then actual installed Compose with the terminal logging overlay. The isolated
-Compose service deliberately has no production-named shared home volumes because
-existing Gate admission forbids renamed authority volumes; it does not weaken
-that admission. Ordinary launcher argument/credential tests are a separate layer.
-
-Kernel PID/PPID/start time plus native extension events distinguish the actual
-Pi child from supervisor PID1. Assertions cover startup-read-only chat, explicit
-pair/connect/acquire, native reject/zero-effects and accept-once, Chinese draft
-composition, custom keyboard UI/manual resize, local reclaim and renewed
-explicit handoff, no helper after disconnect, normal child exit and exact owned
-resource/socket cleanup. Synthetic SSH/model files check normal entry setup.
-Screenshot inspection (including scrolling to native dialog/panel bottoms) is
-separate visual validation; emulated composition/viewport is not physical IME or
-phone/public deployment acceptance. See the [Task6 evidence](../validation/2026-10-21-task6-terminal-wiring/README.md).
 
 - `AGENTS.md`
 - `docs/adr/0002-web-ui-extension-event-protocol.md`

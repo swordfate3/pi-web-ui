@@ -1,0 +1,731 @@
+--- a/pi-deploy-gate/gate/artifacts.py
++++ b/pi-deploy-gate/gate/artifacts.py
+@@ -10,6 +10,21 @@
+ 
+ MAX_ARCHIVE = 32 * 1024 * 1024
+ MAX_BUNDLE = 4 * 1024 * 1024
++TERMINAL_FILES = ('index.html', 'app.js', 'app.css')
++MAX_TERMINAL_FILE = 2 * 1024 * 1024
++
++
++def terminal_digest(assets):
++    if (not isinstance(assets, dict) or set(assets) != set(TERMINAL_FILES) or
++            any(not isinstance(data, bytes) or not 0 < len(data) <= MAX_TERMINAL_FILE
++                for data in assets.values())):
++        raise ValueError('terminal release requires the complete fixed browser inventory')
++    digest = hashlib.sha256(b'pi-terminal-assets-v1\0')
++    for name in TERMINAL_FILES:
++        digest.update(name.encode() + b'\0')
++        digest.update(len(assets[name]).to_bytes(8, 'big'))
++        digest.update(assets[name])
++    return digest.hexdigest()
+ 
+ 
+ def bundle_from_archive(data, commit):
+@@ -17,7 +32,8 @@
+     if len(data) > MAX_ARCHIVE:
+         raise ValueError('archive too large')
+     root = 'pi-web-ui-' + commit
+-    wanted = {'dist/hub/pi-web-hub.mjs': MAX_BUNDLE, 'LICENSE': 65536}
++    required = {'dist/hub/pi-web-hub.mjs': MAX_BUNDLE, 'LICENSE': 65536}
++    wanted = dict(required, **{'dist/terminal/' + name: MAX_TERMINAL_FILE for name in TERMINAL_FILES})
+     result = {}
+     total = 0
+     with tarfile.open(fileobj=io.BytesIO(data), mode='r|gz') as archive:
+@@ -34,9 +50,15 @@
+             if name in result or not member.isfile() or member.size <= 0 or member.size > wanted[name]:
+                 raise ValueError('unsafe or duplicate release artifact')
+             result[name] = archive.extractfile(member).read(wanted[name] + 1)
+-    if result.keys() != wanted.keys():
++    if not required.keys() <= result.keys():
+         raise ValueError('release must contain prebuilt Hub and license')
+-    return result['dist/hub/pi-web-hub.mjs'], result['LICENSE']
++    terminal = {name: result['dist/terminal/' + name] for name in TERMINAL_FILES
++                if 'dist/terminal/' + name in result}
++    pair = result['dist/hub/pi-web-hub.mjs'], result['LICENSE']
++    if terminal:
++        terminal_digest(terminal)  # Partial inventories fail, never silently disappear.
++        return (*pair, terminal)
++    return pair  # Keep historical releases and job snapshots deployable.
+ 
+ 
+ class NoRedirect(urllib.request.HTTPRedirectHandler):
+@@ -62,22 +84,28 @@
+     return bundle_from_archive(bytes(output), commit)
+ 
+ 
+-def build_context(bundle, license, base, commit):
++def build_context(bundle, license, base, commit, terminal=None):
+     check_sha(commit)
+     if not re.fullmatch(r'sha256:[0-9a-f]{64}', base):
+         raise ValueError('base must be an exact local image ID')
+     # Dockerfile FROM does not reliably accept a bare image ID with BuildKit.
+     # Engine.ensure_base verifies this derived local alias before every build.
+     alias = 'pi-web-hub:gate-base-' + base.removeprefix('sha256:')[:12]
++    terminal_label = (f'LABEL pi.deploy-gate.terminal-sha256="{terminal_digest(terminal)}"\n'
++                      if terminal is not None else '')
+     dockerfile = (f'FROM {alias}\n'
+                   f'LABEL org.opencontainers.image.revision="{commit}"\n'
+                   f'LABEL pi.deploy-gate.bundle-sha256="{hashlib.sha256(bundle).hexdigest()}"\n'
+                   f'LABEL pi.deploy-gate.base-image="{base}"\n'
+                   'COPY pi-web-hub.mjs /opt/pi-web-ui/dist/hub/pi-web-hub.mjs\n'
+-                  'COPY LICENSE /opt/pi-web-ui/LICENSE\n').encode()
++                  'COPY LICENSE /opt/pi-web-ui/LICENSE\n' + terminal_label +
++                  ('COPY terminal/ /opt/pi-web-ui/dist/terminal/\n' if terminal is not None else '')).encode()
+     output = io.BytesIO()
+     with tarfile.open(fileobj=output, mode='w') as archive:
+-        for name, data in (('Dockerfile', dockerfile), ('pi-web-hub.mjs', bundle), ('LICENSE', license)):
++        files = [('Dockerfile', dockerfile), ('pi-web-hub.mjs', bundle), ('LICENSE', license)]
++        if terminal is not None:
++            files.extend(('terminal/' + name, terminal[name]) for name in TERMINAL_FILES)
++        for name, data in files:
+             member = tarfile.TarInfo(name)
+             member.size = len(data)
+             member.mode = 0o444
+--- a/pi-deploy-gate/gate/deploy.py
++++ b/pi-deploy-gate/gate/deploy.py
+@@ -1,7 +1,7 @@
+ import hashlib
+ import json
+ 
+-from .artifacts import build_context, fetch_bundle
++from .artifacts import build_context, fetch_bundle, terminal_digest
+ from .errors import PreconditionChanged
+ from .store import ACTIVE
+ 
+@@ -14,6 +14,10 @@
+     def target_body(self, image, job):
+         p = self.policy
+         health = "fetch('http://127.0.0.1:%d/api/sessions',{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" % p['health_port']
++        binds = [p['private_volume'] + ':/hub/private:rw', p['runtime_volume'] + ':/run/pi-web-hub:rw']
++        if p.get('terminal_provider') is True:
++            binds += ['pi-terminal-provider-ipc:/run/pi-terminal-provider:ro',
++                      'pi-terminal-provider-credentials:/run/pi-terminal-credentials:ro']
+         return {'Image': image, 'User': '1000:1000', 'WorkingDir': '/opt/pi-web-ui',
+                 'Entrypoint': ['node', '/opt/pi-web-ui/dist/hub/pi-web-hub.mjs'],
+                 'Cmd': ['serve', '--config', '/hub/private/config.json'],
+@@ -26,8 +30,7 @@
+                                'NanoCpus': 1000000000, 'PidsLimit': 128,
+                                'RestartPolicy': {'Name': 'unless-stopped', 'MaximumRetryCount': 0},
+                                'Tmpfs': {'/tmp': 'rw,nosuid,nodev,noexec,size=16m,mode=1777'},
+-                               'Binds': [p['private_volume'] + ':/hub/private:rw',
+-                                         p['runtime_volume'] + ':/run/pi-web-hub:rw'],
++                               'Binds': binds,
+                                'LogConfig': {'Type': 'json-file', 'Config': {'max-size': '10m', 'max-file': '3'}}}}
+ 
+     def check_target(self):
+@@ -36,11 +39,16 @@
+         if (not item or not item['State']['Running'] or
+                 item['State'].get('Health', {}).get('Status') != 'healthy'):
+             raise ValueError('target Hub is not healthy')
+-        expected = {('/hub/private', p['private_volume']), ('/run/pi-web-hub', p['runtime_volume'])}
++        expected = {('/hub/private', p['private_volume']): True, ('/run/pi-web-hub', p['runtime_volume']): True}
+         mounts = item.get('Mounts', [])
+-        if len(mounts) != 2 or {(m['Destination'], m.get('Name')) for m in mounts} != expected:
++        # The exact legacy template is the only initial migration concession.
++        # Partial provider mounts, different volumes or changed access never qualify.
++        if p.get('terminal_provider') is True and len(mounts) == 4:
++            expected.update({('/run/pi-terminal-provider', 'pi-terminal-provider-ipc'): False,
++                             ('/run/pi-terminal-credentials', 'pi-terminal-provider-credentials'): False})
++        if len(mounts) != len(expected) or {(m['Destination'], m.get('Name')) for m in mounts} != expected.keys():
+             raise ValueError('target mounts differ from approved policy')
+-        if any(m['Type'] != 'volume' or not m['RW'] or m.get('Propagation', '') not in ('', 'rprivate')
++        if any(m['Type'] != 'volume' or m['RW'] is not expected[(m['Destination'], m.get('Name'))] or m.get('Propagation', '') not in ('', 'rprivate')
+                or m.get('SubPath') or m.get('Subpath') for m in mounts):
+             raise ValueError('target mount access differs from approved policy')
+         host = item['HostConfig']
+@@ -64,11 +72,17 @@
+         for mount in host.get('Mounts') or []:
+             if (mount.get('Type') != 'volume' or
+                     (mount.get('Target'), mount.get('Source')) not in expected or
+-                    mount.get('ReadOnly', False) or
++                    mount.get('ReadOnly', False) is not (not expected[(mount.get('Target'), mount.get('Source'))]) or
+                     mount.get('VolumeOptions', {}) != {'NoCopy': True} or
+                     mount.get('BindOptions') or mount.get('TmpfsOptions')):
+                 raise ValueError('target mount options changed')
+-        if host.get('Binds') and sorted(host['Binds']) != sorted(approved['HostConfig']['Binds']):
++        if host.get('Mounts') and (host.get('Binds') or
++                len(host['Mounts']) != len(expected) or
++                {(m.get('Target'), m.get('Source')) for m in host['Mounts']} != expected.keys()):
++            raise ValueError('target mount inventory changed')
++        expected_binds = [name + ':' + destination + (':rw' if rw else ':ro')
++                          for (destination, name), rw in expected.items()]
++        if host.get('Binds') and sorted(host['Binds']) != sorted(expected_binds):
+             raise ValueError('target bind options changed')
+         inherited = dict(v.split('=', 1) for v in self.engine.image_env(item['Image']))
+         env = config.get('Env') or []
+@@ -92,7 +106,11 @@
+     def prepare(self, job):
+         identifier = job['id']
+         self.store.update(identifier, stage='fetching')
+-        bundle, license = self.fetch(job['commit'])
++        release = self.fetch(job['commit'])
++        bundle, license = release[:2]
++        terminal = release[2] if len(release) == 3 else None
++        if self.policy.get('terminal_provider') is True and terminal is None:
++            raise ValueError('terminal-enabled Hub requires complete browser assets')
+         digest = hashlib.sha256(bundle).hexdigest()
+         self.store.update(identifier, stage='building', bundle_sha256=digest)
+         tag = 'pi-web-hub:gate-' + job['commit'] + '-' + identifier
+@@ -100,7 +118,10 @@
+         labels = {'org.opencontainers.image.revision': job['commit'],
+                   'pi.deploy-gate.bundle-sha256': digest,
+                   'pi.deploy-gate.base-image': self.policy['base_image']}
+-        return self.engine.build(build_context(bundle, license, self.policy['base_image'], job['commit']), tag, labels)
++        if terminal is not None:
++            labels['pi.deploy-gate.terminal-sha256'] = terminal_digest(terminal)
++            self.store.update(identifier, terminal_sha256=labels['pi.deploy-gate.terminal-sha256'])
++        return self.engine.build(build_context(bundle, license, self.policy['base_image'], job['commit'], terminal=terminal), tag, labels)
+ 
+     def probe(self, image, job):
+         self.engine.probe(image, job['id'])
+--- a/pi-deploy-gate/gate/registry.py
++++ b/pi-deploy-gate/gate/registry.py
+@@ -351,7 +351,10 @@
+ 
+ 
+ def _validate_hub_policy(value, target):
+-    _exact(value, ('target', 'base_image', 'private_volume', 'runtime_volume', 'health_port', 'health_timeout'))
++    _exact(value, ('target', 'base_image', 'private_volume', 'runtime_volume', 'health_port', 'health_timeout'),
++           ('terminal_provider',))
++    if 'terminal_provider' in value and value['terminal_provider'] is not True:
++        raise ValueError('terminal provider opt-in must be true')
+     if value['target'] != target:
+         raise ValueError('policy target does not match service target')
+     if not isinstance(value['base_image'], str) or not _IMAGE_DIGEST.fullmatch(value['base_image']):
+@@ -361,6 +364,9 @@
+             raise ValueError('invalid Hub volume')
+         if value[key] in _RESERVED_TARGETS or value[key].startswith('pi-deploy-gate-'):
+             raise ValueError('reserved Hub volume')
++        if value[key] in (
++                'pi-terminal-provider-ipc', 'pi-terminal-provider-credentials'):
++            raise ValueError('provider volumes cannot be exposed through writable Hub state')
+     return {
+         'target': target,
+         'base_image': value['base_image'],
+@@ -368,6 +374,7 @@
+         'runtime_volume': value['runtime_volume'],
+         'health_port': _integer(value['health_port'], 1, 65535, 'health port'),
+         'health_timeout': _integer(value['health_timeout'], 0, 600, 'health timeout'),
++        **({'terminal_provider': True} if value.get('terminal_provider') is True else {}),
+     }
+ 
+ 
+--- a/pi-deploy-gate/gate/hostseal.py
++++ b/pi-deploy-gate/gate/hostseal.py
+@@ -22,7 +22,7 @@
+ SOURCE_LABEL = 'pi.deploy-gate.source-sha256'
+ BASE_LABEL = 'pi.deploy-gate.base-image'
+ SEAL = '.image-seal.json'
+-SOURCES = ('Dockerfile', 'policy.json', 'compose.yaml', 'gatectl', '.dockerignore')
++SOURCES = ('Dockerfile', 'policy.json', 'terminal-policy.json', 'compose.yaml', 'gatectl', '.dockerignore')
+ IMAGE_ID = re.compile(r'sha256:[0-9a-f]{64}')
+ FINGERPRINT = re.compile(r'[0-9a-f]{64}')
+ 
+--- a/pi-deploy-gate/.dockerignore
++++ b/pi-deploy-gate/.dockerignore
+@@ -2,4 +2,5 @@
+ !gate/
+ !gate/*.py
+ !policy.json
++!terminal-policy.json
+ !Dockerfile
+--- a/pi-deploy-gate/tests/test_hostseal.py
++++ b/pi-deploy-gate/tests/test_hostseal.py
+@@ -59,7 +59,7 @@
+         self.addCleanup(temporary.cleanup)
+         self.root = Path(temporary.name)
+         (self.root / 'gate').mkdir()
+-        self.sources = ['Dockerfile', 'policy.json', 'compose.yaml', 'gatectl',
++        self.sources = ['Dockerfile', 'policy.json', 'terminal-policy.json', 'compose.yaml', 'gatectl',
+                         '.dockerignore', 'gate/__init__.py', 'gate/service.py', 'gate/hostseal.py']
+         for name in self.sources:
+             (self.root / name).write_text('original ' + name + '\n')
+--- /dev/null
++++ b/pi-deploy-gate/tests/test_hub_terminal_deploy.py
+@@ -0,0 +1,174 @@
++"""Closed terminal release assets and fixed readonly Hub provider migration."""
++import copy
++import hashlib
++import io
++import tarfile
++import tempfile
++import unittest
++from pathlib import Path
++
++from gate.artifacts import bundle_from_archive, build_context
++from gate.registry import validate_service
++from gate.store import Store
++import test_deploy
++
++
++ASSETS = {'index.html': b'<html>terminal</html>', 'app.js': b'console.log(2)', 'app.css': b'body{}'}
++PROVIDER = [
++    {'Type': 'volume', 'Name': 'pi-terminal-provider-ipc', 'Destination': '/run/pi-terminal-provider', 'RW': False},
++    {'Type': 'volume', 'Name': 'pi-terminal-provider-credentials', 'Destination': '/run/pi-terminal-credentials', 'RW': False},
++]
++
++
++def release(assets=ASSETS, extras=()):
++    entries = [('dist/hub/pi-web-hub.mjs', b'console.log(1)', tarfile.REGTYPE),
++               ('LICENSE', b'MIT', tarfile.REGTYPE)]
++    entries += [('dist/terminal/' + name, data, tarfile.REGTYPE) for name, data in assets.items()]
++    return test_deploy.archive(entries + list(extras))
++
++
++class TerminalReleaseTests(unittest.TestCase):
++    def test_complete_inventory_enters_fixed_context_without_arbitrary_files(self):
++        bundle, license, assets = bundle_from_archive(release(extras=[('dist/terminal/evil.sh', b'evil', tarfile.REGTYPE)]), test_deploy.SHA)
++        self.assertEqual(assets, ASSETS)
++        data = build_context(bundle, license, 'sha256:' + 'a' * 64, test_deploy.SHA, terminal=assets)
++        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
++            self.assertEqual(sorted(archive.getnames()), ['Dockerfile', 'LICENSE', 'pi-web-hub.mjs',
++                'terminal/app.css', 'terminal/app.js', 'terminal/index.html'])
++            self.assertEqual(archive.extractfile('terminal/app.js').read(), b'console.log(2)')
++            self.assertIn(b'COPY terminal/ /opt/pi-web-ui/dist/terminal/', archive.extractfile('Dockerfile').read())
++
++    def test_partial_duplicate_linked_empty_and_oversized_assets_fail_closed(self):
++        cases = [release({'index.html': b'page'}),
++                 release(extras=[('dist/terminal/app.js', b'duplicate', tarfile.REGTYPE)]),
++                 release(extras=[('dist/terminal/app.js', b'', tarfile.SYMTYPE)]),
++                 release(dict(ASSETS, **{'app.css': b''})),
++                 release(dict(ASSETS, **{'app.js': b'x' * (2 * 1024 * 1024 + 1)}))]
++        for data in cases:
++            with self.subTest(size=len(data)), self.assertRaises(ValueError):
++                bundle_from_archive(data, test_deploy.SHA)
++
++    def test_context_rejects_untrusted_asset_names(self):
++        for assets in ({'../evil': b'evil'}, dict(ASSETS, **{'extra': b'evil'})):
++            with self.assertRaises(ValueError):
++                build_context(b'hub', b'MIT', 'sha256:' + 'a' * 64, test_deploy.SHA, terminal=assets)
++
++
++class TerminalMountTests(test_deploy.DeploymentTest):
++    def enabled(self, bad=False):
++        dep, store, engine, job = self.setup_gate(bad)
++        dep.policy['terminal_provider'] = True
++        dep.fetch = lambda _: (b'console.log(1)', b'MIT', ASSETS)
++        return dep, store, engine, job
++
++    def install_mounts(self, engine):
++        engine.items['old']['Mounts'] += copy.deepcopy(PROVIDER)
++        engine.items['old']['HostConfig']['Binds'] += [m['Name'] + ':' + m['Destination'] + ':ro' for m in PROVIDER]
++
++    def test_explicit_optin_migrates_only_exact_legacy_template(self):
++        dep, store, engine, job = self.enabled()
++        dep.run(job)
++        self.assertEqual(store.get(job['id'])['status'], 'deployed')
++        self.assertEqual(engine.items['new']['Config']['HostConfig']['Binds'], [
++            'test-private:/hub/private:rw', 'test-runtime:/run/pi-web-hub:rw',
++            'pi-terminal-provider-ipc:/run/pi-terminal-provider:ro',
++            'pi-terminal-provider-credentials:/run/pi-terminal-credentials:ro'])
++        self.assertEqual(engine.removed, [])
++
++    def test_exact_four_mount_target_survives_future_updates(self):
++        dep, store, engine, job = self.enabled()
++        self.install_mounts(engine)
++        self.assertEqual(dep.check_target()['Id'], 'old')
++        dep.run(job)
++        self.assertEqual(store.get(job['id'])['status'], 'deployed')
++
++    def test_no_optin_rejects_four_mount_target(self):
++        dep, store, engine, job = self.setup_gate()
++        self.install_mounts(engine)
++        with self.assertRaises(ValueError):
++            dep.check_target()
++
++    def test_partial_wrong_name_rw_subpath_and_options_are_rejected(self):
++        for change in ('partial', 'wrong', 'rw', 'subpath', 'bind-rw', 'options-rw'):
++            with self.subTest(change=change):
++                dep, _, engine, _ = self.enabled()
++                self.install_mounts(engine)
++                mounts = engine.items['old']['Mounts']
++                host = engine.items['old']['HostConfig']
++                if change == 'partial': mounts.pop()
++                if change == 'wrong': mounts[-1]['Name'] = 'pi-deploy-gate-state'
++                if change == 'rw': mounts[-1]['RW'] = True
++                if change == 'subpath': mounts[-1]['SubPath'] = 'subdir'
++                if change == 'bind-rw': host['Binds'][-1] = host['Binds'][-1][:-2] + 'rw'
++                if change == 'options-rw':
++                    host['Binds'] = []
++                    host['Mounts'] = [{'Type': 'volume', 'Target': m['Destination'], 'Source': m['Name'],
++                        'ReadOnly': False, 'VolumeOptions': {'NoCopy': True}} for m in mounts]
++                with self.assertRaises(ValueError): dep.check_target()
++
++    def test_health_failure_preserves_legacy_container_and_volumes(self):
++        dep, store, engine, job = self.enabled(True)
++        dep.run(job)
++        self.assertEqual(store.get(job['id'])['status'], 'rolled_back')
++        self.assertEqual(engine.items['old']['Name'], '/test-hub')
++        self.assertTrue(engine.items['old']['State']['Running'])
++        self.assertEqual(len(engine.items['old']['Mounts']), 2)
++        self.assertEqual(engine.removed, [])
++
++    def test_enabled_policy_requires_assets_before_cutover(self):
++        dep, store, engine, job = self.enabled()
++        dep.fetch = lambda _: (b'hub', b'MIT')
++        dep.run(job)
++        self.assertEqual(store.get(job['id'])['status'], 'failed')
++        self.assertEqual(list(engine.items), ['old'])
++        self.assertTrue(engine.items['old']['State']['Running'])
++
++    def test_hostconfig_incomplete_mount_inventory_is_rejected(self):
++        dep, _, engine, _ = self.enabled()
++        self.install_mounts(engine)
++        host = engine.items['old']['HostConfig']
++        host['Binds'] = []
++        host['Mounts'] = [{'Type': 'volume', 'Target': '/hub/private', 'Source': 'test-private',
++            'ReadOnly': False, 'VolumeOptions': {'NoCopy': True}}]
++        with self.assertRaises(ValueError): dep.check_target()
++
++
++class TerminalPolicyTests(unittest.TestCase):
++    def definition(self):
++        return {'id': 'pi-web-hub', 'target': 'pi-web-hub', 'kind': 'hub', 'mode': 'auto',
++            'source': {'repository': 'swordfate3/pi-web-ui', 'auto_branch': 'main'},
++            'policy': {'target': 'pi-web-hub', 'base_image': 'sha256:' + 'a' * 64,
++                'private_volume': 'hub-private', 'runtime_volume': 'hub-runtime',
++                'health_port': 16181, 'health_timeout': 40}}
++
++    def test_only_true_optin_is_accepted_and_old_shape_stays_unchanged(self):
++        value = self.definition()
++        self.assertNotIn('terminal_provider', validate_service(value)['policy'])
++        for bad in (False, 'true', 1, {}, None):
++            value['policy']['terminal_provider'] = bad
++            with self.assertRaises(ValueError): validate_service(value)
++        value['policy']['terminal_provider'] = True
++        self.assertIs(validate_service(value)['policy']['terminal_provider'], True)
++
++    def test_old_job_snapshot_survives_administrator_optin_registration(self):
++        with tempfile.TemporaryDirectory() as directory:
++            store = Store(Path(directory))
++            try:
++                old = store.register_service(self.definition())
++                job = store.request_version('pi-web-hub', {'commit': test_deploy.SHA})
++                definition = self.definition()
++                definition['policy']['terminal_provider'] = True
++                new = store.register_service(definition)
++                self.assertNotEqual(old['policy_hash'], new['policy_hash'])
++                self.assertNotIn('terminal_provider', store.get(job['id'])['snapshot']['policy'])
++            finally: store.close()
++
++    def test_optin_cannot_expose_provider_volume_through_rw_state_role(self):
++        for name in ('pi-terminal-provider-ipc', 'pi-terminal-provider-credentials'):
++            for role in ('private_volume', 'runtime_volume'):
++                for enabled in (False, True):
++                    with self.subTest(name=name,role=role,enabled=enabled):
++                        value = self.definition()
++                        value['policy'][role] = name
++                        if enabled: value['policy']['terminal_provider'] = True
++                        with self.assertRaises(ValueError): validate_service(value)
+--- /dev/null
++++ b/pi-deploy-gate/tests/docker_single_hub_terminal.py
+@@ -0,0 +1,142 @@
++"""Real daemon migration/rollback; namespace provider volumes in a test adapter.
++
++No production volume, credential, terminal target or service is mounted/changed.
++The adapter translates only the two closed source-volume names at Docker's edge;
++all policy/deployer/artifact/state logic is production code.
++"""
++import copy
++import json
++from pathlib import Path
++import secrets
++import socket
++import sys
++import tempfile
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++from gate.deploy import Deployer
++from gate.engine import Engine
++from gate.store import Store
++
++REPO = Path('/home/fate/gitproject/codex_project_v2/pi-web-ui')
++
++
++class IsolatedEngine(Engine):
++    def __init__(self, mapping):
++        super().__init__()
++        self.mapping = mapping
++
++    def create(self, name, body):
++        value = copy.deepcopy(body)
++        value['HostConfig']['Binds'] = [self.mapping.get(b.split(':')[0], b.split(':')[0]) + ':' + b.split(':', 1)[1]
++                                       for b in value['HostConfig'].get('Binds', [])]
++        return super().create(name, value)
++
++    def inspect(self, key, timeout=None):
++        value = super().inspect(key, timeout)
++        if value:
++            inverse = {v: k for k, v in self.mapping.items()}
++            for mount in value.get('Mounts', []):
++                if mount.get('Name') in inverse: mount['Name'] = inverse[mount['Name']]
++            host = value['HostConfig']
++            host['Binds'] = [inverse.get(b.split(':')[0], b.split(':')[0]) + ':' + b.split(':', 1)[1]
++                             for b in host.get('Binds') or []]
++        return value
++
++
++def main():
++    raw = Engine()
++    prefix = 'pi-terminal-migration-it-' + secrets.token_hex(5)
++    mapping = {'pi-terminal-provider-ipc': prefix + '-ipc',
++               'pi-terminal-provider-credentials': prefix + '-credentials'}
++    engine = IsolatedEngine(mapping)
++    volumes = [prefix + '-private', prefix + '-runtime', *mapping.values()]
++    for name in volumes:
++        raw.call('POST', '/volumes/create', {'Name': name, 'Labels': {'pi.terminal-migration-test': prefix}})
++    sock = socket.socket()
++    sock.bind(('127.0.0.1', 0))
++    port = sock.getsockname()[1]
++    sock.close()
++    base = json.loads((Path(__file__).resolve().parents[1] / 'policy.json').read_text())['base_image']
++    policy = dict(target=prefix, private_volume=volumes[0], runtime_volume=volumes[1],
++                  health_port=port, health_timeout=20, base_image=base)
++    source = (REPO / 'dist/hub/pi-web-hub.mjs').read_bytes()
++    license = (REPO / 'LICENSE').read_bytes()
++    assets = {name: (REPO / 'dist/terminal' / name).read_bytes() for name in ('index.html', 'app.js', 'app.css')}
++    before = {item['Id']: item['State']['StartedAt'] for item in
++              [raw.inspect(name) for name in ['pi-web-hub', 'pi-deploy-gate']]}
++    containers = []
++    with tempfile.TemporaryDirectory(prefix=prefix) as state:
++        store = Store(Path(state))
++        try:
++            setup = "const fs=require('fs');for(const p of ['/hub/private','/run/pi-web-hub']){fs.chmodSync(p,0o700);fs.chownSync(p,1000,1000)}"
++            identifier = engine.create(prefix + '-setup', {'Image': base, 'User': '0:0',
++                'Entrypoint': ['node'], 'Cmd': ['-e', setup],
++                'HostConfig': {'NetworkMode': 'none', 'ReadonlyRootfs': True, 'CapDrop': ['ALL'], 'CapAdd': ['CHOWN'],
++                    'Binds': [volumes[0]+':/hub/private:rw', volumes[1]+':/run/pi-web-hub:rw']}})
++            containers.append(identifier)
++            engine.start(identifier)
++            assert raw.call('POST', '/containers/' + identifier + '/wait?condition=not-running')['StatusCode'] == 0
++            raw.remove(identifier)
++            containers.remove(identifier)
++            initialize = "const fs=require('fs'),s=require('child_process').spawnSync;let r=s(process.execPath,['/opt/pi-web-ui/dist/hub/pi-web-hub.mjs','init','--config','/hub/private/config.json','--port','%d'],{stdio:'ignore'});if(r.status!==0)process.exit(1);let p=JSON.parse(fs.readFileSync('/hub/private/config.json'));p.runtimeDir='/run/pi-web-hub';fs.writeFileSync('/hub/private/config.json',JSON.stringify(p),{mode:0o600});" % port
++            identifier = engine.create(prefix + '-init', {'Image': base, 'User': '1000:1000',
++                'Entrypoint': ['node'], 'Cmd': ['-e', initialize],
++                'HostConfig': {'NetworkMode': 'none', 'ReadonlyRootfs': True, 'CapDrop': ['ALL'],
++                    'Binds': [volumes[0]+':/hub/private:rw', volumes[1]+':/run/pi-web-hub:rw']}})
++            containers.append(identifier)
++            engine.start(identifier)
++            assert raw.call('POST', '/containers/' + identifier + '/wait?condition=not-running')['StatusCode'] == 0
++            raw.remove(identifier)
++            containers.remove(identifier)
++            deployer = Deployer(store, engine, policy, fetch=lambda _: (source, license, assets))
++            original = engine.create(prefix, deployer.target_body(base, 'fixture-initial'))
++            containers.append(original)
++            engine.start(original)
++            assert engine.healthy(original, 30), 'isolated original unhealthy'
++            assert len(raw.inspect(original)['Mounts']) == 2
++            policy['terminal_provider'] = True
++            first = store.request('1' * 40)
++            store.update(first['id'], status='deploying')
++            deployer.run(first)
++            done = store.get(first['id'])
++            assert done['status'] == 'deployed', json.dumps(done)
++            candidate = done['new_id']
++            containers.append(candidate)
++            actual = raw.inspect(candidate)
++            assert len(actual['Mounts']) == 4
++            assert all(not m['RW'] for m in actual['Mounts'] if m['Name'] in mapping.values())
++            assert deployer.check_target()['Id'] == candidate
++            print('PASS real two-to-four readonly migration and strict future target validation', flush=True)
++            deployer.restore(done)
++            assert store.get(first['id'])['status'] == 'rolled_back'
++            assert raw.inspect(prefix)['Id'] == original and len(raw.inspect(original)['Mounts']) == 2
++            print('PASS explicit rollback restores exact original two-volume container', flush=True)
++            # Fail real configured health, after the disposable probe passed.
++            marker = b'if (pathname === "/api/sessions") {'
++            assert source.count(marker) == 1
++            broken = source.replace(marker, marker + b"if(process.argv.includes('/hub/private/config.json')){response.writeHead(503);response.end();return;}")
++            deployer.fetch = lambda _: (broken, license, assets)
++            policy['health_timeout'] = 3
++            second = store.request('2' * 40)
++            store.update(second['id'], status='deploying')
++            deployer.run(second)
++            failed = store.get(second['id'])
++            if failed.get('new_id'): containers.append(failed['new_id'])
++            assert failed['status'] == 'rolled_back', json.dumps(failed)
++            assert raw.inspect(prefix)['Id'] == original
++            assert engine.healthy(original, 20)
++            print('PASS failed four-volume candidate restores original Hub automatically', flush=True)
++            for identifier, started in before.items():
++                assert raw.inspect(identifier)['State']['StartedAt'] == started
++            print('PASS production Gate/Hub untouched throughout isolated test', flush=True)
++        finally:
++            store.close()
++            for identifier in reversed(containers):
++                if raw.inspect(identifier):
++                    if raw.inspect(identifier)['State']['Running']: raw.stop(identifier)
++                    raw.remove(identifier)
++            for name in reversed(volumes):
++                raw.call('DELETE', '/volumes/' + name)
++
++
++if __name__ == '__main__': main()
+--- a/pi-deploy-gate/terminal-policy.json
++++ b/pi-deploy-gate/terminal-policy.json
+@@ -1 +1 @@
+-{"enabled": false, "images": []}
++{"enabled":true,"images":["sha256:3603564462e1b5b6f3912239aff3605074c2b1f430f068d58809e5b7f242501d"]}
+--- a/pi-docker/scripts/pi-hub-control.py
++++ b/pi-docker/scripts/pi-hub-control.py
+@@ -43,8 +43,11 @@
+         item = items[0]
+         config, host = item['Config'], item['HostConfig']
+         mounts = item['Mounts']
+-        expected = {('/hub/private', 'pi-web-hub-private'),
+-                    ('/run/pi-web-hub', 'pi-web-hub-runtime')}
++        expected = {('/hub/private', 'pi-web-hub-private'): True,
++                    ('/run/pi-web-hub', 'pi-web-hub-runtime'): True}
++        if len(mounts) == 4:
++            expected.update({('/run/pi-terminal-provider', 'pi-terminal-provider-ipc'): False,
++                             ('/run/pi-terminal-credentials', 'pi-terminal-provider-credentials'): False})
+         if (item['Name'] != '/' + NAME or not HEX_ID.fullmatch(item['Id']) or
+                 not IMAGE_ID.fullmatch(item['Image']) or config['User'] != '1000:1000' or
+                 config['Entrypoint'] != ['node', '/opt/pi-web-ui/dist/hub/pi-web-hub.mjs'] or
+@@ -55,9 +58,10 @@
+                 host.get('RestartPolicy') != {'Name': 'unless-stopped', 'MaximumRetryCount': 0} or
+                 host.get('CapDrop') != ['ALL'] or
+                 host.get('SecurityOpt') not in (['no-new-privileges'], ['no-new-privileges:true']) or
+-                len(mounts) != 2 or
+-                {(m['Destination'], m.get('Name')) for m in mounts} != expected or
+-                any(m['Type'] != 'volume' or not m['RW'] or m.get('SubPath') or m.get('Subpath')
++                len(mounts) != len(expected) or
++                {(m['Destination'], m.get('Name')) for m in mounts} != expected.keys() or
++                any(m['Type'] != 'volume' or m['RW'] is not expected[(m['Destination'], m.get('Name'))] or
++                    m.get('Propagation', '') not in ('', 'rprivate') or m.get('SubPath') or m.get('Subpath')
+                     for m in mounts)):
+             raise ValueError()
+         return item
+@@ -143,9 +147,10 @@
+ def render_compose(item):
+     env = {key: value for key, value in os.environ.items() if not key.startswith('COMPOSE_')}
+     env.update(COMPOSE_DISABLE_ENV_FILE='1', PI_HUB_IMAGE=item['Image'])
++    overlay = ['-f', str(ROOT / 'compose.hub-terminal.yaml')] if len(item['Mounts']) == 4 else []
+     return docker('compose', '--project-name', NAME, '--project-directory', str(ROOT),
+                   '--env-file', '/dev/null', '-f', str(ROOT / 'compose.hub.yaml'),
+-                  'config', '--format', 'json', env=env)
++                  *overlay, 'config', '--format', 'json', env=env)
+ 
+ 
+ def wait_healthy(original):
+--- a/pi-docker/tests/test_hub_control.py
++++ b/pi-docker/tests/test_hub_control.py
+@@ -24,6 +24,7 @@
+         if helper.exists():
+             shutil.copy2(helper,self.install/'pi-docker/scripts/pi-hub-control.py')
+         shutil.copy2(ROOT/'compose.hub.yaml', self.install/'pi-docker/compose.hub.yaml')
++        shutil.copy2(ROOT/'compose.hub-terminal.yaml', self.install/'pi-docker/compose.hub-terminal.yaml')
+         self.fake=self.root/'docker'
+         shutil.copy2(ROOT/'tests/fixtures/hub-control-docker',self.fake)
+         self.fake.chmod(0o700)
+@@ -74,6 +75,40 @@
+         self.assertEqual(json.loads(result.stdout)['services']['hub']['image'],'sha256:'+'b'*64)
+         self.assertEqual(self.mutations(),[])
+ 
++    def terminal_mounts(self):
++        self.state['hub']['Mounts'] += [
++            {'Type':'volume','Name':'pi-terminal-provider-ipc','Destination':'/run/pi-terminal-provider','RW':False},
++            {'Type':'volume','Name':'pi-terminal-provider-credentials','Destination':'/run/pi-terminal-credentials','RW':False}]
++        self.write_state()
++
++    def test_terminal_hub_sync_and_render_keep_exact_image_and_ro_overlay(self):
++        self.terminal_mounts()
++        result=self.run_cli('sync')
++        self.assertEqual(result.returncode,0,result.stderr)
++        result=self.run_cli('config')
++        self.assertEqual(result.returncode,0,result.stderr)
++        compose=[call for call in self.calls() if call[0]=='compose'][-1]
++        self.assertIn(str(self.install/'pi-docker/compose.hub-terminal.yaml'),compose)
++        self.assertEqual(json.loads(result.stdout)['services']['hub']['image'],'sha256:'+'b'*64)
++        self.assertEqual(self.mutations(),[])
++
++    def test_terminal_mount_drift_is_refused_without_docker_mutation(self):
++        self.terminal_mounts()
++        original=json.loads(json.dumps(self.state))
++        for change in ('partial','rw','wrong','propagation','duplicate'):
++            with self.subTest(change=change):
++                self.state=json.loads(json.dumps(original))
++                mounts=self.state['hub']['Mounts']
++                if change=='partial': mounts.pop()
++                if change=='rw': mounts[-1]['RW']=True
++                if change=='wrong': mounts[-1]['Name']='pi-deploy-gate-state'
++                if change=='propagation': mounts[-1]['Propagation']='shared'
++                if change=='duplicate': mounts[-1]=dict(mounts[-2])
++                self.write_state()
++                result=self.run_cli('restart','--confirm')
++                self.assertNotEqual(result.returncode,0)
++                self.assertEqual(self.mutations(),[])
++
+     def test_start_operates_only_on_stopped_exact_hub_id(self):
+         self.state['hub']['State'].update(Status='exited',Running=False,Pid=0)
+         self.write_state()
+--- /dev/null
++++ b/pi-docker/tests/test_terminal_compose_contract.py
+@@ -0,0 +1,29 @@
++"""Run real Compose rendering; no daemon or production state required."""
++import json
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++@unittest.skipUnless(shutil.which('docker'), 'Docker Compose CLI unavailable')
++class TerminalComposeContract(unittest.TestCase):
++    def test_rendered_provider_mounts_are_readonly_and_nocopy(self):
++        env = {k:v for k,v in os.environ.items() if not k.startswith('COMPOSE_')}
++        env.update(COMPOSE_DISABLE_ENV_FILE='1', PI_HUB_IMAGE='sha256:'+'a'*64)
++        result = subprocess.run(['docker', 'compose', '--env-file','/dev/null',
++            '-f',str(ROOT/'compose.hub.yaml'),'-f',str(ROOT/'compose.hub-terminal.yaml'),
++            'config','--format','json'],env=env,capture_output=True,text=True,timeout=15)
++        self.assertEqual(result.returncode,0,result.stderr)
++        config = json.loads(result.stdout)
++        mounts = config['services']['hub']['volumes']
++        self.assertEqual(len(mounts),4)
++        for source,target in (('terminal-ipc','/run/pi-terminal-provider'),
++                              ('terminal-credentials','/run/pi-terminal-credentials')):
++            selected = [m for m in mounts if m['target']==target]
++            self.assertEqual(len(selected),1)
++            self.assertEqual(selected[0],dict(type='volume',source=source,target=target,
++                read_only=True,volume={'nocopy':True}))
+--- a/pi-docker/compose.hub-terminal.yaml
++++ b/pi-docker/compose.hub-terminal.yaml
+@@ -7,10 +7,14 @@
+         source: terminal-ipc
+         target: /run/pi-terminal-provider
+         read_only: true
++        volume:
++          nocopy: true
+       - type: volume
+         source: terminal-credentials
+         target: /run/pi-terminal-credentials
+         read_only: true
++        volume:
++          nocopy: true
+ volumes:
+   terminal-ipc:
+     external: true
+--- /dev/null
++++ b/pi-docker/systemd/pi-web-terminal-tunnel.service
+@@ -0,0 +1,16 @@
++[Unit]
++Description=Pi native terminal loopback reverse tunnel to Aliyun
++StartLimitIntervalSec=0
++
++[Service]
++Type=simple
++ExecStart=/usr/bin/ssh -F /dev/null -N -T -i /home/fate/.config/pi-web/tunnel_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/home/fate/.ssh/known_hosts -o ConnectTimeout=10 -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -R 127.0.0.1:13003:127.0.0.1:16184 pi-web-tunnel@8.138.240.163
++Restart=always
++RestartSec=5
++TimeoutStopSec=10
++NoNewPrivileges=yes
++PrivateTmp=yes
++UMask=0077
++
++[Install]
++WantedBy=default.target

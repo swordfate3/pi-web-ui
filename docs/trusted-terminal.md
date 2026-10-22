@@ -1,5 +1,11 @@
 # Trusted native terminal (explicit opt-in)
 
+Host-specific deployment update (2026-10-22): the user's single existing Hub
+was separately authorized and activated. See the
+[dated rollout, acceptance and rollback record](validation/2026-10-22-single-hub-terminal-deployment/README.md).
+The source/default-off rules below remain the portable package contract, not a
+claim that other installations or physical phones have been validated.
+
 This mode keeps one installed Pi TUI child for both local terminal use and a
 separately authorized browser terminal. It is not an RPC shell, generic container
 exec facility, or a second Pi session. Ordinary browser chat is **read-only from

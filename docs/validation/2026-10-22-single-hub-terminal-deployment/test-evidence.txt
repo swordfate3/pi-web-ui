@@ -1,0 +1,27 @@
+Final installed-source regression, 2026-10-22
+
+Gate: env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s tests
+working directory: /home/fate/docker_files/pi-deploy-gate
+Ran 399 tests in 85.667s
+OK; exit0
+
+Pi host: same unittest command, /home/fate/docker_files/pi-docker
+Ran 146 tests in 33.078s
+OK (skipped=3); exit0
+Skips are the existing opt-in real-Hub and ordinary-production-volume checks.
+
+node scripts/web-dist.mjs
+Source and dist outputs verified (hash consistency only; not trust/authenticity).
+exit0; source and tracked dist unmodified in this rollout.
+
+Real isolated Docker migration/validation/explicit rollback/failed-health rollback:
+tests/docker_single_hub_terminal.py passed before production cutover.
+Disposable test cleanup verified; production Gate/Hub identities unchanged during that test.
+
+Independent scoped review: approved; reviewer independently ran56 focused checks.
+Not a claim that the reviewer reran the full suite or performed live deployment.
+
+Final source patch: forward and reverse dry-run passed for every inventoried file.
+Production-backed browser acceptance: see browser-result.json and screenshots.
+Final read-only production verification: see final-verification.json.
+These checks do not certify physical phone or public authenticated browser WebSocket.

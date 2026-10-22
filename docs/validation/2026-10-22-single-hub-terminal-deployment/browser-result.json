@@ -1,0 +1,8 @@
+{
+  "ok": true,
+  "realBrowser": true,
+  "realWebSocket": true,
+  "writeLease": true,
+  "nativeModelCommand": true,
+  "loggedOut": true
+}

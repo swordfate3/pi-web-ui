@@ -1,0 +1,33 @@
+{
+  "existing_consumers_unchanged": 6,
+  "live_pi_count": 7,
+  "additional_user_containers_untouched": 1,
+  "acceptance_container_removed": true,
+  "settings_models_unchanged": true,
+  "ordinary_image_unchanged": true,
+  "services": {
+    "pi-deploy-gate": {
+      "Id": "586d123f8caa35dde2cf00f8379a6c1220f04217e5d03cdc60d405888e79cb36",
+      "Image": "sha256:8e572f3f6901ea77db75783302abdfdfd4e0caca671d6ebdf195be2fd2d4f965"
+    },
+    "pi-web-hub": {
+      "Id": "313617529f0028c29853537e572d5f73e49af9b32c4453a8ea597059ca6c8842",
+      "Image": "sha256:1bc4e71622c17c178c4760dffb3eff0eda61512ae6e5399db8c151150209cd43"
+    }
+  },
+  "exact_readonly_provider_mounts": true,
+  "gate_idle": true,
+  "reservation_clear": true,
+  "live_terminal_preflight": true,
+  "tunnels": {
+    "pi-web-tunnel.service": "active",
+    "pi-web-admin-tunnel.service": "active",
+    "pi-web-terminal-tunnel.service": "active"
+  },
+  "assets_equal_release": true,
+  "foreign_origin_denied": true,
+  "public_tls_verified": true,
+  "public_unauthenticated_status": 401,
+  "public_authenticated_browser_not_tested": true,
+  "physical_phone_not_tested": true
+}

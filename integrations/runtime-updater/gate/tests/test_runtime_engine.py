@@ -12,9 +12,10 @@ class DockerAPI:
         self.calls = []
         self.next_id = 1
         self.logs = {}
+        self.image_env = []
 
     def image_info(self, image, timeout=None):
-        return {'Id': image, 'Config': {}}
+        return {'Id': image, 'Config': {'Env': list(self.image_env)}}
 
     def inspect(self, key, timeout=None):
         item = self.items.get(key) or next((item for item in self.items.values() if item['Name'] == key), None)
@@ -33,6 +34,9 @@ class DockerAPI:
                 'Mounts': [{'Type': 'volume', 'Name': 'pi-runtime', 'Destination': '/home/node/.local',
                             'Source': '/var/lib/docker/volumes/pi-runtime/_data', 'RW': True}],
                 'State': {'Status': 'created', 'Running': False}}
+            merged = dict(e.split('=', 1) for e in self.image_env)
+            merged.update(e.split('=', 1) for e in value['Env'])
+            self.items[key]['Config']['Env'] = [k + '=' + v for k, v in merged.items()]
             return {'Id': key}
         if path.startswith('/containers/json?'):
             return [{'Id': key} for key in self.items]

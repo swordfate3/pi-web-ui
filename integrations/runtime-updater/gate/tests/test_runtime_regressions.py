@@ -14,6 +14,15 @@ class RuntimeRegressions(unittest.TestCase):
         manager.submit({'version': '1.3.0', 'idempotency_key': base.KEY})
         return manager
 
+    def seed_validated_refresh(self, manager):
+        # Recovery tests begin after synthetic helper validation, not a legacy
+        # job whose version string is accidentally treated as authorization.
+        job = manager._get(base.KEY)
+        candidate = self.install.candidate(job)
+        job['candidate'] = candidate
+        manager._update(base.KEY, status='running', stage='refreshing', candidate=candidate,
+                        evidence=self.install.evidence(job))
+
     def test_new_official_target_can_be_requested_without_activating_before_approval(self):
         manager = self.manager('manual')
         job = manager.submit({'version': '1.4.0', 'idempotency_key': base.KEY})
@@ -74,7 +83,7 @@ class RuntimeRegressions(unittest.TestCase):
     def test_stale_retry_observes_busy_to_idle_transition_without_repeating_unchanged_state(self):
         manager = self.submit()
         self.docker.states['2' * 64]['version'] = '1.3.0'
-        self.pump(3)  # prepare, activate, enqueue first refresh
+        self.pump(4)  # prepare, validate, activate, enqueue first refresh
         child = self.gate.lifecycle._jobs()[0]
         self.gate.lifecycle._update(child['id'], status='stale', stage='execution_precondition_changed')
         self.pump(3)
@@ -97,7 +106,7 @@ class RuntimeRegressions(unittest.TestCase):
 
     def test_parent_resolution_cannot_bypass_uninspected_child(self):
         manager = self.submit()
-        manager._update(base.KEY, status='running', stage='refreshing')
+        self.seed_validated_refresh(manager)
         self.pump(1)
         child = self.gate.lifecycle._jobs()[0]
         self.gate.lifecycle._update(child['id'], status='recovery_required', stage='control_outcome_unknown')
@@ -123,7 +132,7 @@ class RuntimeRegressions(unittest.TestCase):
             observed.append(phase)
         self.install.before_start = before_start
         self.pump()
-        self.assertEqual(observed, ['prepare', 'activate'])
+        self.assertEqual(observed, ['prepare', 'validate', 'activate'])
 
     def test_missing_dispatched_helper_is_not_recreated(self):
         manager = self.submit()
@@ -211,7 +220,7 @@ class RuntimeRegressions(unittest.TestCase):
         manager = self.submit()
         state = self.docker.states['1' * 64]
         self.install.failure = True
-        manager._update(base.KEY, status='running', stage='refreshing')
+        self.seed_validated_refresh(manager)
         self.gate.tick()
         self.gate.worker.join(3)
         child = self.gate.lifecycle._jobs()[0]
@@ -223,7 +232,7 @@ class RuntimeRegressions(unittest.TestCase):
 
     def test_confirmed_exited_own_child_can_be_inspected_without_inventing_live_runtime(self):
         manager = self.submit()
-        manager._update(base.KEY, status='running', stage='refreshing')
+        self.seed_validated_refresh(manager)
         self.pump(1)
         child = self.gate.lifecycle._jobs()[0]
         self.gate.lifecycle._update(child['id'], status='recovery_required', stage='control_outcome_unknown')

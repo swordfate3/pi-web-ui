@@ -333,31 +333,34 @@ class PiSupervisor:
         if snapshot is None:
             raise ProtocolError
         result = self.public_snapshot(snapshot)
+        try:
+            result['installed_version'] = self.installed_version()
+        except (OSError, ValueError, ProtocolError):
+            pass  # Unknown display metadata is not inferred from process version.
         if operation is not None:
             result["operation"] = operation
         return result
 
     def installed_version(self) -> str:
-        environment = os.environ.copy()
-        environment["NODE_OPTIONS"] = self.guarded_node_options()
-        for key in ("PI_RUNTIME_CHILD_TOKEN", "PI_RUNTIME_EXTENSION_SOCKET", "PI_RUNTIME_CONTROL_SOCKET"):
-            environment.pop(key, None)
-        completed = subprocess.run(
-            [self.original_argv[0], "--version"],
-            cwd=self.initial_cwd,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise ProtocolError
-        lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-        if len(lines) != 1:
-            raise ProtocolError
-        return bounded_text(lines[0], limit=256)  # type: ignore[return-value]
+        # Display/precondition metadata only. Do not execute an unvalidated
+        # shared entrypoint with the live consumer's model credentials.
+        entry = Path(self.original_argv[0])
+        resolved = entry.resolve(strict=True)
+        for directory in list(resolved.parents)[:8]:
+            manifest = directory / 'package.json'
+            if not manifest.is_file():
+                continue
+            if manifest.stat().st_size > 1024 * 1024:
+                raise ProtocolError
+            value = json.loads(manifest.read_text())
+            version = value.get('version')
+            if (value.get('name') != '@earendil-works/pi-coding-agent' or
+                    not isinstance(version, str) or len(version) > 64 or
+                    not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version)
+                    or entry.resolve(strict=True) != resolved):
+                raise ProtocolError
+            return version
+        raise ProtocolError
 
     def validate_restart_request(self, request: Any) -> str:
         if self.terminal_profile:

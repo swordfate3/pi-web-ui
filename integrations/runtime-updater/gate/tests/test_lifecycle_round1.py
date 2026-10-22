@@ -1,12 +1,9 @@
 """Executable regressions for Task2 R1/R2/R3; no live services."""
 import copy
-import importlib.util
 import json
-import marshal
 import os
 from pathlib import Path
 import runpy
-import struct
 import subprocess
 import sys
 import tempfile
@@ -24,13 +21,18 @@ class InterpreterProvenanceTest(unittest.TestCase):
     def test_writable_substitute_cache_cannot_reach_fixed_control(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / 'cache'
-            with mock.patch.object(sys, 'pycache_prefix', str(cache)):
-                bytecode = Path(importlib.util.cache_from_source(json.__file__))
-            bytecode.parent.mkdir(parents=True)
-            # Valid unchecked-hash pyc at Python's alternate stdlib-cache location.
-            code = compile('print("SUBSTITUTE_CACHE_EXECUTED")', json.__file__, 'exec')
-            bytecode.write_bytes(importlib.util.MAGIC_NUMBER + struct.pack('<I', 1) +
-                                 b'12345678' + marshal.dumps(code))
+            # Build the fixture with the actual control interpreter. The test
+            # runner may be a different Python version with a different stdlib
+            # path, bytecode magic and marshal format.
+            builder = '''import importlib.util, json, marshal, pathlib, struct, sys
+sys.pycache_prefix = sys.argv[1]
+bytecode = pathlib.Path(importlib.util.cache_from_source(json.__file__))
+bytecode.parent.mkdir(parents=True)
+code = compile('print("SUBSTITUTE_CACHE_EXECUTED")', json.__file__, 'exec')
+bytecode.write_bytes(importlib.util.MAGIC_NUMBER + struct.pack('<I', 1) + b'12345678' + marshal.dumps(code))
+'''
+            subprocess.run(['/usr/bin/python3', '-I', '-c', builder, str(cache)],
+                           capture_output=True, text=True, timeout=3, check=True)
             environment = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
                            'PYTHONNOUSERSITE': '1', 'PYTHONSAFEPATH': '1',
                            'PYTHONPYCACHEPREFIX': str(cache)}

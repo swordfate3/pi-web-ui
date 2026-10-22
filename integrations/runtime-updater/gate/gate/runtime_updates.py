@@ -9,6 +9,7 @@ from .lifecycle import Deadline
 from .lifecycle_contract import IMAGE, identifier, snapshot, terminal_profile
 from .registry import fingerprint
 from .runtime_catalog import RegistryUnavailable, RuntimeCatalog, stable_version
+from .runtime_install import checked_candidate, checked_evidence, pinned_release
 from .store import ACTIVE, REQUEST_OPEN, _json
 
 VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
@@ -30,6 +31,14 @@ class RuntimeUpdates:
             return self.runtime_engine
         from .runtime_engine import RuntimeEngine
         return RuntimeEngine(self.gate.lifecycle._engine(), volume=self.gate.runtime_volume)
+
+    def _profile(self, job):
+        # Admission binds local source and policy image identities; it neither
+        # contacts Docker nor executes a candidate before manual approval.
+        if self.runtime_engine is not None:
+            return self.runtime_engine.profile(job)
+        from .runtime_engine import RuntimeEngine
+        return RuntimeEngine.profile(job)
 
     def policy(self):
         with self.store.lock:
@@ -189,6 +198,7 @@ class RuntimeUpdates:
                                status='queued' if policy['mode'] == 'auto' else 'pending',
                                stage='queued_by_policy' if policy['mode'] == 'auto' else 'awaiting_approval',
                                targets=[], created_at=int(time.time() * 1000))
+                    job['profile'] = self._profile(job)
                     self.store.db.execute('INSERT INTO runtime_jobs (id,data) VALUES (?,?)', (key, _json(job)))
                     self.store._append_event('runtime_requested', 'pi-runtime', request=key,
                                              version=value['version'])
@@ -204,6 +214,9 @@ class RuntimeUpdates:
                 not stable_version(job['version']) or release['version'] != job['version'] or
                 fingerprint(release) != job.get('release_hash')):
             raise RuntimeError('pinned runtime release changed or missing')
+        pinned_release(release, job['version'])
+        if job.get('profile') != self._profile(job):
+            raise RuntimeError('runtime execution profile changed')
         if self.policy()['policy_hash'] != job['policy']['policy_hash'] or self.policy()['mode'] == 'disabled':
             raise RuntimeError('runtime policy changed')
 
@@ -218,6 +231,7 @@ class RuntimeUpdates:
     def readiness(self):
         """Read-only trust/readiness projection. Busy generation can wait after submit."""
         consumers = []
+        installed_versions = set()
         life = self.gate.lifecycle
         deadline = Deadline(time, 4)
         try:
@@ -241,11 +255,20 @@ class RuntimeUpdates:
                                for m in checked.get('Mounts') or []):
                         raise RuntimeError('runtime mount mismatch')
                     row['reason'] = 'consumer_not_ready'
-                    state = snapshot(life._status(checked, deadline), run)
+                    observation = life._status(checked, deadline)
+                    state = snapshot(observation, run)
+                    installed = observation.get('installed_version')
+                    if installed is not None:
+                        if not stable_version(installed):
+                            raise RuntimeError('invalid installed version')
+                        installed_versions.add(installed)
                     if not stable_version(state['version']):
                         raise RuntimeError('invalid runtime version')
                     row.update(ready=True, version=state['version'])
-                    if state['busy'] or state['pending'] or not state['idle']:
+                    blocker = self._engine().consumer_blocker(checked, state)
+                    if blocker:
+                        row.update(ready=False, reason=blocker)
+                    elif state['busy'] or state['pending'] or not state['idle']:
                         row['reason'] = 'busy_waits_for_idle'
                     else:
                         row.pop('reason', None)
@@ -253,10 +276,11 @@ class RuntimeUpdates:
                     pass
                 deadline.remaining()
                 consumers.append(row)
-            if self.policy() != policy:
+            if self.policy() != policy or len(installed_versions) > 1:
                 raise RuntimeError('runtime policy changed during readiness')
             return {'status': 'ready' if all(row['ready'] for row in consumers) else 'blocked',
-                    'consumers': consumers}
+                    'consumers': consumers,
+                    **({'installed_version': next(iter(installed_versions))} if installed_versions else {})}
         except Exception:
             return {'status': 'unavailable', 'consumers': []}
 
@@ -269,6 +293,8 @@ class RuntimeUpdates:
 
     def authorize_child(self, child):
         parent = self._get(child['runtime_update_id'])
+        self._fence(parent)
+        checked_evidence(parent.get('evidence'), parent.get('candidate'), parent['release'], parent['profile'])
         if (parent['status'] != 'running' or parent['stage'] not in ('refreshing', 'waiting_for_idle') or
                 parent['policy'] != child['policy'] or child.get('requested_version') != parent['version'] or
                 not any(t.get('restart_id') == child['id'] and t['container_id'] == child['container_id']
@@ -345,6 +371,18 @@ class RuntimeUpdates:
         self._fence(job)
         engine, key = self._engine(), job['id']
         helper = job.get('helpers', {}).get(phase)
+        if phase == 'activate':
+            checked_evidence(job.get('evidence'), job.get('candidate'), job['release'], job['profile'])
+            # Once start intent is durable, reconcile the helper outcome. New
+            # consumer blockers cannot relabel a possible activation as a clean
+            # pre-activation failure or strand it in a readiness wait.
+            if not helper or not helper.get('intent_at'):
+                for item, state in self._inventory(job):
+                    if state is None:
+                        return {'state': 'waiting'}
+                    blocker = engine.consumer_blocker(item, state)
+                    if blocker:
+                        return {'state': 'failed', 'stage': blocker}
         if helper is None:
             identity = engine.create(job, phase)
             job = self._update(key, helpers={**job.get('helpers', {}), phase: {'id': identity}})
@@ -359,7 +397,7 @@ class RuntimeUpdates:
                 latest = self._get(key)
                 if latest != job or latest['status'] != 'running':
                     raise RuntimeError('helper authorization changed')
-                self.store.require_admission()
+                self._fence(latest)
                 helper = {**helper, 'intent_at': int(time.time() * 1000)}
                 job = self._update(key, helpers={**job.get('helpers', {}), phase: helper})
             engine.start(job, phase)
@@ -380,21 +418,32 @@ class RuntimeUpdates:
                         return
                     job = self._update(key, status='running', stage='preparing', helpers={},
                                        install_started_at=int(time.time() * 1000))
-            if job['stage'] not in ('preparing', 'prepared', 'activating'):
+            if job['stage'] not in ('preparing', 'prepared', 'validating', 'validated', 'activating'):
                 # Never replay a legacy installing job using the new protocol.
                 self._update(key, status='recovery_required', stage='installation_outcome_unknown')
                 return
             if job['stage'] == 'prepared':
+                checked_candidate(job.get('candidate'), job['release'])
+                job = self._update(key, stage='validating')
+            if job['stage'] == 'validated':
+                checked_evidence(job.get('evidence'), job.get('candidate'), job['release'], job['profile'])
                 job = self._update(key, stage='activating')
-            phase = 'prepare' if job['stage'] == 'preparing' else 'activate'
+            phase = {'preparing': 'prepare', 'validating': 'validate', 'activating': 'activate'}[job['stage']]
             result = self._drive_helper(job, phase)
             if result.get('state') in ('running', 'waiting'):
                 return
             if result.get('state') == 'failed':
-                self._update(key, status='failed', stage='install_failed')
+                self._update(key, status='failed', stage=result.get('stage', 'install_failed'))
             elif result.get('state') == 'succeeded' and result.get('version') == job['version']:
+                # The result is observed after a side effect; recheck the
+                # policy/profile before accepting it as durable authority.
+                self._fence(self._get(key))
                 if phase == 'prepare':
-                    self._update(key, stage='prepared')
+                    checked_candidate(result.get('candidate'), job['release'])
+                    self._update(key, stage='prepared', candidate=result['candidate'])
+                elif phase == 'validate':
+                    checked_evidence(result.get('evidence'), job['candidate'], job['release'], job['profile'])
+                    self._update(key, stage='validated', evidence=result['evidence'])
                 else:
                     self._update(key, stage='refreshing', installed_version=job['version'])
             else:
@@ -436,7 +485,11 @@ class RuntimeUpdates:
     def _refresh(self, job):
         key, targets = job['id'], job['targets']
         try:
+            self._fence(job)
+            checked_evidence(job.get('evidence'), job.get('candidate'), job['release'], job['profile'])
             current = self._inventory(job)
+            if any(self._engine().consumer_blocker(item, state) for item, state in current if state is not None):
+                raise RuntimeError('source compatibility evidence unavailable')
             visible = {item['Id'] for item, _ in current}
             by_container = {item['Id']: (item, state) for item, state in current}
             # Reconcile lifecycle evidence before considering another restart.

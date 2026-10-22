@@ -7,6 +7,7 @@ import unittest
 from gate.service import Gate
 from gate.runtime_catalog import RuntimeCatalog
 from test_runtime_catalog import release
+from gate.runtime_install import CHECKS, digest
 
 IMAGE = 'sha256:' + 'd' * 64
 KEY = 'e' * 32
@@ -72,11 +73,30 @@ class InstallBoundary:
         self.on_prepare = lambda: None
         self.before_start = lambda job, phase: None
 
+    def profile(self, job):
+        return {'image': job['policy']['images'][0], 'contract': 'synthetic-unit-boundary'}
+
+    def consumer_blocker(self, item, state):
+        # Scheduler fixture only: real RuntimeEngine deliberately blocks legacy
+        # sources until launch/source/restore evidence exists.
+        return None
+
+    @staticmethod
+    def candidate(job):
+        return {'version': job['version'], 'integrity': job['release']['integrity'],
+                'tree_sha256': 'a' * 64, 'previous_target': '../old', 'previous_identity': 'b' * 64}
+
+    @staticmethod
+    def evidence(job):
+        return {'candidate_hash': digest(job['candidate']), 'release_hash': digest(job['release']),
+                'profile_hash': digest(job['profile']), 'node': '24.21.0',
+                'checks': {key: True for key in CHECKS}}
+
     def consumers(self, *, timeout=3):
         return [{'Id': cid} for cid in self.docker.items]
 
     def create(self, job, phase):
-        key = ('f' if phase == 'prepare' else 'a') * 64
+        key = {'prepare': 'f', 'validate': 'b', 'activate': 'a'}[phase] * 64
         self.helpers.setdefault(key, {'State': {'Status': 'created', 'Running': False}, 'phase': phase})
         return key
 
@@ -90,7 +110,7 @@ class InstallBoundary:
         if phase == 'prepare':
             self.starts += 1
             self.on_prepare()
-        else:
+        elif phase == 'activate':
             self.docker.installed = job['version']
         return key
 
@@ -100,7 +120,11 @@ class InstallBoundary:
         if phase is not None and job['helpers'][phase]['id'] not in self.helpers:
             return {'state': 'unknown'}
         if phase == 'prepare':
-            return {'state': 'succeeded', 'version': job['version'], 'changed': False}
+            return {'state': 'succeeded', 'version': job['version'], 'changed': False,
+                    'candidate': self.candidate(job)}
+        if phase == 'validate':
+            return {'state': 'succeeded', 'version': job['version'], 'changed': False,
+                    'evidence': self.evidence(job)}
         if phase is None:
             self.on_prepare()
             self.docker.installed = job['version']

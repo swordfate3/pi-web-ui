@@ -1,9 +1,11 @@
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from test_runtime_security import artifact
 
 
 class RuntimeInstallTest(unittest.TestCase):
@@ -17,6 +19,7 @@ class RuntimeInstallTest(unittest.TestCase):
 
     def test_candidate_is_verified_before_atomic_entrypoint_switch(self):
         install = self.load()
+        data, release = artifact('1.3.0')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             old = root / 'lib/old-pi.js'
@@ -28,16 +31,26 @@ class RuntimeInstallTest(unittest.TestCase):
                 if 'install' in argv:
                     self.assertEqual((root / 'bin/pi').resolve(), old)
                     self.assertIn('--ignore-scripts', argv)
-                    self.assertIn('@earendil-works/pi-coding-agent@1.3.0', argv)
+                    self.assertNotIn('@earendil-works/pi-coding-agent@1.3.0', argv)
                     prefix = Path(argv[argv.index('--prefix') + 1])
                     (prefix / 'bin').mkdir(parents=True)
                     (prefix / 'bin/pi').write_text('new pi')
+                    package = prefix / 'lib/node_modules/@earendil-works/pi-coding-agent'
+                    package.mkdir(parents=True)
+                    (package / 'package.json').write_text(json.dumps({'name': install.PACKAGE, 'version': '1.3.0'}))
                     return subprocess.CompletedProcess(argv, 0)
-                return subprocess.CompletedProcess(argv, 0, stdout='1.3.0\n')
-            with patch.object(install.subprocess, 'run', side_effect=run):
-                result = install.install(root, '1.3.0', 'a' * 32)
+                self.fail('candidate must not execute in preparation/activation')
+            with patch.object(install.subprocess, 'run', side_effect=run), patch.object(install, 'download', return_value=data):
+                result = install.install(root, '1.3.0', 'a' * 32, release=release)
                 self.assertEqual((root / 'bin/pi').resolve(), old, 'preparation must not activate')
-                result = install.install(root, '1.3.0', 'a' * 32, 'activate')
+                # Synthetic Gate authority for the atomic activation unit only;
+                # this does not establish real package compatibility.
+                candidate, profile = result['candidate'], {'image': 'synthetic'}
+                evidence = {'candidate_hash': install.digest(candidate), 'release_hash': install.digest(release),
+                            'profile_hash': install.digest(profile), 'node': '24.21.0',
+                            'checks': {key: True for key in install.CHECKS}}
+                result = install.install(root, '1.3.0', 'a' * 32, 'activate', release=release,
+                                         candidate=candidate, evidence=evidence, profile=profile)
             self.assertTrue(result['ok'])
             self.assertEqual((root / 'bin/pi').read_text(), 'new pi')
             self.assertEqual(old.read_text(), 'old package remains available')
@@ -61,11 +74,12 @@ class RuntimeInstallTest(unittest.TestCase):
             root = Path(directory)
             (root / 'bin').mkdir()
             (root / 'bin/pi').symlink_to('../old')
+            (root / 'old').write_text('old')
             (root / '.pi-releases' / ('c' * 32)).mkdir(parents=True)
-            result = install.install(root, '1.3.0', 'c' * 32)
+            result = install.install(root, '1.3.0', 'c' * 32, release=artifact('1.3.0')[1])
             self.assertEqual(result, {'ok': False, 'stage': 'activation_unknown'})
 
-    def test_activation_requires_a_prepared_receipt(self):
+    def test_activation_requires_gate_owned_evidence(self):
         install = self.load()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -76,12 +90,11 @@ class RuntimeInstallTest(unittest.TestCase):
             self.assertFalse(result['ok'])
             self.assertEqual((root / 'bin/pi').readlink(), Path('../old'))
 
-    def test_unaudited_version_refused_before_filesystem_or_npm(self):
+    def test_unpinned_version_refused_before_filesystem_or_npm(self):
         install = self.load()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with self.assertRaises(ValueError):
-                install.install(root, '1.4.0', 'd' * 32)
+            self.assertFalse(install.install(root, '1.4.0', 'd' * 32)['ok'])
             self.assertEqual(list(root.iterdir()), [])
 
 

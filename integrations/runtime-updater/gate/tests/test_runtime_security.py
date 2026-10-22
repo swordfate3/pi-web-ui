@@ -46,10 +46,14 @@ class CandidateSecurity(unittest.TestCase):
         self.calls.append((argv, kwargs))
         self.assertEqual(argv[0], '/usr/local/bin/npm', 'preparation must not execute candidate code')
         self.assertIn('--ignore-scripts', argv)
+        self.assertIn('--fetch-retries=0', argv)
+        self.assertIn('--fetch-timeout=60000', argv)
         self.assertNotIn('@earendil-works/pi-coding-agent@99.2.0', argv,
                          'must install verified bytes, not resolve version a second time')
         self.assertNotIn('SECRET_NPM_TOKEN', kwargs['env'])
-        self.assertNotIn('NODE_OPTIONS', kwargs['env'])
+        self.assertNotIn('evil', kwargs['env'].get('NODE_OPTIONS', ''))
+        self.assertTrue(kwargs['env']['NODE_OPTIONS'].startswith('--require='))
+        self.assertEqual(Path(kwargs['env']['NODE_OPTIONS'][10:]).read_text(), installer.NPM_NETWORK_GUARD)
         prefix = Path(argv[argv.index('--prefix') + 1])
         package = prefix / 'lib/node_modules/@earendil-works/pi-coding-agent'
         (package / 'node_modules/dependency').mkdir(parents=True)
@@ -85,6 +89,18 @@ class CandidateSecurity(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual((self.root / 'bin/pi').readlink(), Path('../old'))
 
+    def test_npm_success_cannot_hide_a_caught_transport_policy_refusal(self):
+        npm = self.npm
+        def swallowed(argv, **kwargs):
+            result = npm(argv, **kwargs)
+            Path(kwargs['env']['NODE_OPTIONS'][10:] + '.denied').write_text('refused')
+            return result
+        with patch.object(installer, 'download', return_value=self.data), \
+                patch.object(installer.subprocess, 'run', side_effect=swallowed):
+            value = installer.install(self.root, '99.2.0', self.task, release=self.release)
+        self.assertFalse(value['ok'])
+        self.assertEqual((self.root / 'bin/pi').readlink(), Path('../old'))
+
     def test_tree_digest_covers_dependencies_modes_and_internal_symlinks(self):
         self.assertTrue(callable(getattr(installer, 'tree_digest', None)))
         (self.root / 'dependency').write_text('first')
@@ -97,6 +113,19 @@ class CandidateSecurity(unittest.TestCase):
         (self.root / 'escape').symlink_to('/etc/passwd')
         with self.assertRaises(ValueError):
             installer.tree_digest(self.root)
+
+    def test_verifiers_own_reads_do_not_count_atime_as_content_drift(self):
+        (self.root / 'dependency').write_text('unchanged dependency')
+        expected = installer.tree_digest(self.root)
+        original = os.fstat
+        def read_updates_atime(fd):
+            value = original(fd)
+            fields = list(value)
+            fields[7] += 100
+            return os.stat_result(fields, {'st_atime_ns': value.st_atime_ns + 100_000_000_000,
+                'st_mtime_ns': value.st_mtime_ns, 'st_ctime_ns': value.st_ctime_ns})
+        with patch.object(installer.os, 'fstat', side_effect=read_updates_atime):
+            self.assertEqual(installer.tree_digest(self.root), expected)
 
     def test_volume_receipt_cannot_authorize_activation(self):
         self.assertIn('release', __import__('inspect').signature(installer.install).parameters)
@@ -132,6 +161,14 @@ class HelperSecurity(unittest.TestCase):
         self.assertEqual(definition['HostConfig']['NetworkMode'], 'none')
         self.assertTrue(definition['HostConfig']['Mounts'][0]['ReadOnly'])
         self.assertEqual(len(definition['HostConfig']['Mounts']), 1)
+
+    def test_extra_healthcheck_cannot_execute_outside_fixed_phase_protocol(self):
+        for phase in ('prepare', 'activate'):
+            identity = self.engine.create(self.job, phase)
+            self.assertEqual(self.docker.items[identity]['Config'].get('Healthcheck'), {'Test': ['NONE']})
+            self.docker.items[identity]['Config']['Healthcheck'] = {'Test': ['CMD', '/usr/bin/true']}
+            with self.assertRaises(RuntimeError):
+                self.engine.inspect(self.job, phase)
 
     def test_changed_helper_environment_is_rejected(self):
         identity = self.engine.create(self.job, 'prepare')

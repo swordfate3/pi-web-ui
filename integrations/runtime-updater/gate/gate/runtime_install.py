@@ -29,9 +29,113 @@ MAX_TREE_ENTRIES = 100000
 CHECKS = ('exact_version', 'node_engine', 'web_extension', 'pty_guard',
           'input_barrier', 'async_taint', 'generation_idle', 'session_restore', 'no_replay')
 
+# Policy for the trusted, image-owned npm implementation, not a sandbox for
+# executing arbitrary JavaScript. Package lifecycle scripts stay disabled.
+# Enforce the destination on *every* request, including redirects selected by
+# npm's fetch stack, and forbid subprocess/alternate native fetch transports.
+NPM_NETWORK_GUARD = r'''
+'use strict';
+const https = require('node:https');
+const http = require('node:http');
+const net = require('node:net');
+const tls = require('node:tls');
+const cp = require('node:child_process');
+const fs = require('node:fs');
+const {urlToHttpOptions} = require('node:url');
+const {syncBuiltinESMExports} = require('node:module');
+const deny = () => {
+  // Optional dependency failures can be caught by npm. The parent must still
+  // reject preparation rather than accepting a partially-policy-denied tree.
+  try {fs.writeFileSync(__filename + '.denied', 'refused', {flag:'wx', mode:0o600});}
+  catch (error) {if (error.code !== 'EEXIST') process.exit(70);}
+  throw new Error('npm origin policy refused transport');
+};
+function destination(options) {
+  if (!options || options.socketPath || options.path && !String(options.path).startsWith('/') ||
+      options.auth || options.rejectUnauthorized === false ||
+      options.hostname && options.hostname !== 'registry.npmjs.org' ||
+      options.host && options.host !== 'registry.npmjs.org' ||
+      !(options.hostname || options.host) ||
+      options.port !== undefined && options.port !== '' && String(options.port) !== '443' ||
+      options.servername && options.servername !== 'registry.npmjs.org' ||
+      options.protocol && options.protocol !== 'https:') deny();
+}
+function options(args) {
+  let value = args[0];
+  if (typeof value === 'string' || value instanceof URL) {
+    const url = new URL(value);
+    if (url.username || url.password || url.protocol !== 'https:') deny();
+    value = {...urlToHttpOptions(url), ...(typeof args[1] === 'object' ? args[1] : {})};
+  }
+  destination(value);
+  for (const [name, content] of Object.entries(value.headers || {})) {
+    if (name.toLowerCase() === 'host' && !['registry.npmjs.org', 'registry.npmjs.org:443'].includes(content)) deny();
+  }
+}
+const request = https.request;
+https.request = function(...args) {options(args); return Reflect.apply(request, this, args);};
+https.get = function(...args) {const result = https.request(...args); result.end(); return result;};
+http.request = http.get = deny;
+const connect = tls.connect;
+tls.connect = function(...args) {
+  let value = args[0];
+  if (typeof value === 'number') value = {port:value, ...(typeof args[1] === 'string' ? {host:args[1]} : args[1])};
+  destination(value);
+  return Reflect.apply(connect, this, args);
+};
+const socketConnect = net.Socket.prototype.connect;
+net.Socket.prototype.connect = function(...args) {
+  const normalized = net._normalizeArgs(args);
+  destination(normalized[0]);
+  return Reflect.apply(socketConnect, this, args);
+};
+for (const name of ['spawn','spawnSync','exec','execSync','execFile','execFileSync','fork']) cp[name] = deny;
+require('node:worker_threads').Worker = class {constructor() {deny();}};
+globalThis.fetch = async () => deny();
+syncBuiltinESMExports();
+'''
+
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def verify_probe_files(profile, root=Path('/usr/local/lib/pi-runtime')):
+    """Never execute a launcher from the writable runtime volume."""
+    if not isinstance(profile, dict):
+        raise ValueError('probe profile missing')
+    root = Path(root)
+    rows = []
+    for parent in (root, *root.parents):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('probe directory is not immutable')
+    for name in sorted(('runtime_probe.py', 'runtime_probe_provider.ts', 'runtime_probe_ws.mjs')):
+        path = root / name
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
+            raise ValueError('probe source is not immutable')
+        rows.append((name, hashlib.sha256(path.read_bytes()).hexdigest()))
+    if hashlib.sha256(json.dumps(rows, separators=(',', ':')).encode()).hexdigest() != profile.get('probe_sha256'):
+        raise ValueError('probe identity changed')
+
+
+def run_probe(request, *, root=Path('/usr/local/lib/pi-runtime'), mode=None):
+    verify_probe_files(request.get('profile'), root)
+    if mode not in (None, '--source', '--restore'):
+        raise ValueError('invalid probe mode')
+    command = ['/usr/bin/python3', '-I', str(root / 'runtime_probe.py')]
+    if mode:
+        command.append(mode)
+    outcome = subprocess.run(command, input=json.dumps(request, sort_keys=True, separators=(',', ':')),
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=260, check=True,
+        env={'HOME': '/tmp', 'PATH': '/usr/local/bin:/usr/bin:/bin'}, cwd='/tmp')
+    if len(outcome.stdout) > 16384:
+        raise ValueError('probe response exceeds bound')
+    value = json.loads(outcome.stdout)
+    if not isinstance(value, dict) or value.get('ok') is not True:
+        raise ValueError('probe refused')
+    return value
 
 
 def pinned_release(value, version):
@@ -116,6 +220,13 @@ def tree_digest(root):
     result = hashlib.sha256()
     count, total = 0, 0
 
+    def identity(value):
+        # Reading a file or enumerating a directory may update atime. Keep
+        # inode/mode/link/size and high resolution mutation times, never atime.
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                value.st_uid, value.st_gid, value.st_size,
+                value.st_mtime_ns, value.st_ctime_ns)
+
     def walk(directory):
         nonlocal count, total
         before = directory.stat(follow_symlinks=False)
@@ -138,11 +249,11 @@ def tree_digest(root):
                 content = hashlib.sha256()
                 fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW)
                 with os.fdopen(fd, 'rb') as stream:
-                    if os.fstat(stream.fileno()) != info:
+                    if identity(os.fstat(stream.fileno())) != identity(info):
                         raise ValueError('candidate changed')
                     while chunk := stream.read(65536):
                         content.update(chunk)
-                    if os.fstat(stream.fileno()) != info:
+                    if identity(os.fstat(stream.fileno())) != identity(info):
                         raise ValueError('candidate changed')
                 record += ['file', info.st_size, content.hexdigest()]
             else:
@@ -150,9 +261,9 @@ def tree_digest(root):
             result.update(json.dumps(record, separators=(',', ':')).encode() + b'\n')
             if stat.S_ISDIR(info.st_mode):
                 walk(entry)
-            if entry.lstat() != info:
+            if identity(entry.lstat()) != identity(info):
                 raise ValueError('candidate changed')
-        if directory.stat(follow_symlinks=False) != before:
+        if identity(directory.stat(follow_symlinks=False)) != identity(before):
             raise ValueError('candidate changed')
 
     walk(root)
@@ -232,14 +343,20 @@ def install(prefix, version, task, action='prepare', *, release=None, candidate=
                 with tempfile.TemporaryDirectory(prefix='pi-runtime-npm-') as scratch:
                     artifact = Path(scratch) / 'official.tgz'
                     artifact.write_bytes(data)
+                    guard = Path(scratch) / 'npm-origin.cjs'
+                    guard.write_text(NPM_NETWORK_GUARD)
                     environment = {'HOME': scratch, 'PATH': '/usr/local/bin:/usr/bin:/bin',
                         'NPM_CONFIG_USERCONFIG': '/dev/null', 'NPM_CONFIG_GLOBALCONFIG': scratch + '/globalrc',
-                        'NPM_CONFIG_CACHE': scratch + '/cache', 'NPM_CONFIG_PREFIX': str(directory)}
+                        'NPM_CONFIG_CACHE': scratch + '/cache', 'NPM_CONFIG_PREFIX': str(directory),
+                        'NODE_OPTIONS': '--require=' + str(guard)}
                     command = ['/usr/local/bin/npm', '--prefix', str(directory), 'install', '-g',
                                '--ignore-scripts', '--min-release-age=0', '--no-audit', '--no-fund',
+                               '--fetch-retries=0', '--fetch-timeout=60000',
                                '--registry=' + REGISTRY, str(artifact)]
                     subprocess.run(command, env=environment, cwd=scratch, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=840, check=True)
+                    if Path(str(guard) + '.denied').exists():
+                        raise ValueError('npm transport policy violation')
                 package = directory / 'lib/node_modules' / PACKAGE / 'package.json'
                 if not package.resolve(strict=True).is_relative_to(directory.resolve(strict=True)):
                     raise ValueError('package escapes candidate')
@@ -261,10 +378,18 @@ def install(prefix, version, task, action='prepare', *, release=None, candidate=
             if action == 'prepare':
                 return {'ok': True, 'version': version, 'changed': False, 'candidate': candidate}
             if action == 'validate':
-                # No image-owned real behavioral probe is supplied yet. In
-                # particular, neither --version nor an env/volume receipt may
-                # manufacture the checks required by checked_evidence().
-                return {'ok': False, 'stage': 'compatibility_probe_unavailable'}
+                if not isinstance(profile, dict):
+                    return {'ok': False, 'stage': 'compatibility_probe_unavailable'}
+                try:
+                    value = run_probe({'task': task, 'release': release, 'candidate': candidate, 'profile': profile})
+                    checked_evidence(value.get('evidence'), candidate, release, profile)
+                    if (set(value) != {'ok', 'version', 'changed', 'evidence'} or value['changed'] is not False
+                            or value['version'] != version or candidate['tree_sha256'] != tree_digest(directory)
+                            or previous_identity != entry_identity(entry)):
+                        raise ValueError('probe binding changed')
+                    return value
+                except Exception:
+                    return {'ok': False, 'stage': 'compatibility_probe_failed'}
             checked_evidence(evidence, candidate, release, profile)
             link = entry.parent / ('.pi-update-' + task)
             link.symlink_to(executable)

@@ -12,7 +12,11 @@ import {
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
-import { type ExtensionAPI, VERSION } from "@earendil-works/pi-coding-agent";
+import {
+  CURRENT_SESSION_VERSION,
+  type ExtensionAPI,
+  VERSION,
+} from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   const directory = process.env.PI_RUNTIME_PROBE_STATE;
@@ -100,6 +104,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     record("session_start", {
       version: VERSION,
+      session_format: CURRENT_SESSION_VERSION,
       node: process.versions.node,
       executable: realpathSync(process.execPath),
       cli: realpathSync(process.argv[1]),

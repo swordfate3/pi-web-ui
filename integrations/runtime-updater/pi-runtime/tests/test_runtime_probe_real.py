@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 RUNTIME = Path(__file__).resolve().parents[1]
@@ -81,6 +82,38 @@ class RealProbeTests(unittest.TestCase):
             entry = entry['pi'] if isinstance(entry, dict) else entry
             self.assertEqual(os.readlink(copied / 'bin/pi'),
                              os.path.relpath(copied / package_path / entry, copied / 'bin'))
+        starts = probe.observations(work / 'restore/observations.jsonl')
+        capability = [row['session_format'] for row in starts if row.get('event') == 'session_start']
+        self.assertEqual(len(capability), 1)
+        self.assertIs(type(capability[0]), int)
+        header, history = original.split(b'\n', 1)
+        header = json.loads(header)
+        self.assertLessEqual(header['version'], capability[0])
+        # A real selected SDK may silently open a future header unchanged.
+        # Change only the format number; keep the same history and snapshot.
+        with tempfile.TemporaryDirectory(prefix='pi-probe-future-format-', dir='/tmp') as temporary:
+            directory = Path(temporary)
+            header['version'] = max(999, capability[0] + 1)
+            future = json.dumps(header, separators=(',', ':')).encode() + b'\n' + history
+            capture = directory / 'session.jsonl'
+            capture.write_bytes(future)
+            scratch = directory / 'work'
+            scratch.mkdir(mode=0o700)
+            incompatible = {**request, 'session_path': str(capture), 'workdir': str(scratch)}
+            result = subprocess.run(['/usr/bin/python3', '-I', str(RUNTIME / 'runtime_probe.py'), '--restore'],
+                                    input=json.dumps(incompatible), text=True, capture_output=True,
+                                    env={'HOME': '/tmp', 'PATH': '/usr/local/bin:/usr/bin:/bin'}, timeout=255)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout), {'ok': False, 'stage': 'compatibility_probe_failed'})
+            self.assertEqual(result.stderr, '')
+            self.assertEqual(capture.read_bytes(), future)
+            opened = scratch / 'restore/session.jsonl'
+            if opened.exists():
+                self.assertEqual(opened.read_bytes(), future)
+            rows = probe.observations(scratch / 'restore/observations.jsonl')
+            self.assertFalse(any(row.get('event') in ('provider_call', 'tool_call') for row in rows))
+            self.assertEqual(Path(request['session_path']).read_bytes(), original)
+            self.assertEqual(value['candidate_tree_sha256'], probe.tree_digest(source))
 
     @unittest.skipUnless(os.environ.get('PI_RUNTIME_PROBE_SOURCE_REQUEST'), 'controller measured source required')
     def test_real_source_uses_measured_package_and_observes_all_nine_checks(self):

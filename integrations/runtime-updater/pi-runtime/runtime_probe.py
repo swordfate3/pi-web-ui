@@ -773,6 +773,7 @@ def run_restore(candidate_prefix, session_path, expected, workdir):
     require(isinstance(header, dict) and header.get('type') == 'session' and
             header.get('id') == expected_fields['session_id'] and header.get('cwd') == expected_fields['cwd'],
             'session_header')
+    require(type(header.get('version')) is int and 0 < header['version'] <= 2**53 - 1, 'restore_format')
     source_hash = copy_runtime(Path(candidate_prefix), workdir / 'candidate')
     candidate = workdir / 'candidate'
     # Bind the whole executed prefix before any candidate invocation. For a
@@ -790,6 +791,12 @@ def run_restore(candidate_prefix, session_path, expected, workdir):
         # Session inspection must work even if a source package is ineligible
         # for refresh. Gate still requires independent source behavioral proof.
         actual = pi.ready(version, node, eligible=False)
+        # A future header may open without migration or any byte changes. Its
+        # format must still be supported by the selected SDK, not inferred from
+        # successful startup, preserved history, or the Pi release number.
+        starts = pi.rows('session_start')
+        sdk_format = starts[0].get('session_format') if len(starts) == 1 else None
+        require(type(sdk_format) is int and header['version'] <= sdk_format <= 2**53 - 1, 'restore_format')
         for key in ('session_id', 'leaf_id', 'provider', 'model', 'thinking'):
             require(actual[key] == expected_fields[key], 'restore_mismatch')
         require(actual['cwd'] == str(pi.cwd) and actual['idle'] is True and actual['pending'] is False,

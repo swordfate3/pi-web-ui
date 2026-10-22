@@ -185,11 +185,18 @@ class ProbeRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(self.probe.ProbeFailure, 'barrier_release_replay'):
             self.drive_barrier('leaf', replay_on='fresh')
 
-    def drive_restore(self, mutate=None, *, measured=False):
+    def drive_restore(self, mutate=None, *, measured=False, header_version=3, sdk_format=3):
         source = self.runtime(measured=measured)
         source_hash = self.probe.tree_digest(source)
         session = self.root / 'frozen.jsonl'
         self.probe.seed_session(session, '/saved/cwd')
+        header, history = session.read_bytes().split(b'\n', 1)
+        header = json.loads(header)
+        if header_version is None:
+            del header['version']
+        else:
+            header['version'] = header_version
+        session.write_bytes(json.dumps(header).encode() + b'\n' + history)
         frozen = session.read_bytes()
         expected = {'session_id': 'probe-saved-session', 'leaf_id': 'probe-leaf', 'cwd': '/saved/cwd',
                     'provider': 'runtime-probe', 'model': 'probe-model', 'thinking': 'medium'}
@@ -200,6 +207,7 @@ class ProbeRegressionTests(unittest.TestCase):
             # Real initialization makes exactly the private session/runtime
             # files the production driver uses. Only child execution is absent.
             def __enter__(driver):
+                driver.trace.write_text(json.dumps({'event': 'session_start', 'session_format': sdk_format}) + '\n')
                 return driver
 
             def __exit__(driver, *_args):
@@ -238,6 +246,33 @@ class ProbeRegressionTests(unittest.TestCase):
 
     def test_restore_accepts_unchanged_disposable_history_and_measured_package(self):
         self.assertIs(self.drive_restore(measured=True)['ok'], True)
+
+    def test_restore_rejects_future_format_even_when_all_bytes_and_reported_fields_match(self):
+        with self.assertRaisesRegex(self.probe.ProbeFailure, 'restore_format'):
+            self.drive_restore(header_version=999)
+
+    def test_restore_accepts_format_supported_by_actual_sdk_not_a_fixed_format_allowlist(self):
+        self.assertIs(self.drive_restore(header_version=999, sdk_format=1000)['ok'], True)
+
+    def test_restore_rejects_noninteger_header_version_even_when_sdk_opens_it(self):
+        with self.assertRaisesRegex(self.probe.ProbeFailure, 'restore_format'):
+            self.drive_restore(header_version='3')
+
+    def test_restore_rejects_boolean_header_version_even_when_sdk_opens_it(self):
+        with self.assertRaisesRegex(self.probe.ProbeFailure, 'restore_format'):
+            self.drive_restore(header_version=True)
+
+    def test_restore_rejects_missing_header_version_even_when_sdk_opens_it(self):
+        with self.assertRaisesRegex(self.probe.ProbeFailure, 'restore_format'):
+            self.drive_restore(header_version=None)
+
+    def test_restore_rejects_uninspectable_selected_sdk_format(self):
+        with self.assertRaisesRegex(self.probe.ProbeFailure, 'restore_format'):
+            self.drive_restore(sdk_format=None)
+
+    def test_restore_rejects_boolean_selected_sdk_format(self):
+        with self.assertRaisesRegex(self.probe.ProbeFailure, 'restore_format'):
+            self.drive_restore(sdk_format=True)
 
     def test_restore_rejects_dropped_history_with_matching_reported_leaf_and_settings(self):
         def truncate(driver):

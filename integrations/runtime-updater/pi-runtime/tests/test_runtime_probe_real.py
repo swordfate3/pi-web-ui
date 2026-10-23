@@ -69,7 +69,11 @@ class RealProbeTests(unittest.TestCase):
             'session_id', 'leaf_id', 'cwd', 'provider', 'model', 'thinking')})
         self.assertEqual(Path(request['session_path']).read_bytes(), original)
         work = Path(request['workdir'])
-        self.assertEqual((work / 'restore/session.jsonl').read_bytes(), original)
+        opened_header, opened_history = (work / 'restore/session.jsonl').read_bytes().split(b'\n', 1)
+        original_header, original_history = original.split(b'\n', 1)
+        self.assertEqual(json.loads(opened_header), {
+            **json.loads(original_header), 'cwd': str(work / 'restore/workspace')})
+        self.assertEqual(opened_history, original_history)
         source = Path(request['candidate_prefix'])
         copied = work / 'candidate'
         package_path = Path('lib/node_modules/@earendil-works/pi-coding-agent')
@@ -109,7 +113,10 @@ class RealProbeTests(unittest.TestCase):
             self.assertEqual(capture.read_bytes(), future)
             opened = scratch / 'restore/session.jsonl'
             if opened.exists():
-                self.assertEqual(opened.read_bytes(), future)
+                actual_header, actual_history = opened.read_bytes().split(b'\n', 1)
+                self.assertEqual(json.loads(actual_header), {
+                    **header, 'cwd': str(scratch / 'restore/workspace')})
+                self.assertEqual(actual_history, history)
             rows = probe.observations(scratch / 'restore/observations.jsonl')
             self.assertFalse(any(row.get('event') in ('provider_call', 'tool_call') for row in rows))
             self.assertEqual(Path(request['session_path']).read_bytes(), original)

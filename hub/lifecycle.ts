@@ -12,6 +12,7 @@ export type RestartRequest = {
 };
 export type RuntimeTarget = {
   managed: boolean;
+  reason?: "source_evidence_unavailable";
   run_id?: string;
   runtime_id?: string;
   session_id?: string;
@@ -133,7 +134,11 @@ export class GateLifecycle {
   async target(runId: string): Promise<RuntimeTarget> {
     if (!hex(runId)) throw new Error("Invalid lifecycle identity");
     const value = await this.request("GET", `/v1/pi-lifecycle/runs/${runId}`);
-    if (value.managed === false) return { managed: false };
+    if (value.managed === false)
+      return {
+        managed: false,
+        ...(value.reason === "source_evidence_unavailable" ? { reason: "source_evidence_unavailable" as const } : {}),
+      };
     if (
       value.managed !== true ||
       value.run_id !== runId ||

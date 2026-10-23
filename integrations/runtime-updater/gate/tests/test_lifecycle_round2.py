@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from gate.service import Gate
+from test_lifecycle import Gate
 from test_lifecycle import BODY, IMAGE, FakeEngine
 
 

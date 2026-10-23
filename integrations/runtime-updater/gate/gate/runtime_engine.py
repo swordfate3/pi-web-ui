@@ -6,6 +6,7 @@ import time
 import re
 from urllib.parse import quote
 
+from .engine import DockerTimeout
 from .lifecycle_contract import CONTAINER, IMAGE, identifier, source_identity
 from .runtime_install import CHECKS, VERSION, checked_candidate, checked_evidence, digest
 
@@ -86,8 +87,10 @@ class RuntimeEngine:
         return None
 
     def consumers(self, *, timeout=3):
-        filters = {'volume': [self.volume], 'status': ['running']}
-        return self.engine.call('GET', '/containers/json?all=0&filters=' +
+        # Paused/restarting containers still own live runtime obligations.
+        # Exact-ID inspection, never a list filter, decides terminal exit.
+        filters = {'volume': [self.volume]}
+        return self.engine.call('GET', '/containers/json?all=1&filters=' +
                                 quote(json.dumps(filters), safe=''), timeout=timeout, limit=1024 * 1024)
 
     def image_environment(self, definition):
@@ -241,7 +244,10 @@ sys.exit(0 if outcome.get('ok') is True else 1)
         return item['Id']
 
     def poll(self, job, phase):
-        item = self.inspect(job, phase)
+        try:
+            item = self.inspect(job, phase)
+        except DockerTimeout:
+            return {'state': 'observation_timeout'}
         if not item:
             return {'state': 'unknown'}
         state = item.get('State', {})
@@ -253,8 +259,11 @@ sys.exit(0 if outcome.get('ok') is True else 1)
             return {'state': 'running'}
         if state.get('Status') != 'exited':
             return {'state': 'unknown'}
-        raw = self.engine.call('GET', '/containers/' + item['Id'] + '/logs?stdout=1&stderr=1',
-                               response_raw=True, limit=8192, timeout=3)
+        try:
+            raw = self.engine.call('GET', '/containers/' + item['Id'] + '/logs?stdout=1&stderr=1',
+                                   response_raw=True, limit=8192, timeout=3)
+        except DockerTimeout:
+            return {'state': 'observation_timeout'}
         output, position = bytearray(), 0
         while position < len(raw):
             header = raw[position:position + 8]

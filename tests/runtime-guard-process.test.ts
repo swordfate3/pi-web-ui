@@ -85,7 +85,7 @@ for (const scenario of [
       const directory=mkdtempSync(path.join(tmpdir(),'runtime-guard-child-'));
       const file=path.join(directory,'saved.jsonl'); writeFileSync(file,'saved');
       const token='a'.repeat(64), operation='b'.repeat(32);
-      let value={run_id:'c'.repeat(32),runtime_id:'r',session_id:'s',leaf_id:null,session_file:file,cwd:directory,version:scenario==='unknown-sdk'?'99.0.0':'1.1.0',idle:true,pending:false,busy:false,provider:'faux',model:'faux',thinking:'off'};
+      let value={run_id:'c'.repeat(32),runtime_id:'r',session_id:'s',leaf_id:null,session_file:file,cwd:directory,version:scenario==='unknown-sdk'?'nightly-unversioned':'1.1.0',idle:true,pending:false,busy:false,provider:'faux',model:'faux',thinking:'off'};
       if(scenario==='oversized') value.cwd='/'+'x'.repeat(20000);
       const socket=path.join(directory,'adapter.sock');
       const adapter=await startRuntimeControl({PI_RUNTIME_RUN_ID:value.run_id,PI_RUNTIME_CHILD_TOKEN:token,PI_RUNTIME_EXTENSION_SOCKET:socket},()=>value);

@@ -146,7 +146,16 @@ class SupervisorFences(unittest.TestCase):
         self.assertEqual(self.launches[0][:2], ['/usr/local/bin/node', str((self.target / 'bin/pi').resolve())])
         self.assertNotIn('prompt', self.extension_actions)
 
-    def test_legacy_same_version_probe_refresh_still_uses_the_existing_contract(self):
+    def test_only_isolated_probe_launcher_can_evaluate_same_version_refresh(self):
+        probe = load('runtime_probe')
+        # Capture the actual probe-owned subclass without starting a server/PTY.
+        captured = []
+        with patch.dict('sys.modules', {'pi_supervisor': self.module}), \
+                patch.dict(os.environ, {'PI_RUNTIME_RUN_ID': 'a' * 32, 'PI_RUNTIME_DIR': str(self.private)}), \
+                patch.object(probe, 'isolation'), \
+                patch.object(self.module.PiSupervisor, 'run', lambda instance: captured.append(type(instance))):
+            probe.probe_supervisor_main(['--', str(self.entry)])
+        self.supervisor.__class__ = captured[0]
         self.capture.close()
         self.supervisor.restore_capture = None
         del self.request['restore_proof']
@@ -156,6 +165,16 @@ class SupervisorFences(unittest.TestCase):
         operation = self.run_restart()
         self.assertEqual((operation['status'], operation['stage']), ('succeeded', 'complete'))
         self.assertEqual(self.launches[0][:2], ['/usr/local/bin/node', str((self.source / 'bin/pi').resolve())])
+
+    def test_probe_launcher_requires_isolation_before_constructing_any_supervisor(self):
+        probe = load('runtime_probe')
+        with patch.dict('sys.modules', {'pi_supervisor': self.module}), \
+                patch.object(probe, 'isolation', side_effect=probe.ProbeFailure('not_isolated')), \
+                patch.object(self.module.PiSupervisor, 'run', return_value=0), \
+                patch.object(self.module.PiSupervisor, '__init__', return_value=None) as constructed:
+            with self.assertRaises(probe.ProbeFailure):
+                probe.probe_supervisor_main(['--', str(self.entry)])
+        constructed.assert_not_called()
 
     def test_shared_link_switch_during_shutdown_never_launches_the_other_release(self):
         selected = self.identity.measure_package(self.target / 'bin/pi')

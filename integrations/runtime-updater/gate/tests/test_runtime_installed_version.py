@@ -21,6 +21,7 @@ class InstalledVersion(unittest.TestCase):
         self.package = self.root / 'lib/node_modules/@earendil-works/pi-coding-agent'
         self.package.mkdir(parents=True)
         (self.package / 'cli.js').write_text('throw new Error("must not execute")')
+        (self.package / 'cli.js').chmod(0o755)
         (self.package / 'package.json').write_text(json.dumps({
             'name': '@earendil-works/pi-coding-agent', 'version': '1.4.0'}))
         (self.root / 'bin').mkdir()
@@ -49,6 +50,24 @@ class InstalledVersion(unittest.TestCase):
         (self.package / 'package.json').write_text(json.dumps({'name': 'impostor', 'version': '1.4.0'}))
         with self.assertRaises(self.module.ProtocolError):
             self.supervisor.installed_version()
+
+    def test_optional_nonobject_metadata_does_not_hide_running_or_operation_status(self):
+        self.supervisor.safe_snapshot = lambda: {'run_id': 'a' * 32, 'runtime_id': 'r',
+            'session_id': 's', 'leaf_id': None, 'version': '1.3.0',
+            'idle': True, 'pending': False, 'busy': False}
+        self.supervisor.operation = {'status': 'failed', 'stage': 'checking_rejected'}
+        for invalid in ([], None, 'not an object', 12):
+            with self.subTest(invalid=invalid):
+                (self.package / 'package.json').write_text(json.dumps(invalid))
+                value = self.supervisor.status()
+                self.assertEqual(value['version'], '1.3.0')
+                self.assertEqual(value['operation']['stage'], 'checking_rejected')
+                self.assertNotIn('installed_version', value)
+
+    def test_bare_pi_entrypoint_resolves_in_launch_path_without_executing_it(self):
+        self.supervisor.original_argv = ['pi']
+        with patch.dict('os.environ', {'PATH': str(self.root / 'bin')}):
+            self.assertEqual(self.supervisor.installed_version(), '1.4.0')
 
 
 class InstalledReadiness(unittest.TestCase):

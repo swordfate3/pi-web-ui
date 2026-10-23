@@ -5,8 +5,9 @@ import secrets
 import threading
 import time
 
+from .engine import DockerTimeout
 from .lifecycle import Deadline
-from .lifecycle_contract import IMAGE, identifier, snapshot, terminal_profile
+from .lifecycle_contract import CONTAINER, IMAGE, identifier, snapshot, terminal_profile
 from .registry import fingerprint
 from .runtime_catalog import RegistryUnavailable, RuntimeCatalog, stable_version
 from .runtime_install import checked_candidate, checked_evidence, digest, pinned_release
@@ -17,6 +18,7 @@ VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z')
 OPEN = ('pending', 'queued', 'running', 'recovery_required')
 SUBMIT_SINGLE_FLIGHT_WAIT = 10
 MAX_SUBMIT_FLIGHTS = 128
+MAX_POLL_TIMEOUT_RETRIES = 3
 
 
 class RuntimeUpdates:
@@ -248,8 +250,10 @@ class RuntimeUpdates:
                        'reason': 'unmanaged_consumer'}
                 try:
                     item = life._transport(deadline, life._engine().inspect, cid)
-                    if item is None or item.get('State', {}).get('Running') is False:
+                    if self._terminal_exit(item, cid):
                         continue
+                    if not self._running_consumer(item):
+                        raise RuntimeError('consumer_not_ready')
                     run = identifier(item.get('Config', {}).get('Labels', {}).get('cn.swordfate.pi.run-id'))
                     row['run_id'] = run
                     checked = life._resolve(run, policy, expected=cid, role='inventory', deadline=deadline)
@@ -354,16 +358,72 @@ class RuntimeUpdates:
         self.gate.worker.start()
         return True
 
+    @staticmethod
+    def _inventory_read(read, *args, **kwargs):
+        # Only direct inventory GETs: never resolution, status, or mutations.
+        for attempt in range(4):
+            try:
+                return read(*args, **kwargs)
+            except DockerTimeout:
+                if attempt == 3:
+                    raise
+
+    @staticmethod
+    def _terminal_exit(item, cid):
+        if not isinstance(cid, str) or not CONTAINER.fullmatch(cid):
+            raise RuntimeError('invalid consumer identity')
+        if item is None:  # Engine.inspect returns None only for exact-ID 404.
+            return True
+        if not isinstance(item, dict) or item.get('Id') != cid:
+            raise RuntimeError('consumer identity changed')
+        state = item.get('State')
+        if not isinstance(state, dict) or type(state.get('Running')) is not bool:
+            raise RuntimeError('consumer state unavailable')
+        return state['Running'] is False and state.get('Status') in ('exited', 'dead')
+
+    @staticmethod
+    def _running_consumer(item):
+        state = item.get('State', {})
+        return (state.get('Running') is True and not state.get('Paused') and
+                not state.get('Restarting') and state.get('Status', 'running') == 'running')
+
+    def _remember_consumers(self, job, inventory):
+        targets = [dict(target) for target in job.get('targets', [])]
+        known = {target['container_id'] for target in targets}
+        for item, _ in inventory:
+            if item['Id'] not in known:
+                targets.append({'container_id': item['Id'],
+                                'run_id': item['Config']['Labels']['cn.swordfate.pi.run-id'],
+                                'status': 'waiting_for_idle'})
+                known.add(item['Id'])
+        if targets != job.get('targets', []):
+            with self.store.lock:
+                if self._get(job['id']) != job or job['status'] not in ('queued', 'running'):
+                    raise RuntimeError('consumer inventory authorization changed')
+                job = self._update(job['id'], targets=targets)
+        return job
+
     def _inventory(self, job):
         engine, life, inventory = self._engine(), self.gate.lifecycle, []
-        candidates = engine.consumers()
+        candidates = self._inventory_read(engine.consumers)
         if not isinstance(candidates, list) or len(candidates) > 128:
             raise RuntimeError('too many runtime consumers')
-        for candidate in candidates:
+        candidates = {candidate['Id']: candidate for candidate in candidates}
+        # Keep the early inventory's identities through activation, crash
+        # recovery and the first refresh. List omission is never an exit grant.
+        for target in job.get('targets', []):
+            if target['status'] != 'exited':
+                candidates.setdefault(target['container_id'], {'Id': target['container_id']})
+        if len(candidates) > 128:
+            raise RuntimeError('too many runtime consumers')
+        for cid in candidates:
+            if not isinstance(cid, str) or not CONTAINER.fullmatch(cid):
+                raise RuntimeError('invalid consumer identity')
+        for candidate in candidates.values():
             if candidate.get('Id') == job.get('helper_id'):
                 continue
-            item = life._engine().inspect(candidate['Id'], timeout=3)
-            if item is None or item.get('State', {}).get('Running') is False:
+            item = self._inventory_read(life._engine().inspect, candidate['Id'], timeout=3)
+            if self._terminal_exit(item, candidate['Id']):
                 continue  # Listed while running, now confirmed exited by immutable ID.
             # A helper retained across Gate restart is reconciled separately.
             if item and item.get('Config', {}).get('Labels', {}).get('cn.swordfate.pi.runtime-update') == job['id']:
@@ -374,8 +434,8 @@ class RuntimeUpdates:
                 item = life._resolve(run, job['policy'], expected=candidate['Id'], deadline=deadline,
                                      role='terminal' if terminal_profile(item) else 'inventory')
             except Exception:
-                latest = life._engine().inspect(candidate['Id'], timeout=3)
-                if latest is None or latest.get('State', {}).get('Running') is False:
+                latest = self._inventory_read(life._engine().inspect, candidate['Id'], timeout=3)
+                if self._terminal_exit(latest, candidate['Id']):
                     continue
                 raise
             if not any(m.get('Name') == self.gate.runtime_volume and m.get('Destination') == '/home/node/.local'
@@ -385,11 +445,14 @@ class RuntimeUpdates:
                 # Explicit inventory-only marker: never a lifecycle snapshot/version.
                 inventory.append((item, {'profile': 'web-terminal-v1'}))
                 continue
+            if not self._running_consumer(item):
+                inventory.append((item, None))
+                continue
             try:
                 state = snapshot(life._status(item, deadline), run)
             except Exception:
-                latest = life._engine().inspect(candidate['Id'], timeout=3)
-                if latest is None or latest.get('State', {}).get('Running') is False:
+                latest = self._inventory_read(life._engine().inspect, candidate['Id'], timeout=3)
+                if self._terminal_exit(latest, candidate['Id']):
                     continue
                 # Trust was established before status. A fresh identity check
                 # distinguishes startup/transport gaps from a changed container.
@@ -414,8 +477,49 @@ class RuntimeUpdates:
             raise RuntimeError('source evidence unavailable')
         return checked_source_evidence(record.get('evidence'), identity, job['profile'])
 
+    def restart_evidence(self, policy, item, state, record_id=None):
+        """Reuse completed Gate evidence, never evaluate on the lifecycle HTTP path.
+
+        Lifecycle policy grants permission; the runtime ledger only supplies
+        measured compatibility and a prepared target for the shared restore path.
+        Runtime policy changes cannot grant or silently bypass this requirement.
+        """
+        profile = self._profile({'policy': policy})
+        records = [self._get(record_id)] if record_id is not None else self._jobs()
+        for record in records:
+            try:
+                if (record['status'] != 'succeeded' or record['profile'] != profile or
+                        record.get('installed_version') != record['version']):
+                    continue
+                pinned_release(record['release'], record['version'])
+                if fingerprint(record['release']) != record.get('release_hash'):
+                    continue
+                checked_candidate(record.get('candidate'), record['release'])
+                checked_evidence(record.get('evidence'), record['candidate'], record['release'], profile)
+                self.source_proof(record, item, state)
+                return record
+            except (KeyError, TypeError, ValueError, RuntimeError):
+                continue
+        raise RuntimeError('source_evidence_unavailable')
+
+    def authorize_restart(self, child):
+        record_id = child.get('runtime_evidence_id')
+        if record_id is None:
+            raise RuntimeError('source_evidence_unavailable')
+        life = self.gate.lifecycle
+        item = life._resolve(child['run_id'], child['policy'], expected=child['container_id'],
+                             expected_hash=child['target_hash'])
+        state = snapshot(life._status(item), child['run_id'])
+        record = self.restart_evidence(child['policy'], item, state, record_id)
+        if (child.get('source_hash') != digest(state['source_identity']) or
+                child.get('requested_version') != record['version'] or
+                child.get('evidence_profile_hash') != digest(record['profile'])):
+            raise RuntimeError('runtime restart source changed')
+        return record
+
     def _ensure_sources(self, job, inventory):
         """Drive one bounded offline source job; resume from durable helper intent."""
+        job = self._remember_consumers(job, inventory)
         identities = {}
         for item, state in inventory:
             if state is None:
@@ -511,13 +615,35 @@ class RuntimeUpdates:
                 helper = {**helper, 'intent_at': int(time.time() * 1000)}
                 job = self._update(key, helpers={**job.get('helpers', {}), phase: helper})
             engine.start(job, phase)
-        return engine.poll(job, phase)
+        helper = job['helpers'][phase]
+        failures = helper.get('poll_timeouts', 0)
+        if type(failures) is not int or not 0 <= failures <= MAX_POLL_TIMEOUT_RETRIES + 1:
+            raise RuntimeError('invalid helper observation counter')
+        if failures > MAX_POLL_TIMEOUT_RETRIES:
+            return {'state': 'unknown'}
+        result = engine.poll(job, phase)
+        timed_out = result == {'state': 'observation_timeout'}
+        if timed_out or failures:
+            # This marker comes only from poll's read-only inspect/logs boundaries.
+            # Never retry create/start/stop or turn an unknown receipt into evidence.
+            failures = failures + 1 if timed_out else 0
+            with self.store.lock:
+                latest = self._get(key)
+                if latest != job or latest['status'] != 'running':
+                    raise RuntimeError('helper observation authorization changed')
+                self._fence(latest)
+                self._update(key, helpers={**job['helpers'], phase: {**helper, 'poll_timeouts': failures}})
+        if timed_out:
+            expired = time.time() - helper['intent_at'] / 1000 > 900
+            return {'state': 'unknown' if expired or failures > MAX_POLL_TIMEOUT_RETRIES else 'running'}
+        return result
 
     def _install(self, job):
         key = job['id']
         try:
             if job['status'] == 'queued':
                 inventory = self._inventory(job)
+                job = self._remember_consumers(job, inventory)
                 with self.store.lock:
                     latest = self._get(key)
                     if latest != job or latest['status'] != 'queued':
@@ -634,6 +760,42 @@ class RuntimeUpdates:
             raise RuntimeError('target source adoption changed')
         return adoption
 
+    def _confirmed_target_exit(self, target):
+        """Inspect the saved immutable ID; filtered inventory absence is not exit."""
+        life, container_id = self.gate.lifecycle, target.get('container_id')
+        item = life._transport(Deadline(time, 4), life._engine().inspect, container_id)
+        if item is None:
+            return True
+        if not isinstance(item, dict) or item.get('Id') != container_id:
+            raise RuntimeError('target exit identity changed')
+        config = item.get('Config')
+        labels = config.get('Labels') if isinstance(config, dict) else None
+        if not isinstance(labels, dict) or labels.get('cn.swordfate.pi.run-id') != target.get('run_id'):
+            raise RuntimeError('target exit identity changed')
+        expected_hash = None
+        adoption = target.get('source_adoption')
+        if adoption is not None:
+            if (not isinstance(adoption, dict) or adoption.get('container_id') != container_id or
+                    adoption.get('restart_id') != target.get('restart_id')):
+                raise RuntimeError('target exit identity changed')
+            expected_hash = adoption.get('target_hash')
+        restart = target.get('restart_id')
+        if restart is not None:
+            child = life._get(restart)
+            if (child.get('container_id') != container_id or
+                    child.get('run_id') != target.get('run_id')):
+                raise RuntimeError('target exit identity changed')
+            if expected_hash is not None and child.get('target_hash') != expected_hash:
+                raise RuntimeError('target exit identity changed')
+            expected_hash = child.get('target_hash')
+        if expected_hash is not None and life._target_hash(item) != expected_hash:
+            raise RuntimeError('target exit identity changed')
+        state = item.get('State')
+        if (not isinstance(state, dict) or not isinstance(state.get('Status'), str) or
+                type(state.get('Running')) is not bool):
+            raise RuntimeError('target exit state unavailable')
+        return state['Running'] is False and state['Status'] in ('exited', 'dead')
+
     def _refresh(self, job):
         key, targets = job['id'], job['targets']
         try:
@@ -642,6 +804,7 @@ class RuntimeUpdates:
             current = self._inventory(job)
             visible = {item['Id'] for item, _ in current}
             by_container = {item['Id']: (item, state) for item, state in current}
+            exit_checked = set()
             # Reconcile lifecycle evidence before considering another restart.
             for target in targets:
                 restart = target.get('restart_id')
@@ -658,7 +821,11 @@ class RuntimeUpdates:
                         elif pair is not None:
                             target.update(status='validating_source', wait_reason='consumer_not_ready')
                         else:
-                            target.update(status='exited')
+                            exit_checked.add(target['container_id'])
+                            if self._confirmed_target_exit(target):
+                                target.update(status='exited')
+                            else:
+                                target.update(status='validating_source', wait_reason='consumer_not_ready')
                     elif child['status'] == 'stale':
                         if child['stage'] == 'restore_pre_stop_failed':
                             target.update(status='blocked', wait_reason='restore_pre_stop_failed')
@@ -692,7 +859,10 @@ class RuntimeUpdates:
                         # Never repeat a restart with unknown or post-stop outcome.
                         self._update(key, targets=targets, status='recovery_required', stage='refresh_requires_inspection')
                         return
-                if target['container_id'] not in visible and target['status'] != 'succeeded':
+                if (target['container_id'] not in visible and
+                        target['status'] not in ('succeeded', 'exited') and
+                        target['container_id'] not in exit_checked and
+                        self._confirmed_target_exit(target)):
                     target.update(status='exited')
             current = list(by_container.values())  # Include the latest retry-proof snapshot.
             # Only a successful, identity-matched child can nominate an unknown
@@ -715,7 +885,12 @@ class RuntimeUpdates:
             outstanding = any('evidence' not in record for record in job.get('sources', {}).values())
             if adopting or outstanding:
                 job = self._update(key, targets=targets, stage='refreshing')
-                if any(by_container[t['container_id']][1] is None for t in adopting):
+                if any(t['container_id'] not in by_container or
+                       by_container[t['container_id']][1] is None for t in adopting):
+                    if outstanding:
+                        # Readiness gates adoption, not already durable offline work.
+                        # Empty inventory reconciles saved sources without nominating any new one.
+                        self._ensure_sources(job, [])
                     return
                 if pending or outstanding:
                     self._ensure_sources(job, pending)

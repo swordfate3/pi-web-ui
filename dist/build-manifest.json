@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 173,
-    "sha256": "ecdfbf321bbbbca4a759cec88a46fa746f22672a5952aeb6e9d3ee64335e6654",
+    "sha256": "ca8cd7acc50f5b4e4481feef83982b6f2c71df4db4071eda4a06f43ef212f782",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -62,7 +62,7 @@
       },
       {
         "path": "extensions/runtime-control.ts",
-        "sha256": "ce4f6acec9485e50dfb31dca7ace0474d360a828eff65ffe8444c71dc794bd52"
+        "sha256": "8977e10290cdacc69dfc2ffc47f94a3930922d0498a054b53252a497b12eb97c"
       },
       {
         "path": "extensions/runtime-metadata.ts",
@@ -118,7 +118,7 @@
       },
       {
         "path": "hub/lifecycle.ts",
-        "sha256": "f892d3dbaa57c4c87d91efd007a9f6d84a5ee0d0e74bffc62e3873554d05557d"
+        "sha256": "4322eac00208d1fc3e4f10cc8dd846e600a4211138dc16b854fd20283d72bbed"
       },
       {
         "path": "hub/limits.ts",
@@ -134,7 +134,7 @@
       },
       {
         "path": "hub/portal.ts",
-        "sha256": "cdd88d85ba14abd345ae83805a6923c22ed6a892d1a33d74efe3284e68fab9a7"
+        "sha256": "b5d9aa3838a991caabf601b73b7ae63a7dc7316f9e6aec8720bd538415e98bda"
       },
       {
         "path": "hub/restart-api.ts",
@@ -142,7 +142,7 @@
       },
       {
         "path": "hub/runtime-portal.ts",
-        "sha256": "caa81268987e6ea3267a1ae536c9894d065eb84b91aa54c461780af7f36b6cc1"
+        "sha256": "7b3cf6284ad872837c4d77b572fb811f166c840d2e94b1ee43e2a5a20bcd3946"
       },
       {
         "path": "hub/runtime-updates.ts",
@@ -700,7 +700,7 @@
   },
   "outputs": {
     "count": 732,
-    "sha256": "aa3825ad2458ea03a2a32145ef63d5c8b193c5671b60fe952c0e78d26d4c2743",
+    "sha256": "4fef1e3fad1caef9e8790df614b0fdcf0f2637b9f3908099c8b839ef0686ecfe",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3604,7 +3604,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "bfdbc9aaf209f13495d7141bef6d8e005aa4e16514731d138dd2c56ab731ac05"
+        "sha256": "7d8326156d07a04408eb558b471e4b94b6ad31c67c099b79981d75cb34c21e20"
       },
       {
         "path": "icons/pi-web-ui-192.png",

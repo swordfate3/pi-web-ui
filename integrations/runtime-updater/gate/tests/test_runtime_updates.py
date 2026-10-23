@@ -3,6 +3,7 @@ import copy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from gate.service import Gate
 from gate.runtime_catalog import RuntimeCatalog
@@ -11,6 +12,12 @@ from gate.runtime_install import CHECKS, digest
 
 IMAGE = 'sha256:' + 'd' * 64
 KEY = 'e' * 32
+
+
+def measured_source(version='1.1.0'):
+    package = '/home/node/.local/lib/node_modules/@earendil-works/pi-coding-agent'
+    return {'contract':'pi-runtime-source-v1','package':package,'executable':package+'/dist/cli.js',
+            'version':version,'node':'>=22.19.0','tree_sha256':'7'*64}
 
 
 class DockerBoundary:
@@ -33,7 +40,7 @@ class DockerBoundary:
             }
             self.states[cid] = dict(managed=True, run_id=run, runtime_id='old-' + run,
                                     session_id='session-' + run, leaf_id='leaf-0', version='1.1.0',
-                                    idle=True, pending=False, busy=False)
+                                    idle=True, pending=False, busy=False, source_identity=measured_source())
 
     def list_lifecycle(self, run, timeout=None):
         return [{'Id': cid} for cid, state in self.states.items() if state['run_id'] == run]
@@ -60,6 +67,7 @@ class DockerBoundary:
                     old_version=state['version'], expected_version=self.installed, new_version=self.installed,
                     session_id=state['session_id'], leaf_id=state['leaf_id'])
                 state.update(runtime_id='new-' + state['run_id'], version=self.installed)
+                state['source_identity'] = measured_source(self.installed)
             return {'ok': True, 'result': {'operation_id': request['operation_id'],
                                          'status': 'running', 'stage': 'checking'}}
         return {'ok': True, 'result': {**state, **({'operation': self.operations[cid]}
@@ -96,7 +104,8 @@ class InstallBoundary:
         return [{'Id': cid} for cid in self.docker.items]
 
     def create(self, job, phase):
-        key = {'prepare': 'f', 'validate': 'b', 'activate': 'a'}[phase] * 64
+        key = (digest({'job':job['id'],'phase':phase}) if phase.startswith('source-') else
+               {'prepare': 'f', 'validate': 'b', 'activate': 'a'}[phase] * 64)
         self.helpers.setdefault(key, {'State': {'Status': 'created', 'Running': False}, 'phase': phase})
         return key
 
@@ -115,10 +124,14 @@ class InstallBoundary:
         return key
 
     def poll(self, job, phase=None):
-        if self.failure:
+        if self.failure and not (phase and phase.startswith('source-')):
             return {'state': 'failed', 'stage': 'install_failed'}
         if phase is not None and job['helpers'][phase]['id'] not in self.helpers:
             return {'state': 'unknown'}
+        if phase and phase.startswith('source-'):
+            return {'state':'succeeded','evidence':{'ok':True,
+                'source_hash':phase[7:],'profile_hash':digest(job['profile']),'node':'24.21.0',
+                'checks':{name:True for name in CHECKS}}}
         if phase == 'prepare':
             return {'state': 'succeeded', 'version': job['version'], 'changed': False,
                     'candidate': self.candidate(job)}
@@ -143,6 +156,14 @@ class RuntimeUpdatesTest(unittest.TestCase):
         self.addCleanup(lambda: self.gate.close())
         self.docker = DockerBoundary()
         self.install = InstallBoundary(self.docker)
+        # This suite tests scheduling/durable authorization, not restoration.
+        # Real restore behavior is independently tested against actual Pi in
+        # the isolated Docker acceptance suite; this external boundary is fake.
+        def restored(life, job, item, state, outer):
+            return life._update(job['id'], restore_proof={'synthetic_scheduler_fixture': True})
+        boundary = patch('gate.runtime_restore.prepare_refresh', side_effect=restored)
+        boundary.start()
+        self.addCleanup(boundary.stop)
 
     def manager(self, mode='auto'):
         self.assertTrue(hasattr(self.gate, 'runtime_updates'), 'global runtime update API is missing')

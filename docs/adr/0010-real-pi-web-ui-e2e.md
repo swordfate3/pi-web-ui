@@ -391,6 +391,41 @@ The real Hub scenarios cover desktop/mobile return-home links, unsent text and a
 - `docs/prd/workspace-artifacts.md`
 - `docs/prd/right-panel.md`
 
+## Managed runtime version transitions
+
+The opt-in `integrations/runtime-updater/tests/real_version_acceptance.py`
+coordinates `e2e/harness/browser-runtime-version-picker.ts`, built Hub,
+branch-local Gate and actual official Pi TUI processes under the image-owned
+supervisor. TUI rather than RPC is intentional here: terminal input safety and
+in-place child replacement are part of this contract. Only model answers are
+synthetic; routes, WebSockets, Pi, Gate and Docker execution are not mocked.
+
+Each attempt requires explicit opt-in, an explicit test image, a fresh uniquely
+named test volume and synthetic workspace/session credentials. Production state,
+model credentials and SSH configuration are excluded. Cleanup uses recorded
+exact identities, never a prune operation. Management requests cannot choose
+test configuration.
+
+The browser waits for the submitted task ID, not an earlier completed result.
+Checks compare actual process versions, unchanged containers, saved history and
+the frozen pre-stop branch leaf. A leaf may be a model/thinking entry rather
+than the last message. Successor observations verify cwd, model, provider,
+thinking and leaf; existing pages must reconnect without prompt replay.
+
+The busy variant holds a real synthetic generation until an idle consumer has
+adopted the version. The incompatible variant changes a disposable session's
+format and requires refusal before the original process stops. Restore probes
+are offline: only a second private snapshot's header cwd is mapped to a temporary
+workspace. All body bytes and other parsed header fields are preserved, and the
+original frozen capture is unchanged. Gate and the supervisor still check real
+cwd accessibility and readiness before stopping Pi.
+
+Evidence/screenshots are under `.tmp/runtime-version-acceptance/<namespace>/`.
+A rendered picker, standalone probe, diagnostic-only run or installation is not
+a passed transition. See [version-picker validation](../validation/2026-10-22-version-picker-progress.md)
+for current outcomes and artifact identities. This does not certify the public
+deployment or physical phones.
+
 ## Companion usage fixture
 
 The companion browser scenarios and `e2e/whale-usage.integration.ts` run real Pi with an isolated synthetic saved session containing old/current dates, a sibling branch, different actual response models, and mixed known/unknown prices. These deliberately verify full-session rather than date-page totals. Browser asset tests import synthetic PNG and two-frame looping GIF files through Settings and verify Blob rendering/persistence without a Pi upload. The GIF fixture checks native rendered frame changes, original IndexedDB byte integrity, reload recovery, invalid/MIME-mismatched replacement rejection, and static PNG display under either system or user reduced-motion settings. Settings thumbnails remain still; motion toggles do not rewrite the original GIF. This is browser-native decoding, not a mocked component or a JS frame player. Raw downloaded fan art is used only for separate local visual inspection, never committed as a fixture. These checks do not certify provider billing, physical phones, Safari or the public deployment.

@@ -23,9 +23,10 @@ const identifier = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 256 && !/\p{Cc}/u.test(value);
 const hex = (value: unknown, length: number): value is string =>
   typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
-// Each entry requires real TUI guard/restart validation; future SDK versions
-// stay blocked until their terminal input transport has been checked.
-const auditedRuntimeVersions = new Set(["1.1.0", "1.3.0"]);
+// This adapter admits an intact, versioned input-guard protocol, not specific
+// release numbers. Gate independently requires measured source/candidate and
+// disposable-restore evidence before it may authorize any runtime update.
+const stableRuntimeVersion = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const equal = (a: unknown, b: string) =>
   typeof a === "string" &&
   Buffer.byteLength(a) === Buffer.byteLength(b) &&
@@ -111,7 +112,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
     const result = {
       ...value,
       busy:
-        value.busy || !guard || stdinGuard() !== guard || !guard.safe() || !auditedRuntimeVersions.has(value.version),
+        value.busy || !guard || stdinGuard() !== guard || !guard.safe() || !stableRuntimeVersion.test(value.version),
     };
     // Validate the complete outbound envelope before acquiring a barrier.
     if (Buffer.byteLength(`${JSON.stringify({ ok: true, result })}\n`) > 16384) throw new Error("Runtime unavailable");

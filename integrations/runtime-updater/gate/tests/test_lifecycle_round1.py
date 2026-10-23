@@ -12,7 +12,8 @@ import unittest
 from unittest import mock
 
 from gate.lifecycle_contract import trusted
-from gate.service import Gate, start_servers
+from gate.service import start_servers
+from test_lifecycle import Gate
 import test_lifecycle
 from test_lifecycle import BODY, CID, IMAGE, KEY, RUN, FakeEngine
 
@@ -333,8 +334,8 @@ class LifecycleDeadlineTest(unittest.TestCase):
 
     def success(self):
         self.engine.operation.update(status='succeeded', stage='complete', new_runtime_id='runtime-new',
-                                     old_version='1.0', expected_version='2.0', new_version='2.0')
-        self.engine.snapshot.update(runtime_id='runtime-new', version='2.0')
+                                     old_version='1.0.0', expected_version='2.0.0', new_version='2.0.0')
+        self.engine.snapshot.update(runtime_id='runtime-new', version='2.0.0')
 
     def test_in_envelope_success_at_160_seconds_is_not_cut_off_at_155(self):
         job = self.running()

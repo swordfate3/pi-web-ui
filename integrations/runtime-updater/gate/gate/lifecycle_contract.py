@@ -54,9 +54,54 @@ def restart_request(value):
 def control_request(value):
     if value == {'action': 'status'}:
         return
-    if not isinstance(value, dict) or set(value) != {*IDENTITIES, 'action', 'operation_id'} or value['action'] != 'restart':
+    if isinstance(value, dict) and set(value) == {'action', 'run_id', 'operation_id'} and value['action'] == 'cancel_restore':
+        identifier(value['run_id'])
+        identifier(value['operation_id'])
+        return
+    if not isinstance(value, dict):
+        raise ValueError('invalid control request')
+    expected = {*IDENTITIES, 'action', 'operation_id'}
+    if 'restore_proof' in value:
+        if value.get('action') != 'restart':
+            raise ValueError('invalid restore action')
+        expected.add('restore_proof')
+        restore_proof(value['restore_proof'])
+    if set(value) != expected or value.get('action') not in ('restart', 'prepare_restore'):
         raise ValueError('invalid control request')
     restart_request({**{k: value[k] for k in IDENTITIES}, 'idempotency_key': value['operation_id']})
+
+
+def restore_proof(value):
+    if not isinstance(value, dict) or set(value) != {'session_sha256', 'expected_hash', 'source_hash',
+            'target_tree_sha256', 'target_task', 'version', 'profile_hash'}:
+        raise ValueError('invalid restore proof')
+    identifier(value['target_task'])
+    for key in ('session_sha256', 'expected_hash', 'source_hash', 'target_tree_sha256', 'profile_hash'):
+        if not isinstance(value[key], str) or not re.fullmatch('[0-9a-f]{64}', value[key]):
+            raise ValueError('invalid restore digest')
+    if not isinstance(value['version'], str) or not re.fullmatch(
+            r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', value['version']):
+        raise ValueError('invalid restore version')
+
+
+def source_identity(value, version):
+    keys = {'contract', 'package', 'executable', 'version', 'node', 'tree_sha256'}
+    if (not isinstance(value, dict) or set(value) != keys or value['contract'] != 'pi-runtime-source-v1' or
+            value['version'] != version or not isinstance(value['tree_sha256'], str) or
+            not re.fullmatch('[0-9a-f]{64}', value['tree_sha256']) or
+            not isinstance(value['node'], str) or not re.fullmatch(
+                r'>=(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', value['node'])):
+        raise ValueError('invalid source identity')
+    for key in ('package', 'executable'):
+        path = value[key]
+        if (not isinstance(path, str) or not path.startswith('/home/node/.local/') or len(path) > 8192 or
+                str(PurePosixPath(path)) != path or '..' in PurePosixPath(path).parts or
+                any(unicodedata.category(c) == 'Cc' for c in path)):
+            raise ValueError('invalid source path')
+    if (not value['package'].endswith('/lib/node_modules/@earendil-works/pi-coding-agent') or
+            not value['executable'].startswith(value['package'] + '/')):
+        raise ValueError('invalid source package')
+    return dict(value)
 
 
 def public(job):
@@ -96,6 +141,8 @@ def snapshot(value, run_id):
         if type(value.get(key)) is not bool:
             raise ValueError('invalid target state')
         safe[key] = value[key]
+    if 'source_identity' in value:
+        safe['source_identity'] = source_identity(value['source_identity'], safe['version'])
     return safe
 
 

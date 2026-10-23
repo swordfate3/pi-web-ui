@@ -344,8 +344,30 @@ def ipc(path, value):
     return result
 
 
+def probe_supervisor_main(argv=None):
+    """Evaluate same-version refresh inside the fixed offline experiment only.
+
+    The live supervisor has no environment/receipt/CLI bypass. This subclass
+    exists only in the isolated probe process, with disposable Pi/session state;
+    it cannot issue a live Gate grant or change another supervisor instance.
+    """
+    isolation()
+    import pi_supervisor as live
+
+    class ProbeSupervisor(live.PiSupervisor):
+        def verify_restore_proof(self, request, snapshot):
+            if request.get('restore_proof') is not None:
+                return super().verify_restore_proof(request, snapshot)
+            if self.restore_capture is not None or self.installed_version() != snapshot['version']:
+                raise live.ProtocolError
+            return None
+
+    arguments = live.parse_arguments(sys.argv[1:] if argv is None else argv)
+    return ProbeSupervisor(arguments.child, arguments.stop_timeout, arguments.start_timeout).run()
+
+
 class RealPi:
-    """Disposable real TUI, optionally under the unmodified image supervisor."""
+    """Disposable real TUI, optionally using the isolated supervisor experiment."""
     def __init__(self, directory, candidate, web, *, supervisor=False, guard=True,
                  session=None, expected=None, bootstrap=False):
         self.directory, self.candidate, self.web = directory, candidate, web
@@ -392,8 +414,9 @@ class RealPi:
             self.argv.append('PROBE_BOOTSTRAP_ONCE')
         if supervisor:
             require(guard, 'supervisor_guard')
-            launcher = ('import runpy,sys;sys.path.insert(0,' + repr(str(RUNTIME)) + ');'
-                        'runpy.run_path(' + repr(str(RUNTIME / 'pi_supervisor.py')) + ',run_name="__main__")')
+            launcher = ('import sys;sys.path.insert(0,' + repr(str(RUNTIME)) + ');'
+                        'from runtime_probe import probe_supervisor_main;'
+                        'raise SystemExit(probe_supervisor_main())')
             self.argv = ['/usr/bin/python3', '-I', '-c', launcher,
                          '--stop-timeout', '5', '--start-timeout', '25', '--', *self.argv]
         else:
@@ -760,8 +783,10 @@ def run_restore(candidate_prefix, session_path, expected, workdir):
     """Restore a frozen private copy with real Pi, without calling any model.
 
     Gate checks profile/readonly mounts and binds this result to its capture.
-    A surrogate proves saved cwd metadata only. Real cwd accessibility and final
-    pre-stop identity/barrier rechecks belong to Gate/the live supervisor.
+    The disposable header's cwd is mapped to its private workspace; every other
+    header field and every following byte are preserved. The frozen capture is
+    never rewritten. Real cwd accessibility and final pre-stop identity/barrier
+    rechecks belong to Gate/the live supervisor.
     """
     expected_fields = restore_snapshot(expected)
     workdir = private_tmp_directory(workdir)
@@ -787,7 +812,18 @@ def run_restore(candidate_prefix, session_path, expected, workdir):
     reported = run_bounded([str(NODE), str(candidate / 'bin/pi'), '--version'], workdir, clean_environment(workdir))
     require(reported.decode().strip() == version, 'restore_version')
     web = stage_web(workdir / 'web', candidate)
-    with RealPi(workdir / 'restore', candidate, web, session=session_path, expected=expected_fields) as pi:
+    # The original project's cwd is deliberately absent from the offline helper.
+    # Pi otherwise stops at its missing-cwd confirmation before extensions load.
+    # Translate only this metadata in a second private copy, not the capture or
+    # message body; report cwd_mode=surrogate rather than actual-cwd validation.
+    _, history = content.split(b'\n', 1)
+    surrogate = (json.dumps({**header, 'cwd': str(workdir / 'restore/workspace')},
+                           separators=(',', ':')).encode() + b'\n' + history)
+    surrogate_path = workdir / 'surrogate-session.jsonl'
+    with surrogate_path.open('xb') as stream:
+        stream.write(surrogate)
+    surrogate_path.chmod(0o400)
+    with RealPi(workdir / 'restore', candidate, web, session=surrogate_path, expected=expected_fields) as pi:
         # Session inspection must work even if a source package is ineligible
         # for refresh. Gate still requires independent source behavioral proof.
         actual = pi.ready(version, node, eligible=False)
@@ -809,7 +845,8 @@ def run_restore(candidate_prefix, session_path, expected, workdir):
     require(not pi.rows('provider_call') and not pi.rows('tool_call'), 'restore_replay')
     # Inspect after child shutdown too: matching scalar IDs/settings do not
     # prove that opening the capture preserved its ancestors and message text.
-    require(session_bytes(pi.session) == content, 'restore_history_changed')
+    require(session_bytes(pi.session) == surrogate and session_bytes(surrogate_path) == surrogate,
+            'restore_history_changed')
     require(tree_digest(candidate) == executed_hash, 'restore_runtime_changed')
     require(session_bytes(session_path) == content and tree_digest(Path(candidate_prefix)) == source_hash,
             'restore_input_changed')

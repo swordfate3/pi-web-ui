@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from runtime_test_bootstrap import create_runtime_test_components
+import runtime_test_bootstrap as bootstrap
 
 
 class RecordingEngine:
@@ -18,6 +19,23 @@ class RecordingEngine:
 
 
 class RuntimeTestBootstrapTest(unittest.TestCase):
+    def test_test_engine_inspects_only_its_exact_isolated_volume(self):
+        cls = getattr(bootstrap, 'RuntimeTestEngine', None)
+        self.assertIsNotNone(cls, 'real Docker bootstrap lacks a namespace-bound volume inspector')
+        volume = 'pi-runtime-update-test-' + 'd' * 12
+        engine = cls(runtime_volume=volume)
+        calls = []
+        def call(method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return {'Name': volume, 'Driver': 'local'}
+        engine.call = call
+        self.assertEqual(engine.lifecycle_volume(volume)['Name'], volume)
+        self.assertEqual(calls[0][:2], ('GET', '/volumes/' + volume))
+        for refused in ('pi-runtime', 'pi-home', 'pi-runtime-update-test-' + 'e' * 12):
+            with self.assertRaises(ValueError):
+                engine.lifecycle_volume(refused)
+        self.assertEqual(len(calls), 1, 'other volumes must not reach Docker')
+
     def test_omitted_default_and_malformed_volumes_make_zero_resource_calls(self):
         invalid = (None, 'pi-runtime', 'pi-home', 'pi-runtime-update-test-',
                    'pi-runtime-update-test-' + 'a' * 11,

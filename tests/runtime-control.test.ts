@@ -107,7 +107,7 @@ test("prepare freezes one exact saved session and only a matching cancel release
   }
 });
 
-test("audited Pi 1.3.0 can prepare while unknown versions stay blocked", async () => {
+test("stable future releases use the intact guard contract, not a version allowlist", async () => {
   const f = await fixture();
   try {
     f.set({ version: "1.3.0" });
@@ -116,6 +116,10 @@ test("audited Pi 1.3.0 can prepare while unknown versions stay blocked", async (
     assert.equal((await f.request({ action: "prepare", operation_id: operation, expected })).ok, true);
     assert.equal((await f.request({ action: "cancel", operation_id: operation })).ok, true);
     f.set({ version: "99.0.0" });
+    assert.equal((await f.request({ action: "snapshot" })).result.busy, false);
+    assert.equal((await f.request({ action: "prepare", operation_id: operation, expected })).ok, true);
+    assert.equal((await f.request({ action: "cancel", operation_id: operation })).ok, true);
+    f.set({ version: "nightly-unversioned" });
     assert.equal((await f.request({ action: "snapshot" })).result.busy, true);
     assert.equal((await f.request({ action: "prepare", operation_id: operation, expected })).ok, false);
   } finally {

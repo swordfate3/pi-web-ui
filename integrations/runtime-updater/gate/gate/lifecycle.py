@@ -151,6 +151,11 @@ class Lifecycle:
         try:
             item = self._resolve(run, policy, deadline=deadline)
             value = snapshot(self._status(item, deadline), run)
+            try:
+                self.gate.runtime_updates.restart_evidence(policy, item, value)
+            except (KeyError, TypeError, ValueError, RuntimeError):
+                return {'managed': False, 'reason': 'source_evidence_unavailable'}
+            deadline.remaining()
             if self.policy()['policy_hash'] != policy['policy_hash']:
                 return {'managed': False}
             return {**value, 'mode': policy['mode']}
@@ -187,6 +192,8 @@ class Lifecycle:
         item = self._resolve(value['run_id'], policy, deadline=deadline)
         state = snapshot(self._status(item, deadline), value['run_id'])
         ready(state, value)
+        evidence = self.gate.runtime_updates.restart_evidence(policy, item, state)
+        deadline.remaining()
         with self.store.lock:
             # Repeat admission after blocking inspection; concurrent submissions dedup here.
             try:
@@ -208,6 +215,10 @@ class Lifecycle:
                    'policy': policy, 'container_id': item['Id'], 'old_version': state['version'],
                    'target_hash': self._target_hash(item),
                    'created_at': int(self.clock.time() * 1000)}
+            from .runtime_install import digest
+            job.update(runtime_evidence_id=evidence['id'], requested_version=evidence['version'],
+                       source_hash=digest(state['source_identity']),
+                       evidence_profile_hash=digest(evidence['profile']))
             with self.store._write_transaction():
                 self.store.db.execute('INSERT INTO lifecycle_jobs (id,data) VALUES (?,?)', (key, _json(job)))
             return public(job)
@@ -237,6 +248,7 @@ class Lifecycle:
         current = self.policy()
         if current['mode'] == 'disabled' or current['policy_hash'] != job['policy']['policy_hash']:
             raise RuntimeError('policy changed')
+        self.gate.runtime_updates.authorize_restart(job)
 
     def recover(self):
         # No control call here. tick dispatches status-only reconciliation off the HTTP thread.
@@ -247,7 +259,12 @@ class Lifecycle:
                 if job['status'] == 'queued' and not job.get('runtime_update_id'):
                     self._update(job['id'], status='stale', stage='interrupted_before_start')
                 elif job['status'] == 'running' and not job.get('intent_at'):
-                    self._update(job['id'], status='stale', stage='interrupted_before_intent')
+                    if job.get('restore_intent_at'):
+                        # The worker reconciles private helper/capture state.
+                        # Startup holds the ledger lock: no daemon I/O here.
+                        self._update(job['id'], stage='restore_recovery_pending')
+                    else:
+                        self._update(job['id'], status='stale', stage='interrupted_before_intent')
 
     def tick(self):
         # Caller holds Store RLock and has checked the one shared worker slot.
@@ -258,7 +275,11 @@ class Lifecycle:
             return bool(self.active())
         for job in reversed(jobs):
             if job['status'] == 'running':
-                target, args = self._poll, (job,)
+                if job.get('restore_intent_at') and not job.get('intent_at'):
+                    from .runtime_restore import reconcile_interrupted
+                    target, args = reconcile_interrupted, (self, job)
+                else:
+                    target, args = self._poll, (job,)
             elif job['status'] == 'queued':
                 try:
                     self._policy_fence(job)
@@ -288,6 +309,12 @@ class Lifecycle:
             ready(state, job)
             if state['version'] != job['old_version']:
                 raise RuntimeError('version changed')
+            if job.get('runtime_update_id') or job.get('runtime_evidence_id'):
+                from .runtime_restore import prepare_refresh
+                job = prepare_refresh(self, job, item, state, outer)
+                # Restoration has its own bounded offline window; repeat the
+                # short live-identity fence immediately before restart intent.
+                deadline = Deadline(self.clock, 4, parent=outer)
             # Reinspect after status, immediately before authorization/exec; immutable ID only.
             self._resolve(job['run_id'], job['policy'], job['container_id'], deadline, job['target_hash'])
             with self.store.lock:
@@ -297,6 +324,8 @@ class Lifecycle:
                 intent = True
             deadline.remaining()
             request = {**{k: job[k] for k in IDENTITIES}, 'action': 'restart', 'operation_id': key}
+            if job.get('restore_proof') is not None:
+                request['restore_proof'] = job['restore_proof']
             acknowledgment = Deadline(self.clock, 3, parent=outer)
             ack = result(self._engine().lifecycle_control(job['container_id'], request,
                                                         timeout=self._remaining(acknowledgment)))
@@ -304,8 +333,17 @@ class Lifecycle:
             self._operation_header(ack, key)
             self._update(key, stage=ack['stage'])
         except Exception:
+            saved = self._get(key)
+            restore_failed = not intent and bool(saved.get('restore_intent_at'))
+            if restore_failed:
+                try:
+                    self._engine().lifecycle_control(job['container_id'], {'action':'cancel_restore',
+                        'run_id':job['run_id'], 'operation_id':key}, timeout=3)
+                except Exception:
+                    pass
             self._update(key, status='recovery_required' if intent else 'stale',
-                         stage='control_outcome_unknown' if intent else 'execution_precondition_changed')
+                         stage='control_outcome_unknown' if intent else
+                         ('restore_pre_stop_failed' if restore_failed else 'execution_precondition_changed'))
             return
         self._poll(job, outer)
 

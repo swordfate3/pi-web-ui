@@ -251,7 +251,12 @@ ${runtimePortalJs}
       let submitted = false;
       try {
         const target = await api('targets/' + session.generation);
-        if (!target.managed) { notice('此容器不支持进程重启，请先用新镜像重新启动一次。'); return; }
+        if (!target.managed) {
+          notice(target.reason === 'source_evidence_unavailable'
+            ? '缺少与当前运行内容和执行环境匹配的 Gate 兼容性验证证据；请先通过全局运行时更新完成验证。原进程未停止。'
+            : '此容器不支持进程重启，请先用新镜像重新启动一次。');
+          return;
+        }
         if (target.mode === 'disabled') { notice('门禁尚未启用该能力，需要管理员配置独立生命周期策略。'); return; }
         if (!target.idle || target.pending || target.busy) { notice('此会话正在工作，或终端/未知命令使本进程无法证明可安全重启。工作完成后仍不可用时，需要在本地启动新的 Pi 进程；等待、取消和 /reload 不会清除输入不确定性。'); return; }
         if (!window.confirm('确认重启选中的 Pi？\\n项目：' + session.label + '\\n会话：' + (session.sessionName || '未命名') + '\\n当前 Pi：' + target.version + '\\n将加载已安装版本并恢复原会话及分支。网页会短暂断开；不会更新其他会话。' + (target.mode === 'manual' ? '\\n门禁仍需管理员审批。' : ''))) return;

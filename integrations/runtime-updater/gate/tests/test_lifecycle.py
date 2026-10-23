@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 
 from gate.engine import Engine, DockerError
-from gate.service import Gate, start_servers
+from gate.service import Gate as ServiceGate, start_servers
 
 RUN = 'a' * 32
 KEY = 'b' * 32
@@ -29,6 +29,46 @@ CID = 'c' * 64
 IMAGE = 'sha256:' + 'd' * 64
 BODY = dict(run_id=RUN, runtime_id='runtime-old', session_id='session', leaf_id=None,
             idempotency_key=KEY)
+
+
+class Gate(ServiceGate):
+    """Legacy policy/transport fixture with explicit synthetic Gate evidence.
+
+    Source lookup and final Gate fences remain real. Only offline restoration
+    is doubled; this fixture is not Pi or source-compatibility acceptance.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from gate.runtime_catalog import RuntimeCatalog
+        from gate.runtime_engine import RuntimeEngine
+        from gate.runtime_install import digest
+        from gate.registry import fingerprint
+        from gate.store import _json
+        from test_runtime_catalog import release
+        from test_runtime_source_validation import proof
+        from test_runtime_updates import InstallBoundary, measured_source
+        key = '9' * 32
+        policy = {'mode': 'auto', 'images': [IMAGE]}
+        artifact = RuntimeCatalog(fetch=lambda _: release('2.0.0')).resolve('2.0.0')
+        identity = measured_source('1.0.0')
+        record = {'id': key, 'version': '2.0.0', 'installed_version': '2.0.0',
+                  'status': 'succeeded', 'stage': 'complete', 'targets': [], 'policy': policy,
+                  'profile': RuntimeEngine.profile({'policy': policy}),
+                  'release': artifact, 'release_hash': fingerprint(artifact)}
+        record['candidate'] = InstallBoundary.candidate(record)
+        record['evidence'] = InstallBoundary.evidence(record)
+        record['sources'] = {digest(identity): {'identity': identity, 'evidence': proof(identity, record['profile'])}}
+        with self.store.lock, self.store._write_transaction():
+            self.store.db.execute('INSERT OR IGNORE INTO runtime_jobs (id,data) VALUES (?,?)', (key, _json(record)))
+        def offline_restore(life, job, item, state, outer):
+            return life._update(job['id'], restore_proof={'synthetic_lifecycle_fixture': True})
+        self._restore_boundary = mock.patch('gate.runtime_restore.prepare_refresh', side_effect=offline_restore)
+        self._restore_boundary.start()
+
+    def close(self):
+        super().close()
+        if hasattr(self, '_restore_boundary'):
+            self._restore_boundary.stop()
 
 
 class FakeEngine:
@@ -39,7 +79,7 @@ class FakeEngine:
                      'HostConfig': {'Privileged': False, 'CapAdd': [], 'CapDrop': ['ALL'],
                                     'SecurityOpt': ['no-new-privileges:true']}, 'Mounts': []}
         self.snapshot = dict(managed=True, run_id=RUN, runtime_id='runtime-old', session_id='session',
-                             leaf_id=None, version='1.0', idle=True, pending=False, busy=False)
+                             leaf_id=None, version='1.0.0', idle=True, pending=False, busy=False)
         self.operation = None
         self.calls = []
         self.ids = [CID]
@@ -67,7 +107,12 @@ class FakeEngine:
         self.calls.append(copy.deepcopy(request))
         if request == {'action': 'status'}:
             self.on_status()
-            return {'ok': True, 'result': {**self.snapshot, **({'operation': self.operation} if self.operation else {})}}
+            from test_runtime_updates import measured_source
+            return {'ok': True, 'result': {**self.snapshot,
+                    'source_identity': measured_source(self.snapshot['version']),
+                    **({'operation': self.operation} if self.operation else {})}}
+        request = copy.deepcopy(request)
+        assert request.pop('restore_proof', {'synthetic_lifecycle_fixture': True}) == {'synthetic_lifecycle_fixture': True}
         assert request == {k: v for k, v in {**BODY, 'action': 'restart', 'operation_id': KEY}.items()
                            if k != 'idempotency_key'}
         self.before_restart()
@@ -75,10 +120,10 @@ class FakeEngine:
             raise DockerError('sensitive transport detail')
         self.operation = dict(operation_id=KEY, status='succeeded', stage='complete',
                               old_runtime_id='runtime-old', new_runtime_id='runtime-new',
-                              session_id='session', leaf_id=None, old_version='1.0',
-                              expected_version='2.0', new_version='2.0', **{})
+                              session_id='session', leaf_id=None, old_version='1.0.0',
+                              expected_version='2.0.0', new_version='2.0.0', **{})
         self.operation.update(self.final_changes)
-        self.snapshot.update(runtime_id='runtime-new', version='2.0')
+        self.snapshot.update(runtime_id='runtime-new', version='2.0.0')
         return {'ok': True, 'result': dict(operation_id=KEY, status='running', stage='checking',
                                           **{}) | self.ack_changes}
 
@@ -134,7 +179,7 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual((job['id'], job['status']), (KEY, 'queued'))
         self.finish()
         result = life.get(KEY)
-        self.assertEqual((result['status'], result['new_version']), ('succeeded', '2.0'))
+        self.assertEqual((result['status'], result['new_version']), ('succeeded', '2.0.0'))
         self.assertEqual(result['new_runtime_id'], 'runtime-new')
         self.assertNotIn(CID, json.dumps(result))
         self.assertNotIn('intent_at', result)
@@ -333,7 +378,7 @@ class LifecycleTest(unittest.TestCase):
             if self.engine.operation:
                 count += 1
                 self.engine.operation.update(status='running' if count == 1 else 'succeeded',
-                                             expected_version='other' if count == 1 else '2.0')
+                                             expected_version='other' if count == 1 else '2.0.0')
         self.engine.on_status = status
         self.finish()
         self.assertEqual(life.get(KEY)['status'], 'recovery_required')
@@ -480,9 +525,9 @@ class LifecycleTest(unittest.TestCase):
         life._update(KEY, status='running', stage='restart_intent', intent_at=started, started_at=started)
         self.engine.operation = {'operation_id': KEY, 'status': 'succeeded', 'stage': 'complete',
                                  'old_runtime_id': 'runtime-old', 'new_runtime_id': 'runtime-new',
-                                 'session_id': 'session', 'leaf_id': None, 'old_version': '1.0',
-                                 'expected_version': '2.0', 'new_version': '2.0'}
-        self.engine.snapshot.update(runtime_id='runtime-new', version='2.0')
+                                 'session_id': 'session', 'leaf_id': None, 'old_version': '1.0.0',
+                                 'expected_version': '2.0.0', 'new_version': '2.0.0'}
+        self.engine.snapshot.update(runtime_id='runtime-new', version='2.0.0')
         self.gate.close()
         self.gate = Gate(Path(self.tmp.name))
         self.gate.lifecycle.engine = self.engine

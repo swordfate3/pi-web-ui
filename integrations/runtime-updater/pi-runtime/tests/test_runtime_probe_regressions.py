@@ -185,7 +185,8 @@ class ProbeRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(self.probe.ProbeFailure, 'barrier_release_replay'):
             self.drive_barrier('leaf', replay_on='fresh')
 
-    def drive_restore(self, mutate=None, *, measured=False, header_version=3, sdk_format=3):
+    def drive_restore(self, mutate=None, *, measured=False, header_version=3, sdk_format=3,
+                      require_surrogate_cwd=False):
         source = self.runtime(measured=measured)
         source_hash = self.probe.tree_digest(source)
         session = self.root / 'frozen.jsonl'
@@ -207,6 +208,14 @@ class ProbeRegressionTests(unittest.TestCase):
             # Real initialization makes exactly the private session/runtime
             # files the production driver uses. Only child execution is absent.
             def __enter__(driver):
+                if require_surrogate_cwd:
+                    opened_header, opened_history = driver.session.read_bytes().split(b'\n', 1)
+                    opened_header = json.loads(opened_header)
+                    # Real Pi asks for terminal confirmation when its stored
+                    # cwd is absent. The disposable file must use its own cwd.
+                    self.assertEqual(opened_header['cwd'], str(driver.cwd))
+                    self.assertEqual({**opened_header, 'cwd': '/saved/cwd'}, header)
+                    self.assertEqual(opened_history, history)
                 driver.trace.write_text(json.dumps({'event': 'session_start', 'session_format': sdk_format}) + '\n')
                 return driver
 
@@ -246,6 +255,20 @@ class ProbeRegressionTests(unittest.TestCase):
 
     def test_restore_accepts_unchanged_disposable_history_and_measured_package(self):
         self.assertIs(self.drive_restore(measured=True)['ok'], True)
+
+    def test_restore_maps_only_private_header_cwd_and_preserves_all_original_input(self):
+        value = self.drive_restore(require_surrogate_cwd=True)
+        self.assertEqual(value['cwd_mode'], 'surrogate')
+        self.assertEqual(value['restored']['cwd'], '/saved/cwd')
+
+    def test_restore_rejects_disposable_header_changes_beyond_cwd(self):
+        def rewrite(driver):
+            first, body = driver.session.read_bytes().split(b'\n', 1)
+            header = json.loads(first)
+            header['id'] = 'other-session'
+            driver.session.write_bytes(json.dumps(header).encode() + b'\n' + body)
+        with self.assertRaisesRegex(self.probe.ProbeFailure, 'restore_history_changed'):
+            self.drive_restore(rewrite, require_surrogate_cwd=True)
 
     def test_restore_rejects_future_format_even_when_all_bytes_and_reported_fields_match(self):
         with self.assertRaisesRegex(self.probe.ProbeFailure, 'restore_format'):

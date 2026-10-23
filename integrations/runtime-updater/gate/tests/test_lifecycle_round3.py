@@ -7,7 +7,7 @@ import time
 import unittest
 
 from gate.lifecycle import Lifecycle
-from gate.service import Gate
+from test_lifecycle import Gate
 from test_lifecycle import BODY, CID, IMAGE, KEY, RUN, FakeEngine
 from test_lifecycle_round1 import GateContext
 
@@ -53,7 +53,7 @@ class MountOrderTest(unittest.TestCase):
         self.gate.lifecycle.submit(BODY)
         self.finish()
         self.assertEqual(self.gate.lifecycle.get(KEY)['status'], 'succeeded')
-        self.assertEqual(len(inspections), 4)  # admission, preflight twice, poll
+        self.assertEqual(len(inspections), 7)  # Includes three source-evidence authorization fences.
         self.assertEqual(sum(c['action'] == 'restart' for c in self.engine.calls), 1)
 
     def test_mount_order_change_only_after_restart_is_not_unknown(self):
@@ -70,9 +70,9 @@ class MountOrderTest(unittest.TestCase):
         life._update(KEY, status='running', stage='restart_intent', started_at=started, intent_at=started)
         self.engine.operation = dict(operation_id=KEY, status='succeeded', stage='complete',
                                      old_runtime_id='runtime-old', new_runtime_id='runtime-new',
-                                     session_id='session', leaf_id=None, old_version='1.0',
-                                     expected_version='2.0', new_version='2.0')
-        self.engine.snapshot.update(runtime_id='runtime-new', version='2.0')
+                                     session_id='session', leaf_id=None, old_version='1.0.0',
+                                     expected_version='2.0.0', new_version='2.0.0')
+        self.engine.snapshot.update(runtime_id='runtime-new', version='2.0.0')
         self.engine.item['Mounts'].reverse()
         self.gate.close()
         self.gate = Gate(Path(self.tmp.name))
@@ -133,8 +133,9 @@ class MountOrderTest(unittest.TestCase):
                     else:
                         engine.before_restart = drift
                     gate.tick()
-                    gate.worker.join(3)
-                    self.assertFalse(gate.worker.is_alive())
+                    if gate.worker:
+                        gate.worker.join(3)
+                        self.assertFalse(gate.worker.is_alive())
                     self.assertEqual(gate.lifecycle.get(KEY)['status'],
                                      'stale' if phase == 'preflight' else 'recovery_required')
                     self.assertEqual(sum(c['action'] == 'restart' for c in engine.calls),

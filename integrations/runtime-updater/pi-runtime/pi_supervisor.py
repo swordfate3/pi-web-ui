@@ -515,11 +515,9 @@ class PiSupervisor:
     def verify_restore_proof(self, request: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any] | None:
         proof = request.get('restore_proof')
         if proof is None:
-            # A same-version refresh retains the existing lifecycle contract.
-            # Changing executable versions requires the offline restore grant.
-            if self.installed_version() != snapshot['version'] or self.restore_capture is not None:
-                raise ProtocolError
-            return
+            # Equal version labels are not measured compatibility evidence.
+            # All live restarts require the private Gate restore handshake.
+            raise ProtocolError
         self.validate_restart_request(request)
         capture = self.restore_capture
         if capture is None or capture.operation_id != request['operation_id'] or self.source_identity is None:

@@ -343,6 +343,34 @@ test("published versions are selectable without claiming compatibility and readi
   assert.match(f.text("runtime-version-selected"), /1\.3\.0.*兼容性.*未知|1\.3\.0.*尚未.*验证/);
 });
 
+for (const [installed, selected, direction] of [
+  ["1.9.0", "1.10.0", /升级/],
+  ["1.10.0", "1.9.0", /降级/],
+  ["1.9.0", "1.9.0", /同版本/],
+  [undefined, "1.9.0", /方向未知|无法判断.*方向/],
+] as const) {
+  for (const surface of ["selection", "confirmation"] as const) {
+    test(`version direction ${installed ?? "unknown"} -> ${selected} in ${surface} uses shared installed metadata`, async () => {
+      const f = fixture({
+        authorized: true,
+        catalog: { status: "fresh", versions: [{ version: selected }] },
+        readiness: {
+          status: "ready",
+          installed_version: installed,
+          consumers: [{ run_id: "1".repeat(32), version: "99.0.0", ready: true }],
+        },
+      });
+      await settled();
+      f.setConfirm(false);
+      await f.submit(selected);
+      const rendered = surface === "selection" ? f.text("runtime-version-selected") : f.confirmations[0];
+      assert.match(rendered, direction);
+      if (installed === "1.10.0") assert.match(rendered, /停止.*前.*会话.*兼容|会话.*兼容.*停止/);
+      assert.equal(f.calls.filter((call) => call.options.method === "POST").length, 0);
+    });
+  }
+}
+
 test("catalog search and opaque paging stay bounded to the fixed management route", async () => {
   const f = fixture({
     authorized: true,
@@ -862,6 +890,7 @@ test("all actual Gate stages have specific operator-facing descriptions", async 
     ["install_failed", "安装失败"],
     ["installation_outcome_unknown", "安装结果不确定"],
     ["refresh_requires_inspection", "刷新结果需要管理员检查"],
+    ["restore_pre_stop_failed", "会话恢复验证未通过；原进程未停止"],
     ["incompatible_candidate", "候选版本不兼容"],
     ["incompatible_session", "当前会话不兼容"],
     ["candidate_changed", "候选包内容已变化"],
@@ -879,6 +908,26 @@ test("all actual Gate stages have specific operator-facing descriptions", async 
   await settled();
   const rendered = f.text("runtime-update-results");
   for (const [, expected] of stages) assert.match(rendered, new RegExp(expected));
+});
+
+test("source revalidation and pre-stop restoration refusal remain explicit target states", async () => {
+  const f = fixture({
+    authorized: true,
+    jobs: [
+      job({
+        status: "running",
+        stage: "refreshing",
+        targets: [
+          { run_id: "a".repeat(32), status: "validating_source", wait_reason: "target_source_validation" },
+          { run_id: "b".repeat(32), status: "blocked", wait_reason: "restore_pre_stop_failed" },
+        ],
+      }),
+    ],
+  });
+  await settled();
+  const rendered = f.text("runtime-update-results");
+  assert.match(rendered, /正在核验新进程.*实际运行内容的兼容性验证/);
+  assert.match(rendered, /已阻止刷新.*会话恢复验证未通过；原进程未停止/);
 });
 
 test("large cumulative target histories prioritize active records and visibly cap rendering at 128", async () => {

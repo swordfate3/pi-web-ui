@@ -3,6 +3,11 @@
   "purpose": "Read-only source baseline; not a deployment snapshot",
   "files": [
     {
+      "source": "/home/fate/docker_files/pi-docker/runtime/pi_model_sync.py",
+      "target": "pi-runtime/pi_model_sync.py",
+      "sha256": "89f6cbc54e838e6b521bb5beabeae73d1719a846d3b01fd76e44ef823d1ef045"
+    },
+    {
       "source": "/home/fate/docker_files/pi-deploy-gate/gate/__init__.py",
       "target": "gate/gate/__init__.py",
       "sha256": "0e63bade30e31a774fdef26ff4b787cface555ec1916736d71fc2150d46d00e4"

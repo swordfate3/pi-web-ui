@@ -39,6 +39,7 @@ function fixture() {
   let available = true;
   let target = {
     managed: true,
+    reason: undefined as string | undefined,
     idle: true,
     pending: false,
     busy: false,
@@ -131,6 +132,9 @@ function fixture() {
     setBusy: () => {
       target = { ...target, busy: true };
     },
+    setMissingEvidence: () => {
+      target = { ...target, managed: false, reason: "source_evidence_unavailable" };
+    },
     setAvailable: (v: boolean) => {
       available = v;
     },
@@ -171,6 +175,19 @@ test("portal keeps restart locked until pairing, erases the code and confirms th
     idempotencyKey: "ab".repeat(16),
   });
   assert.equal(JSON.stringify(call).includes("f".repeat(32)), false);
+});
+
+test("missing source evidence explains validation instead of advising container recreation", async () => {
+  const f = fixture();
+  await settled();
+  await f.unlock();
+  f.setMissingEvidence();
+  await f.attach().fire("click");
+  assert.match(f.get("management-notice").textContent, /兼容性.*证据|验证.*证据/);
+  assert.match(f.get("management-notice").textContent, /运行时更新|验证/);
+  assert.doesNotMatch(f.get("management-notice").textContent, /新镜像|重新启动一次/);
+  assert.equal(f.confirmations.length, 0);
+  assert.equal(f.calls.filter((c) => c.options.method === "POST" && c.route.endsWith("restarts")).length, 0);
 });
 
 test("busy target cannot be confirmed and lost reply polls without resubmitting", async () => {

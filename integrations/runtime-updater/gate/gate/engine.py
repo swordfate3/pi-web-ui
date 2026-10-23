@@ -1,6 +1,8 @@
 """Small fixed-operation Docker client. Never accepts Docker paths from HTTP."""
 import http.client
+import hashlib
 import json
+import math
 import re
 import socket
 import threading
@@ -10,6 +12,10 @@ from urllib.parse import quote
 
 class DockerError(RuntimeError):
     pass
+
+
+class DockerTimeout(DockerError):
+    """Transport deadline expired; the caller determines whether its operation is read-only."""
 
 
 class UnixConnection(http.client.HTTPConnection):
@@ -54,14 +60,92 @@ child.stdout.on('data',async block=>{
 '''
 
 
+RESTORE_UPLOAD_ACK = b'pi-runtime-restore-upload-v1\n'
+RESTORE_UPLOAD_RECEIVER = r'''
+import hashlib,json,os,re,signal,stat,sys,time
+
+def receive(directory):
+    def expired(*_args):
+        raise TimeoutError()
+    def closed(pairs):
+        value = dict(pairs)
+        if len(value) != len(pairs):
+            raise ValueError()
+        return value
+    parent = None
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, 12)
+    try:
+        end = time.monotonic() + 5
+        while True:
+            try:
+                parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                break
+            except FileNotFoundError:
+                if time.monotonic() >= end:
+                    raise ValueError()
+                time.sleep(.025)
+        original = os.fstat(parent)
+        if (os.path.realpath(directory) != directory or not stat.S_ISDIR(original.st_mode) or
+                original.st_uid != os.getuid() or original.st_mode & 0o077 or os.listdir(parent)):
+            raise ValueError()
+        header = bytearray()
+        while not header.endswith(b'\n'):
+            block = os.read(0, 1)
+            if not block or len(header) >= 192:
+                raise ValueError()
+            header.extend(block)
+        expected = json.loads(header, object_pairs_hook=closed)
+        if (not isinstance(expected, dict) or set(expected) != {'bytes', 'sha256'} or
+                type(expected['bytes']) is not int or not 0 < expected['bytes'] <= 64*1024*1024 or
+                not isinstance(expected['sha256'], str) or not re.fullmatch('[0-9a-f]{64}', expected['sha256'])):
+            raise ValueError()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        descriptor = os.open('session.jsonl', flags, 0o400, dir_fd=parent)
+        digest, remaining = hashlib.sha256(), expected['bytes']
+        with os.fdopen(descriptor, 'wb') as output:
+            while remaining:
+                block = os.read(0, min(65536, remaining))
+                if not block:
+                    raise ValueError()
+                output.write(block)
+                digest.update(block)
+                remaining -= len(block)
+            if os.read(0, 1) or digest.hexdigest() != expected['sha256']:
+                raise ValueError()
+            output.flush()
+            os.fsync(output.fileno())
+        current = os.stat(directory, follow_symlinks=False)
+        if ((original.st_dev, original.st_ino) != (current.st_dev, current.st_ino) or
+                os.listdir(parent) != ['session.jsonl']):
+            raise ValueError()
+        with os.fdopen(os.open('ready', flags, 0o400, dir_fd=parent), 'wb') as marker:
+            marker.write(b'1')
+            marker.flush()
+            os.fsync(marker.fileno())
+        sys.stdout.buffer.write(b'pi-runtime-restore-upload-v1\n')
+        sys.stdout.buffer.flush()
+    except Exception:
+        # Never disclose history, input, filesystem paths, or exception details.
+        sys.exit(1)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if parent is not None:
+            os.close(parent)
+
+if __name__ == '__main__':
+    receive('/tmp/restore-input')
+'''
+
+
 class Engine:
     def __init__(self, path='/var/run/docker.sock'):
         self.path = path
 
     def call(self, method, path, value=None, raw=None, missing=False, limit=4 * 1024 * 1024,
-             timeout=None, response_raw=False):
+             timeout=None, response_raw=False, response_object=False):
         if timeout is not None and timeout <= 0:
-            raise DockerError('Docker operation timed out')
+            raise DockerTimeout('Docker operation timed out')
         connection = UnixConnection(self.path, timeout=180 if timeout is None else timeout)
         body = raw if raw is not None else None if value is None else json.dumps(value).encode()
         transport = None
@@ -84,20 +168,23 @@ class Engine:
                                {'Content-Type': 'application/x-tar' if raw is not None else 'application/json'})
             transport = connection.sock
             response = connection.getresponse()
-            data = response.read(limit + 1)
-            if expired.is_set():
-                raise DockerError('Docker operation timed out')
-            if len(data) > limit:
-                raise DockerError('daemon response exceeds limit')
             if response.status == 404 and missing:
                 return None
             if response.status >= 300:
                 # Engine errors can include file paths or container output. Do not relay.
                 raise DockerError('Docker operation failed (HTTP %d)' % response.status)
-            return data if response_raw else json.loads(data) if data else None
+            data = response.read(limit + 1)
+            if expired.is_set():
+                raise DockerTimeout('Docker operation timed out')
+            if len(data) > limit:
+                raise DockerError('daemon response exceeds limit')
+            result = data if response_raw else json.loads(data) if data else None
+            if response_object and (not isinstance(result, dict) or not result):
+                raise DockerError('invalid Docker object response')
+            return result
         except (OSError, http.client.HTTPException) as error:
             if isinstance(error, TimeoutError) or expired.is_set():
-                raise DockerError('Docker operation timed out') from None
+                raise DockerTimeout('Docker operation timed out') from None
             raise
         finally:
             if timer:
@@ -106,7 +193,9 @@ class Engine:
             connection.close()
 
     def inspect(self, key, timeout=None):
-        return self.call('GET', '/containers/' + quote(key, safe='') + '/json', missing=True, timeout=timeout)
+        # None is reserved for the HTTP 404 branch, never a successful empty/null body.
+        return self.call('GET', '/containers/' + quote(key, safe='') + '/json', missing=True,
+                         timeout=timeout, response_object=True)
 
     def list_lifecycle(self, run_id, timeout=3):
         from .lifecycle_contract import identifier
@@ -219,6 +308,101 @@ class Engine:
         except BaseException:
             sock.close()
             raise
+
+    def restore_upload(self, container_id, data, *, byte_count, sha256, timeout=12):
+        """One fixed exec, stdin-only frozen bytes, no redispatch on uncertainty.
+
+        The caller must inspect this immutable helper against its persisted
+        definition immediately before invoking this one-shot transport.
+        """
+        from .lifecycle_contract import CONTAINER
+        if (not isinstance(container_id, str) or not CONTAINER.fullmatch(container_id) or
+                not isinstance(data, bytes) or type(byte_count) is not int or
+                not 0 < byte_count <= 64 * 1024 * 1024 or len(data) != byte_count or
+                not isinstance(sha256, str) or not re.fullmatch('[0-9a-f]{64}', sha256) or
+                type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError('invalid restore upload')
+        end = time.monotonic() + min(timeout, 12)
+        def remaining():
+            value = end - time.monotonic()
+            if value <= 0:
+                raise DockerError('restore upload unavailable')
+            return value
+        if hashlib.sha256(data).hexdigest() != sha256:
+            raise ValueError('invalid restore upload')
+        body = {'User': '1000:1000', 'Privileged': False, 'AttachStdin': True,
+                'AttachStdout': True, 'AttachStderr': True, 'Tty': False, 'WorkingDir': '/',
+                'Env': ['HOME=/tmp', 'PATH=/usr/bin:/bin', 'NODE_OPTIONS=',
+                        'PYTHONNOUSERSITE=1', 'PYTHONSAFEPATH=1', 'PYTHONDONTWRITEBYTECODE=1'],
+                'Cmd': ['/usr/bin/python3', '-I', '-c', RESTORE_UPLOAD_RECEIVER]}
+        sock = None
+        try:
+            created = self.call('POST', '/containers/' + container_id + '/exec', body,
+                                timeout=remaining(), limit=16384)
+            key = created.get('Id') if isinstance(created, dict) else None
+            if not isinstance(key, str) or not CONTAINER.fullmatch(key):
+                raise DockerError('restore upload unavailable')
+            sock = socket.socket(socket.AF_UNIX)
+            sock.settimeout(remaining())
+            sock.connect(self.path)
+            start = b'{"Detach":false,"Tty":false}'
+            request = ('POST /v1.45/exec/' + key + '/start HTTP/1.1\r\nHost: localhost\r\n'
+                       'Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\n'
+                       'Content-Length: ' + str(len(start)) + '\r\n\r\n').encode() + start
+            sock.settimeout(remaining())
+            sock.sendall(request)
+            headers = bytearray()
+            while not headers.endswith(b'\r\n\r\n'):
+                sock.settimeout(remaining())
+                byte = sock.recv(1)
+                if not byte or len(headers) >= 8192:
+                    raise DockerError('restore upload unavailable')
+                headers.extend(byte)
+            lines = headers.decode('ascii', 'strict').lower().split('\r\n')
+            if (lines[0].split()[:2] != ['http/1.1', '101'] or
+                    lines.count('upgrade: tcp') != 1 or lines.count('connection: upgrade') != 1):
+                raise DockerError('restore upload unavailable')
+            header = json.dumps({'bytes': byte_count, 'sha256': sha256}, separators=(',', ':')).encode() + b'\n'
+            sock.settimeout(remaining())
+            sock.sendall(header)
+            for offset in range(0, len(data), 65536):
+                sock.settimeout(remaining())
+                sock.sendall(memoryview(data)[offset:offset + 65536])
+            sock.shutdown(socket.SHUT_WR)  # EOF is part of the receiver's grant.
+            output, wire = bytearray(), bytearray()
+            total = 0
+            while True:
+                sock.settimeout(remaining())
+                block = sock.recv(1024)
+                if not block:
+                    break
+                total += len(block)
+                if total > 1024:
+                    raise DockerError('restore upload unavailable')
+                wire.extend(block)
+                while len(wire) >= 8:
+                    size = int.from_bytes(wire[4:8], 'big')
+                    if wire[:4] != b'\x01\0\0\0' or size > len(RESTORE_UPLOAD_ACK):
+                        raise DockerError('restore upload unavailable')
+                    if len(wire) < 8 + size:
+                        break
+                    output.extend(wire[8:8 + size])
+                    del wire[:8 + size]
+                    if len(output) > len(RESTORE_UPLOAD_ACK):
+                        raise DockerError('restore upload unavailable')
+            if wire or output != RESTORE_UPLOAD_ACK:
+                raise DockerError('restore upload unavailable')
+            info = self.call('GET', '/exec/' + key + '/json', timeout=remaining(), limit=16384)
+            if (not isinstance(info, dict) or info.get('ID') != key or info.get('ContainerID') != container_id or
+                    info.get('Running') is not False or type(info.get('ExitCode')) is not int or info['ExitCode'] != 0):
+                raise DockerError('restore upload unavailable')
+            remaining()
+        except (OSError, ValueError, TypeError, KeyError, http.client.HTTPException, DockerError):
+            # No receipt, stderr, raw daemon error, or frozen bytes are relayed.
+            raise DockerError('restore upload unavailable') from None
+        finally:
+            if sock is not None:
+                sock.close()
 
     def lifecycle_volume(self, name, timeout=3):
         if name not in ('pi-user-home', 'pi-home', 'pi-runtime', 'pi-credentials',

@@ -90,15 +90,16 @@ class ValidationFlow(unittest.TestCase):
         manager = self.submit()
         self.install.consumer_blocker = lambda item, state: 'source_evidence_unavailable'
         self.pump()
-        self.assertEqual(manager.get(base.KEY)['stage'], 'source_evidence_unavailable')
-        self.assertNotIn('activate', manager._get(base.KEY)['helpers'])
+        self.assertEqual(manager.get(base.KEY)['stage'], 'unmanaged_or_unavailable_consumer')
+        self.assertNotIn('activate', manager._get(base.KEY).get('helpers', {}))
         self.assertEqual(self.docker.restarts, [])
 
     def test_real_engine_does_not_grandfather_legacy_source_versions(self):
         engine = RuntimeEngine(object())
         self.assertTrue(callable(getattr(engine, 'consumer_blocker', None)))
         for state in self.docker.states.values():
-            self.assertEqual(engine.consumer_blocker({}, state), 'source_evidence_unavailable')
+            legacy = {k:v for k,v in state.items() if k != 'source_identity'}
+            self.assertEqual(engine.consumer_blocker({}, legacy), 'source_evidence_unavailable')
 
     def test_policy_change_at_helper_create_is_fenced_before_start(self):
         manager = self.submit()

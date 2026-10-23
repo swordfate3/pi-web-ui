@@ -21,6 +21,20 @@ export const runtimePortalJs = String.raw`
     let readinessSequence = 0;
     const stableVersion = (value) => typeof value === 'string' && /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(value);
     const validId = (value) => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
+    function directionLabel(version) {
+      const installed = readinessState?.status !== 'unavailable' && readinessState?.installed_version;
+      if (!stableVersion(installed) || !stableVersion(version)) return '更新方向未知（共享已安装版本不可用）';
+      const current = installed.split('.').map(BigInt);
+      const target = version.split('.').map(BigInt);
+      let direction = '同版本更新';
+      for (let i = 0; i < 3; i++) {
+        if (target[i] === current[i]) continue;
+        direction = target[i] > current[i] ? '升级' : '降级';
+        break;
+      }
+      return direction + '：共享 Pi ' + installed + ' → ' + version +
+        (direction === '降级' ? '。停止原进程前必须通过会话兼容性验证；不兼容时保留原进程与历史。' : '。');
+    }
     try {
       const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
       if (saved && validId(saved.id) && stableVersion(saved.version)) pending = { id: saved.id, version: saved.version };
@@ -54,6 +68,7 @@ export const runtimePortalJs = String.raw`
       unmanaged_or_unavailable_consumer: '存在未受管或不可用的共享运行时使用者，需要迁移或检查',
       install_failed: '安装失败', installation_outcome_unknown: '安装结果不确定，需要管理员检查',
       refresh_requires_inspection: '刷新结果需要管理员检查', incompatible_candidate: '候选版本不兼容',
+      restore_pre_stop_failed: '会话恢复验证未通过；原进程未停止',
       incompatible_session: '当前会话不兼容', candidate_changed: '候选包内容已变化，需要重新解析并审批',
       protocol_unavailable: '运行时刷新协议不可用', complete: '任务已完成',
     })[stage] || String(stage || 'unknown').replaceAll('_', ' ');
@@ -63,10 +78,13 @@ export const runtimePortalJs = String.raw`
     })[status] || '结果未知';
     const targetLabel = (status) => ({
       waiting_for_idle: '等待目标空闲', refreshing: '正在刷新 Pi 进程', succeeded: '已加载新版本', exited: '已退出',
+      validating_source: '正在核验新进程', blocked: '已阻止刷新',
     })[status] || String(status || 'unknown').replaceAll('_', ' ');
     const reasonLabel = (reason) => ({
       consumer_not_ready: '共享运行时使用者尚未就绪', awaiting_state_change: '等待运行状态变化', busy_race: '空闲确认期间再次忙碌',
       busy_waits_for_idle: '正在生成；允许提交，执行时等待空闲',
+      target_source_validation: '正在完成实际运行内容的兼容性验证',
+      restore_pre_stop_failed: '会话恢复验证未通过；原进程未停止',
       protocol_unavailable: '运行时刷新协议不可用', legacy_supervisor: '旧版监管协议，需要迁移后才能受管',
       incompatible_candidate: '候选版本不兼容', incompatible_session: '当前会话不兼容', candidate_changed: '候选包内容已变化',
     })[reason] || String(reason || '').replaceAll('_', ' ');
@@ -95,7 +113,7 @@ export const runtimePortalJs = String.raw`
         let text = '目标 ' + target.run_id + ' · ' + targetLabel(target.status);
         if (typeof target.old_version === 'string') text += ' · 原版本 ' + target.old_version;
         if (typeof target.version === 'string') text += ' · 当前版本 ' + target.version;
-        if (target.status === 'waiting_for_idle' && typeof target.wait_reason === 'string') text += ' · ' + reasonLabel(target.wait_reason);
+        if (['waiting_for_idle', 'validating_source', 'blocked'].includes(target.status) && typeof target.wait_reason === 'string') text += ' · ' + reasonLabel(target.wait_reason);
         line.textContent = text; row.append(line);
       }
       return row;
@@ -132,7 +150,7 @@ export const runtimePortalJs = String.raw`
         list.append(option);
       }
       more.hidden = !nextCursor || catalogLoading;
-      if (selectedVersion) selected.textContent = '已选择 Pi ' + selectedVersion + ' · 已发布 / 未验证。兼容性仍未知；Gate 会在提交后隔离验证，当前在线进程不会因选择而改变。';
+      if (selectedVersion) selected.textContent = '已选择 Pi ' + selectedVersion + ' · 已发布 / 未验证。' + directionLabel(selectedVersion) + '兼容性仍未知；Gate 会在提交后隔离验证，当前在线进程不会因选择而改变。';
       else selected.textContent = catalogState?.status === 'unavailable' ? '目录不可用，当前没有可提交的发布版本。' : '请选择一个已发布的精确稳定版本。';
     }
     function renderReadiness() {
@@ -274,7 +292,7 @@ export const runtimePortalJs = String.raw`
       const manual = policy?.mode === 'manual' ? '\n当前是手动策略；提交后仍需主机管理员使用 runtime-approve 批准。' : '';
       const blockers = (readinessState?.consumers || []).filter((consumer) => !consumer.ready).slice(0, 5);
       const blockerText = blockers.length ? '\n当前已知阻止项（执行时 Gate 会重新清点）：\n' + blockers.map((consumer) => consumer.run_id + ' · ' + reasonLabel(consumer.reason || 'consumer_not_ready')).join('\n') : '';
-      if (!window.confirm('确认向 Gate 提交 Pi ' + version + ' 的全局运行时更新任务？\n该版本已发布，但兼容性尚未验证；Gate 将先进行隔离验证，选择本身不会改变在线进程。\n这会影响所有共享运行时使用者；忙碌目标会等待空闲，不会被强制中断。\n旧镜像中的使用者需要先迁移到受管运行环境。\n本页面只创建任务，不批准更新。' + blockerText + manual)) return;
+      if (!window.confirm('确认向 Gate 提交 Pi ' + version + ' 的全局运行时更新任务？\n' + directionLabel(version) + '\n该版本已发布，但兼容性尚未验证；Gate 将先进行隔离验证，选择本身不会改变在线进程。\n这会影响所有共享运行时使用者；忙碌目标会等待空闲，不会被强制中断。\n旧镜像中的使用者需要先迁移到受管运行环境。\n本页面只创建任务，不批准更新。' + blockerText + manual)) return;
       const id = [...crypto.getRandomValues(new Uint8Array(16))].map((value) => value.toString(16).padStart(2, '0')).join('');
       pending = { id, version }; uncertain = true; submitting = true;
       if (!savePending()) {

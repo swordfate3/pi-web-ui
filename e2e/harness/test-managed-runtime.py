@@ -4,11 +4,13 @@ PI_RUNTIME_SOURCE points to the staged pi-docker sources. Uses temporary state o
 Run with python3 e2e/harness/test-managed-runtime.py from the package root.
 """
 import fcntl
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shutil
 import signal
@@ -25,6 +27,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = Path(os.environ.get("PI_RUNTIME_SOURCE", ROOT.parent / "pi-runtime-restart-work/pi-docker"))
+RUNTIME_SOURCE = SOURCE / "runtime" if (SOURCE / "runtime").is_dir() else SOURCE
 
 
 def wait_for(function, timeout=30):
@@ -41,11 +44,15 @@ def wait_for(function, timeout=30):
 
 
 class RealTui:
-    def __init__(self, directory, hub, capability, branch, docker_image=None):
+    def __init__(self, directory, hub, capability, branch, docker_image=None, *, runtime_volume=None,
+                 image_owned_package=False):
+        if runtime_volume is not None and (not docker_image or not re.fullmatch(
+                r"pi-runtime-update-test-[a-f0-9]{12,32}", runtime_volume)):
+            raise ValueError("an isolated runtime test volume is required")
         self.expected_version = os.environ.get("PI_RUNTIME_TEST_VERSION") if docker_image else None
         if docker_image and not self.expected_version:
             raise AssertionError("Docker runtime acceptance requires PI_RUNTIME_TEST_VERSION")
-        if (SOURCE / "runtime/pi_stdin_guard.mjs").read_bytes() != (ROOT / "extensions/runtime-stdin-guard.mjs").read_bytes():
+        if (RUNTIME_SOURCE / "pi_stdin_guard.mjs").read_bytes() != (ROOT / "extensions/runtime-stdin-guard.mjs").read_bytes():
             raise AssertionError("Image guard must match the reviewed package guard before integration")
         self.directory = directory
         self.runtime = directory / "runtime"
@@ -56,14 +63,18 @@ class RealTui:
         self.agent.mkdir()
         self.session = directory / "conversation.jsonl"
         self.session_id = f"synthetic-session-{branch}"
+        # Keep the synthetic conversation inside the UI's default recent window.
+        instant = datetime.now(timezone.utc) - timedelta(seconds=2)
+        stamps = [(instant + timedelta(seconds=index)).isoformat() for index in range(3)]
+        ticks = [int((instant + timedelta(seconds=index)).timestamp() * 1000) for index in range(3)]
         entries = [
-            {"type": "session", "version": 3, "id": self.session_id, "timestamp": "2026-10-17T00:00:00.000Z",
+            {"type": "session", "version": 3, "id": self.session_id, "timestamp": stamps[0],
              "cwd": "/workspace/workspace" if docker_image else str(self.workspace)},
-            {"type": "message", "id": f"user-{branch}", "parentId": None, "timestamp": "2026-10-17T00:00:01.000Z",
-             "message": {"role": "user", "content": "SYNTHETIC SAVED TURN, DO NOT REPLAY", "timestamp": 1792195201000}},
-            {"type": "message", "id": f"leaf-{branch}", "parentId": f"user-{branch}", "timestamp": "2026-10-17T00:00:02.000Z",
+            {"type": "message", "id": f"user-{branch}", "parentId": None, "timestamp": stamps[1],
+             "message": {"role": "user", "content": "SYNTHETIC SAVED TURN, DO NOT REPLAY", "timestamp": ticks[1]}},
+            {"type": "message", "id": f"leaf-{branch}", "parentId": f"user-{branch}", "timestamp": stamps[2],
              "message": {"role": "assistant", "content": [{"type": "text", "text": "Synthetic saved reply"}], "api": "openai-completions", "provider": "faux", "model": "faux-1", "stopReason": "stop",
-                         "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "timestamp": 1792195202000}},
+                         "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 2, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "timestamp": ticks[2]}},
         ]
         self.session.write_text("".join(json.dumps(e) + "\n" for e in entries))
         with socket.socket() as port:
@@ -73,7 +84,7 @@ class RealTui:
                     "PI_RUNTIME_RUN_ID": capability["runId"], "PI_RUNTIME_DIR": str(self.runtime), "PI_WEB_UI_HOST": "127.0.0.1", "PI_WEB_UI_PORT": str(web_port),
                     "PI_WEB_UI_REGISTRY_SOCKET": hub["socketPath"], "PI_WEB_UI_REGISTRY_CREDENTIAL_FILE": capability["credentialFile"],
                     "PI_WEB_UI_DISABLED": "false", "PI_WEB_UI_STATIC_DIR": str(ROOT / "dist"), "PI_WEB_UI_PUBLIC_URL": ""}
-        argv = ["/usr/bin/python3", str(SOURCE / "runtime/pi_supervisor.py"), "--", str(ROOT / "node_modules/.bin/pi"),
+        argv = ["/usr/bin/python3", str(RUNTIME_SOURCE / "pi_supervisor.py"), "--", str(ROOT / "node_modules/.bin/pi"),
                 "--provider", "faux", "--model", "faux-1", "--api-key", "faux-key", "--thinking", "medium", "--session", str(self.session),
                 "--no-skills", "--no-prompt-templates", "--no-context-files", "--tui-mode", "regular",
                 "--extension", str(ROOT / "e2e/fixtures/faux-provider-extension.ts"), "--extension", str(ROOT / "extensions/mirror-server.ts")]
@@ -112,6 +123,8 @@ class RealTui:
                     "--label", "cn.swordfate.pi.run-id=" + capability["runId"],
                     "--label", "cn.swordfate.pi.lifecycle=1",
                     "--workdir", "/workspace/workspace"]
+            if runtime_volume is not None:
+                argv.extend(["--mount", f"type=volume,source={runtime_volume},target=/home/node/.local"])
             mounts = [(directory, "/workspace", False),
                       (Path(capability["credentialFile"]), "/run/secrets/pi-web-session.json", True)]
             for source, destination, readonly in mounts:
@@ -121,16 +134,23 @@ class RealTui:
             argv.extend([docker_image, "--provider", "faux", "--model", "faux-1", "--api-key", "faux-key",
                          "--thinking", "medium", "--session", "/workspace/conversation.jsonl", "--no-skills",
                          "--no-prompt-templates", "--no-context-files", "--tui-mode", "regular",
-                         "--extension", "/workspace/.test-package/e2e/fixtures/faux-provider-extension.ts",
-                         "--extension", "/workspace/.test-package/extensions/mirror-server.ts"])
-        self.pid, self.fd = pty.fork()
-        if self.pid == 0:
-            try:
-                os.chdir(self.workspace)
-                os.execvpe(argv[0], argv, self.env)
-            except OSError:
-                # A failed child exec must not run the parent's test cleanups.
-                os._exit(127)
+                         "--extension", ("/opt/pi-web-ui/e2e/fixtures/runtime-update-provider.ts" if image_owned_package
+                                         else "/workspace/.test-package/e2e/fixtures/faux-provider-extension.ts"),
+                         "--extension", ("/opt/pi-web-ui/extensions/mirror-server.ts" if image_owned_package
+                                         else "/workspace/.test-package/extensions/mirror-server.ts")])
+        # Gate/Hub already own threads here; do not fork Python and execute
+        # Python user code in the child with inherited thread locks.
+        self.fd, slave = pty.openpty()
+        try:
+            self.process = subprocess.Popen(argv, cwd=self.workspace, env=self.env,
+                                            stdin=slave, stdout=slave, stderr=slave,
+                                            start_new_session=True)
+        except BaseException:
+            os.close(self.fd)
+            raise
+        finally:
+            os.close(slave)
+        self.pid = self.process.pid
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
         self.output = bytearray()
         self.closed = False
@@ -157,7 +177,7 @@ class RealTui:
 
     def control(self, request):
         command = (["docker", "exec", "--user", "1000:1000", self.container, "/usr/local/bin/pi-session-control"]
-                   if self.container else ["/usr/bin/python3", str(SOURCE / "runtime/pi-session-control")])
+                   if self.container else ["/usr/bin/python3", str(RUNTIME_SOURCE / "pi-session-control")])
         result = subprocess.run([*command, "--request", json.dumps(request)],
                                 env=self.env, capture_output=True, text=True, timeout=5)
         value = json.loads(result.stdout)
@@ -180,10 +200,10 @@ class RealTui:
     def exited(self):
         if not self.pid:
             return True
-        pid, status = os.waitpid(self.pid, os.WNOHANG)
-        if pid:
+        status = self.process.poll()
+        if status is not None:
             self.pid = None
-            return os.waitstatus_to_exitcode(status) == 0
+            return status == 0
         return False
 
     def close(self):
@@ -198,8 +218,8 @@ class RealTui:
                 # Test-owned process group only, never real Pi or a production container.
                 try: os.killpg(self.pid, signal.SIGKILL)
                 except OSError: pass
-                try: os.waitpid(self.pid, 0)
-                except OSError: pass
+                try: self.process.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired): pass
         self.closed = True
         self.drainer.join(timeout=1)
         os.close(self.fd)

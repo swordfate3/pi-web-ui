@@ -1,0 +1,1242 @@
+diff --git a/extensions/v2.ts b/extensions/v2.ts
+index ca6c0ec..92ce887 100644
+--- a/extensions/v2.ts
++++ b/extensions/v2.ts
+@@ -24,6 +24,7 @@ import type {
+   ExtensionAPI,
+   ExtensionContext,
+ } from "@earendil-works/pi-coding-agent";
++import type { InteractionClient } from "@kkkiio/pi-web-ui/interactions/v1";
+ import {
+   truncateHead,
+   withFileMutationQueue,
+@@ -65,6 +66,7 @@ import { validatePng } from "../src/adapters/export/png.ts";
+ import { SqliteCatalog } from "../src/adapters/storage/sqlite-catalog.ts";
+ import { PDF_CAPTURE_LIMITATIONS } from "../src/adapters/parsing/capture-pdf.ts";
+ import { DOCX_CAPTURE_LIMITATIONS } from "../src/adapters/parsing/capture-docx.ts";
++import { createOptionalInteractionRunner } from "./web-interactions.ts";
+ 
+ import { captureLocal } from "../src/adapters/parsing/capture-local.ts";
+ import {
+@@ -214,22 +216,66 @@ function reply(value: unknown) {
+   };
+ }
+ 
+-export default function v2(pi: ExtensionAPI): void {
++export interface V2Options {
++  /** Optional test injection; production discovers the public Pi Web client lazily. */
++  interactions?: InteractionClient;
++}
++
++export function registerKnowledgeStudioV2(
++  pi: ExtensionAPI,
++  options: V2Options = {},
++): void {
+   const env = Object.freeze({ ...process.env });
+   const studioRoot = defaultStudioRoot();
+   const storagePaths = (cwd: string) => checkedStudioPaths(cwd, studioRoot);
++  const interactions = createOptionalInteractionRunner(pi.events, {
++    id: "knowledge-studio-v2",
++    version: "0.1.0",
++    packageName: "pi-knowledge-studio",
++    actions: {
++      ocr: { classification: "sensitive", method: "confirm" },
++      import: { classification: "sensitive", method: "confirm" },
++      search: { classification: "sensitive", method: "confirm" },
++      embedding: { classification: "sensitive", method: "confirm" },
++      index: { classification: "sensitive", method: "confirm" },
++      export: { classification: "sensitive", method: "confirm" },
++      remove: { classification: "sensitive", method: "confirm" },
++      list: { classification: "sensitive", method: "confirm" },
++      generate: { classification: "sensitive", method: "confirm" },
++      vision: { classification: "sensitive", method: "confirm" },
++      enrich: { classification: "sensitive", method: "confirm" },
++      rerank: { classification: "sensitive", method: "confirm" },
++      "profile-choice": { classification: "session", method: "select" },
++      "profile-select": { classification: "sensitive", method: "confirm" },
++    },
++  }, options.interactions);
+   const grants = new Set(
+     (env.PI_KS_V2_HEADLESS_GRANTS ?? "")
+       .split(",")
+       .map((value) => value.trim()),
+   );
++  let lifecycleController = new AbortController();
++  const advanceLifecycle = () => {
++    lifecycleController.abort();
++    lifecycleController = new AbortController();
++  };
++  pi.on("session_before_switch", () => { advanceLifecycle(); });
++  pi.on("session_before_fork", () => { advanceLifecycle(); });
++  pi.on("session_before_tree", () => { advanceLifecycle(); });
++  pi.on("session_tree", () => { advanceLifecycle(); });
++  pi.on("session_shutdown", () => {
++    lifecycleController.abort();
++    interactions.dispose();
++  });
+   const signalFor = (ctx: ExtensionContext, signal?: AbortSignal) =>
+     AbortSignal.any(
+-      [signal, ctx.signal].filter(
++      [signal, ctx.signal, lifecycleController.signal].filter(
+         (value): value is AbortSignal => value !== undefined,
+       ),
+     );
+   const generationTokens = new WeakMap<GenerationApproval, symbol>();
++  const approvalRevision = (value: unknown) =>
++    `approval-v1:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+   async function approve(
+     ctx: ExtensionContext,
+     signal: AbortSignal,
+@@ -245,13 +291,26 @@ export default function v2(pi: ExtensionAPI): void {
+       generationApproval.context === ctx &&
+       generationApproval.signal === signal &&
+       generationApproval.grants.includes(grant);
++    const title = `Knowledge Studio V2: ${grant}`;
+     const ok = approvedByWorkflow
+       ? true
+       : ctx.hasUI
+-        ? await ctx.ui.confirm(`Knowledge Studio V2: ${grant}`, message, {
++        ? await interactions.interact({
++            action: grant,
++            revision: approvalRevision({ grant, message }),
++            classification: "sensitive",
++            method: "confirm",
++            schema: { kind: "confirm" },
++            content: { title, message, grant },
++            deadline: Date.now() + 120_000,
++          }, {
+             signal,
+-            timeout: 120_000,
+-          })
++            isCurrent: () => !signal.aborted,
++            local: async (localSignal) => ctx.ui.confirm(title, message, {
++              signal: AbortSignal.any([signal, localSignal]),
++              timeout: 120_000,
++            }),
++          }).then((decision) => decision.state === "allowed" && decision.answer === true)
+         : grants.has(grant);
+     signal.throwIfAborted();
+     if (ok !== true)
+@@ -270,10 +329,24 @@ export default function v2(pi: ExtensionAPI): void {
+   ): Promise<GenerationApproval | undefined> {
+     signal.throwIfAborted();
+     if (!ctx.hasUI) return undefined;
+-    const ok = await ctx.ui.confirm("Knowledge Studio V2: generate", message, {
++    const title = "Knowledge Studio V2: generate";
++    const decision = await interactions.interact({
++      action: "generate",
++      revision: approvalRevision({ grant: "generate", message, workflowGrants }),
++      classification: "sensitive",
++      method: "confirm",
++      schema: { kind: "confirm" },
++      content: { title, message, workflowGrants: [...workflowGrants] },
++      deadline: Date.now() + 120_000,
++    }, {
+       signal,
+-      timeout: 120_000,
++      isCurrent: () => !signal.aborted,
++      local: async (localSignal) => ctx.ui.confirm(title, message, {
++        signal: AbortSignal.any([signal, localSignal]),
++        timeout: 120_000,
++      }),
+     });
++    const ok = decision.state === "allowed" && decision.answer === true;
+     signal.throwIfAborted();
+     if (ok !== true)
+       throw new Error("V2 generate denied: generation workflow was not approved");
+@@ -516,6 +589,59 @@ export default function v2(pi: ExtensionAPI): void {
+     });
+   }
+   const generations = (ctx: ExtensionContext) => new PdfGenerations(storagePaths(ctx.cwd).pdfGenerations, pdfJobs(ctx).quotas);
++  type ProfileSnapshot = Awaited<ReturnType<PdfGenerations["profiles"]>>;
++  const profileChoice = (profile: ProfileSnapshot["profiles"][number]) => `${profile.id}@${profile.revision}`;
++  const profileSelectionMessage = (
++    target: ProfileSnapshot["profiles"][number],
++    previous: ProfileSnapshot["selected"],
++  ) => `Select ${profileChoice(target)} as the default for FUTURE PDF rebuilds only?\nEndpoint: ${target.endpoint}\nKind: ${target.kind}\nEmbedding space: ${JSON.stringify(target.space)}\nCredential environment reference: ${target.credentialEnv ?? "none"}\nPrevious selection: ${previous ? `${previous.id}@${previous.revision}` : "none"}\nExisting indexes remain unchanged.`;
++  async function approveProfileSelection(
++    ctx: ExtensionContext,
++    signal: AbortSignal,
++    snapshot: ProfileSnapshot,
++    target: ProfileSnapshot["profiles"][number],
++  ) {
++    const message = profileSelectionMessage(target, snapshot.selected);
++    if (!ctx.hasUI) {
++      await approve(ctx, signal, "index", message);
++      return;
++    }
++    signal.throwIfAborted();
++    const title = "Knowledge Studio V2: select model profile";
++    const decision = await interactions.interact({
++      action: "profile-select",
++      revision: `profile-catalog-v1:${snapshot.catalogRevision}`,
++      classification: "sensitive",
++      method: "confirm",
++      schema: { kind: "confirm" },
++      content: {
++        title,
++        message,
++        catalogRevision: snapshot.catalogRevision,
++        target: {
++          id: target.id,
++          revision: target.revision,
++          endpoint: target.endpoint,
++          kind: target.kind,
++          space: { ...target.space },
++          credentialEnv: target.credentialEnv,
++        },
++        previous: snapshot.selected,
++        existingIndexes: "unchanged",
++      },
++      deadline: Date.now() + 120_000,
++    }, {
++      signal,
++      isCurrent: () => !signal.aborted,
++      local: async (localSignal) => ctx.ui.confirm(title, message, {
++        signal: AbortSignal.any([signal, localSignal]),
++        timeout: 120_000,
++      }),
++    });
++    signal.throwIfAborted();
++    if (decision.state !== "allowed" || decision.answer !== true)
++      throw new Error("V2 index denied: trusted UI confirmation or host PI_KS_V2_HEADLESS_GRANTS required");
++  }
+   const profileSchema = Type.Object({
+     id: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,63}$" }),
+     endpoint: Type.String({ maxLength: 2048 }), kind: Type.Unsafe<"openai" | "wemm">({ type: "string", enum: ["openai", "wemm"] }),
+@@ -532,19 +658,48 @@ export default function v2(pi: ExtensionAPI): void {
+   });
+   pi.registerTool({
+     name: "ks_v2_profile_select", label: "V2 select profile", description: "Select exact default PDF profile revision for FUTURE rebuilds only. Existing active books and ordinary collections are unchanged.", parameters: Type.Object({ id: Type.String(), revision: Type.Integer({ minimum: 1 }) }),
+-    async execute(_id, params, signal, _update, ctx) { await approve(ctx, signalFor(ctx, signal), "index", "Select default for future PDF reindexes only?"); return reply(await generations(ctx).selectProfile(params.id, params.revision)); },
++    async execute(_id, params, signal, _update, ctx) {
++      const active = signalFor(ctx, signal), store = generations(ctx), snapshot = await store.profiles();
++      const target = snapshot.profiles.find(p => p.id === params.id && p.revision === params.revision);
++      if (!target) throw new Error("Unknown profile revision");
++      await approveProfileSelection(ctx, active, snapshot, target);
++      active.throwIfAborted();
++      return reply(await store.selectProfile(target.id, target.revision, snapshot.catalogRevision));
++    },
+   });
+   pi.registerCommand("ks-v2-profiles", {
+     description: "Select an immutable PDF model revision (no index switch or network)",
+     async handler(_args, ctx) {
+       if (!ctx.hasUI) throw new Error("Use ks_v2_profile_list/select in headless mode");
+-      const store = generations(ctx), list = await store.profiles();
+-      const choices = list.profiles.map(p => `${p.id}@${p.revision}`);
+-      const choice = await ctx.ui.select("Default profile for FUTURE PDF rebuilds", choices, { timeout: 120000 });
+-      if (!choice) return;
+-      const p = list.profiles[choices.indexOf(choice)]!;
+-      await approve(ctx, signalFor(ctx), "index", `Select ${choice}? Existing indexes stay active.`);
+-      await store.selectProfile(p.id, p.revision); ctx.ui.notify(`Selected ${choice}; no book index changed.`, "info");
++      const signal = signalFor(ctx), store = generations(ctx), list = await store.profiles();
++      const choices = list.profiles.map(profileChoice);
++      if (choices.length === 0) return;
++      const title = "Default profile for FUTURE PDF rebuilds";
++      const decision = await interactions.interact({
++        action: "profile-choice",
++        revision: `profile-catalog-v1:${list.catalogRevision}`,
++        classification: "session",
++        method: "select",
++        schema: { kind: "select", options: choices },
++        content: { title, selected: list.selected },
++        deadline: Date.now() + 120_000,
++      }, {
++        signal,
++        isCurrent: () => !signal.aborted,
++        local: async (localSignal) => ctx.ui.select(title, choices, {
++          signal: AbortSignal.any([signal, localSignal]),
++          timeout: 120_000,
++        }),
++      });
++      signal.throwIfAborted();
++      if (decision.state !== "allowed" || typeof decision.answer !== "string") return;
++      const index = choices.indexOf(decision.answer);
++      if (index < 0) throw new Error("Invalid profile selection");
++      const p = list.profiles[index]!;
++      await approveProfileSelection(ctx, signal, list, p);
++      signal.throwIfAborted();
++      await store.selectProfile(p.id, p.revision, list.catalogRevision);
++      ctx.ui.notify(`Selected ${decision.answer}; no book index changed.`, "info");
+     },
+   });
+   const bookSchema = Type.String({ pattern: "^book_[a-f0-9]{64}$" });
+@@ -1327,3 +1482,7 @@ export default function v2(pi: ExtensionAPI): void {
+     });
+   }
+ }
++
++export default function v2(pi: ExtensionAPI): void {
++  registerKnowledgeStudioV2(pi);
++}
+diff --git a/package-lock.json b/package-lock.json
+index b3bb9f1..f399280 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -24,7 +24,13 @@
+         "unpdf": "^1.8.1"
+       },
+       "peerDependencies": {
+-        "@earendil-works/pi-coding-agent": "*"
++        "@earendil-works/pi-coding-agent": "*",
++        "@kkkiio/pi-web-ui": "^1.0.1"
++      },
++      "peerDependenciesMeta": {
++        "@kkkiio/pi-web-ui": {
++          "optional": true
++        }
+       }
+     },
+     "node_modules/@earendil-works/pi-coding-agent": {
+diff --git a/package.json b/package.json
+index 92fb248..c3feea1 100644
+--- a/package.json
++++ b/package.json
+@@ -36,7 +36,13 @@
+     "typebox": "^1.3.23"
+   },
+   "peerDependencies": {
+-    "@earendil-works/pi-coding-agent": "*"
++    "@earendil-works/pi-coding-agent": "*",
++    "@kkkiio/pi-web-ui": "^1.0.1"
++  },
++  "peerDependenciesMeta": {
++    "@kkkiio/pi-web-ui": {
++      "optional": true
++    }
+   },
+   "scripts": {
+     "check": "tsc --noEmit",
+diff --git a/src/application/pdf-generation-store.ts b/src/application/pdf-generation-store.ts
+index 2a4ae06..4d2b178 100644
+--- a/src/application/pdf-generation-store.ts
++++ b/src/application/pdf-generation-store.ts
+@@ -26,6 +26,9 @@ const MAX_CAPTURE_METADATA = 64 * 1024 * 1024;
+ // persisted in a private staging SQLite database instead of held in the heap.
+ const MAX_IMPORT_VECTORS = 64 * 1024 * 1024;
+ function hash(value: string) { return createHash("sha256").update(value).digest("hex"); }
++function profileCatalogRevision(r: Registry) {
++  return hash(JSON.stringify({ profiles: r.profiles, selected: r.selected }));
++}
+ function exact(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
+   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== [...keys].sort().join()) throw new Error("Invalid generation registry record");
+ }
+@@ -179,7 +182,7 @@ export class PdfGenerations {
+       } finally { db.close(); }
+     });
+   }
+-  async profiles() { return this.control(r => ({ profiles: r.profiles, selected: r.selected })); }
++  async profiles() { return this.control(r => ({ profiles: r.profiles, selected: r.selected, catalogRevision: profileCatalogRevision(r) })); }
+   async addProfile(input: ProfileInput) {
+     // Exact validation rejects apiKey/headers/unknown fields; only env names are accepted.
+     exact(input, ["id", "endpoint", "kind", "space", "credentialEnv"]);
+@@ -188,8 +191,12 @@ export class PdfGenerations {
+       validateProfile(p); r.profiles.push(p); return p;
+     }, true);
+   }
+-  async selectProfile(id: string, revision: number) {
+-    return this.control(r => { if (!r.profiles.some(p => p.id === id && p.revision === revision)) throw new Error("Unknown profile revision"); r.selected = { id, revision }; return r.selected; }, true);
++  async selectProfile(id: string, revision: number, expectedCatalogRevision?: string) {
++    return this.control(r => {
++      if (expectedCatalogRevision !== undefined && profileCatalogRevision(r) !== expectedCatalogRevision) throw new Error("Profile catalog changed; refresh and select again");
++      if (!r.profiles.some(p => p.id === id && p.revision === revision)) throw new Error("Unknown profile revision");
++      r.selected = { id, revision }; return r.selected;
++    }, true);
+   }
+   async selectedProfile() {
+     return this.control(r => { const p = r.profiles.find(p => p.id === r.selected?.id && p.revision === r.selected.revision); if (!p) throw new Error("Select a model profile first"); return p; });
+diff --git a/tests/answer-extension.test.ts b/tests/answer-extension.test.ts
+index 342c79a..3c2ba18 100644
+--- a/tests/answer-extension.test.ts
++++ b/tests/answer-extension.test.ts
+@@ -23,6 +23,7 @@ function register(env: Record<string, string> = {}) {
+   try {
+     // Test double exposes only registration; load must not call other host APIs.
+     v2({
++      on() { return () => {}; },
+       registerCommand() {},
+       registerTool(tool: ToolDefinition) {
+         tools.set(tool.name, tool);
+diff --git a/tests/ocr-extension.test.ts b/tests/ocr-extension.test.ts
+index a2f267f..aadd7ac 100644
+--- a/tests/ocr-extension.test.ts
++++ b/tests/ocr-extension.test.ts
+@@ -18,6 +18,7 @@ function register(grants: string, config?: string, storageRoot?: string) {
+   const tools = new Map<string, ToolDefinition>();
+   try {
+     v2({
++      on() { return () => {}; },
+       registerCommand() {},
+       registerTool: (tool: ToolDefinition) => {
+         tools.set(tool.name, tool);
+diff --git a/tests/pdf-generations.test.ts b/tests/pdf-generations.test.ts
+index 1848b08..39a4361 100644
+--- a/tests/pdf-generations.test.ts
++++ b/tests/pdf-generations.test.ts
+@@ -41,6 +41,28 @@ test("source capture import preserves exact legacy identity/files/images; profil
+   } finally { await rm(x.root, { recursive: true, force: true }); }
+ });
+ 
++test("profile catalog revision rejects a stale selection across real store instances", async () => {
++  const root = await mkdtemp(join(tmpdir(), "profile-catalog-cas-"));
++  try {
++    const path = join(root, "store");
++    const first = new PdfGenerations(path, quotas);
++    const second = new PdfGenerations(path, quotas);
++    const alpha = await first.addProfile(input("alpha"));
++    const beta = await first.addProfile(input("beta"));
++    await first.selectProfile(alpha.id, alpha.revision);
++    const snapshot = await first.profiles();
++    await second.addProfile(input("gamma"));
++
++    await assert.rejects(
++      first.selectProfile(beta.id, beta.revision, snapshot.catalogRevision),
++      /Profile catalog changed/,
++    );
++    assert.deepEqual((await first.profiles()).selected, { id: "alpha", revision: 1 });
++  } finally {
++    await rm(root, { recursive: true, force: true });
++  }
++});
++
+ test("A search/status/cancel stay available while B HTTP is blocked; stale result fenced and same-space generations isolated", async () => {
+   const x = await setup(), entered = gate(), release = gate();
+   try {
+diff --git a/tests/v2-extension.test.ts b/tests/v2-extension.test.ts
+index 4ee1e41..7392615 100644
+--- a/tests/v2-extension.test.ts
++++ b/tests/v2-extension.test.ts
+@@ -23,6 +23,7 @@ function register(env: Record<string, string> = {}) {
+   try {
+     // Test double exposes only registration; load must not call other host APIs.
+     v2({
++      on() { return () => {}; },
+       registerCommand() {},
+       registerTool(tool: ToolDefinition) {
+         tools.set(tool.name, tool);
+diff --git a/extensions/pi-web-ui-interactions-v1.d.ts b/extensions/pi-web-ui-interactions-v1.d.ts
+new file mode 100644
+--- /dev/null
++++ b/extensions/pi-web-ui-interactions-v1.d.ts
+@@ -0,0 +1,71 @@
++declare module "@kkkiio/pi-web-ui/interactions/v1" {
++  export type Json =
++    | null
++    | boolean
++    | number
++    | string
++    | Json[]
++    | { [key: string]: Json };
++  export type ResponseSchema =
++    | { kind: "confirm" }
++    | { kind: "select"; options: string[] }
++    | { kind: "text"; maxBytes: number };
++  export type InteractionSpec = {
++    action: string;
++    revision: string;
++    classification: "session" | "sensitive";
++    method: "confirm" | "select" | "input" | "editor";
++    schema: ResponseSchema;
++    purpose?: "oauth";
++    content: Record<string, Json>;
++    deadline: number;
++  };
++  export type InteractionResult = {
++    state:
++      | "pending"
++      | "delivering"
++      | "allowed"
++      | "rejected"
++      | "cancelled"
++      | "expired"
++      | "stale"
++      | "delivery_unknown";
++    winner?: "local" | "web";
++    answer?: boolean | string;
++  };
++  export type SourceRequestOptions = {
++    isCurrent: () => boolean;
++    signal?: AbortSignal;
++    local?: (signal: AbortSignal) => Promise<boolean | string | undefined>;
++    operationId?: string;
++  };
++  export type AdapterManifest = {
++    id: string;
++    version: string;
++    packageName: string;
++    actions: Record<
++      string,
++      {
++        classification: InteractionSpec["classification"];
++        method: InteractionSpec["method"];
++      }
++    >;
++  };
++  export type InteractionEventBus = {
++    emit(channel: string, data: unknown): void;
++    on(channel: string, handler: (data: unknown) => void): () => void;
++  };
++  export type InteractionClient = {
++    status(): "absent" | "unsupported" | "available";
++    interact(
++      spec: InteractionSpec,
++      options: SourceRequestOptions,
++    ): Promise<InteractionResult>;
++    request(spec: InteractionSpec, options: SourceRequestOptions): unknown;
++    dispose(): void;
++  };
++  export function createInteractionClient(
++    events: InteractionEventBus,
++    manifest: AdapterManifest,
++  ): InteractionClient;
++}
+diff --git a/extensions/web-interactions.ts b/extensions/web-interactions.ts
+new file mode 100644
+--- /dev/null
++++ b/extensions/web-interactions.ts
+@@ -0,0 +1,179 @@
++import type {
++  AdapterManifest,
++  InteractionClient,
++  InteractionEventBus,
++  InteractionResult,
++  InteractionSpec,
++  SourceRequestOptions,
++} from "@kkkiio/pi-web-ui/interactions/v1";
++
++const PUBLIC_MODULE = "@kkkiio/pi-web-ui/interactions/v1";
++const INTERACTION_LIMITS = {
++  confirmationMs: 120_000,
++  oauthMs: 600_000,
++} as const;
++
++function missingOptionalModule(error: unknown): boolean {
++  const candidate = error as { code?: unknown; message?: unknown } | null;
++  return (
++    (candidate?.code === "ERR_MODULE_NOT_FOUND" ||
++      candidate?.code === "MODULE_NOT_FOUND") &&
++    typeof candidate.message === "string" &&
++    candidate.message.includes("@kkkiio/pi-web-ui")
++  );
++}
++
++function validateLocalAnswer(
++  spec: InteractionSpec,
++  answer: boolean | string,
++): boolean | string {
++  if (spec.schema.kind === "confirm" && typeof answer === "boolean")
++    return answer;
++  if (
++    spec.schema.kind === "select" &&
++    typeof answer === "string" &&
++    spec.schema.options.includes(answer)
++  )
++    return answer;
++  if (
++    spec.schema.kind === "text" &&
++    typeof answer === "string" &&
++    Buffer.byteLength(answer) <= spec.schema.maxBytes
++  )
++    return answer;
++  throw new Error("Invalid local interaction answer");
++}
++
++async function terminalFallback(
++  spec: InteractionSpec,
++  options: SourceRequestOptions,
++  fallbacks: Map<AbortController, () => void>,
++  isDisposed: () => boolean,
++): Promise<InteractionResult> {
++  if (!Number.isSafeInteger(spec.deadline))
++    throw new Error("Invalid interaction deadline");
++  if (spec.deadline <= Date.now()) return { state: "expired" };
++  if (options.signal?.aborted) return { state: "cancelled" };
++  if (!options.isCurrent()) return { state: "stale" };
++  if (!options.local) return { state: "cancelled" };
++  const effectiveDeadline = Math.min(
++    spec.deadline,
++    Date.now() +
++      (spec.purpose === "oauth"
++        ? INTERACTION_LIMITS.oauthMs
++        : INTERACTION_LIMITS.confirmationMs),
++  );
++  return new Promise<InteractionResult>((resolve) => {
++    const controller = new AbortController();
++    let settled = false;
++    const finish = (result: InteractionResult) => {
++      if (settled) return;
++      settled = true;
++      clearTimeout(timer);
++      fallbacks.delete(controller);
++      options.signal?.removeEventListener("abort", cancel);
++      controller.abort();
++      resolve(result);
++    };
++    const cancel = () => finish({ state: "cancelled" });
++    const remaining = effectiveDeadline - Date.now();
++    const timer = setTimeout(
++      () => finish({ state: "expired" }),
++      Math.max(1, remaining),
++    );
++    fallbacks.set(controller, cancel);
++    options.signal?.addEventListener("abort", cancel, { once: true });
++    if (options.signal?.aborted || isDisposed()) {
++      cancel();
++      return;
++    }
++    void Promise.resolve()
++      .then(() => {
++        if (settled || isDisposed() || controller.signal.aborted)
++          return undefined;
++        if (!options.isCurrent()) {
++          finish({ state: "stale" });
++          return undefined;
++        }
++        if (Date.now() >= effectiveDeadline) {
++          finish({ state: "expired" });
++          return undefined;
++        }
++        return options.local?.(controller.signal);
++      })
++      .then((answer) => {
++        if (settled) return;
++        if (options.signal?.aborted || isDisposed()) {
++          cancel();
++          return;
++        }
++        if (!options.isCurrent()) {
++          finish({ state: "stale" });
++          return;
++        }
++        if (Date.now() >= effectiveDeadline) {
++          finish({ state: "expired" });
++          return;
++        }
++        if (answer === undefined) {
++          cancel();
++          return;
++        }
++        const value = validateLocalAnswer(spec, answer);
++        finish({
++          state: value === false ? "rejected" : "allowed",
++          answer: value,
++          winner: "local",
++        });
++      })
++      .catch(cancel);
++  });
++}
++
++export interface OptionalInteractionRunner {
++  interact(
++    spec: InteractionSpec,
++    options: SourceRequestOptions,
++  ): Promise<InteractionResult>;
++  dispose(): void;
++}
++
++export function createOptionalInteractionRunner(
++  events: InteractionEventBus,
++  manifest: AdapterManifest,
++  injected?: InteractionClient,
++): OptionalInteractionRunner {
++  let client: InteractionClient | undefined = injected;
++  let loading: Promise<InteractionClient | undefined> | undefined;
++  let disposed = false;
++  const fallbacks = new Map<AbortController, () => void>();
++  const load = (): Promise<InteractionClient | undefined> => {
++    if (client) return Promise.resolve(client);
++    loading ??= import(PUBLIC_MODULE)
++      .then((module) => {
++        client = module.createInteractionClient(events, manifest);
++        return client;
++      })
++      .catch((error: unknown) => {
++        if (missingOptionalModule(error)) return undefined;
++        throw error;
++      });
++    return loading;
++  };
++  return {
++    async interact(spec, options) {
++      const available = await load();
++      if (disposed) return { state: "cancelled" };
++      return available
++        ? available.interact(spec, options)
++        : terminalFallback(spec, options, fallbacks, () => disposed);
++    },
++    dispose() {
++      disposed = true;
++      for (const cancel of [...fallbacks.values()]) cancel();
++      if (client) client.dispose();
++      else void loading?.then((loaded) => loaded?.dispose());
++      client = undefined;
++    },
++  };
++}
+diff --git a/tests/web-interactions.test.ts b/tests/web-interactions.test.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/web-interactions.test.ts
+@@ -0,0 +1,561 @@
++import assert from "node:assert/strict";
++import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import test from "node:test";
++import type {
++  ExtensionAPI,
++  ExtensionContext,
++  ToolDefinition,
++} from "@earendil-works/pi-coding-agent";
++import type {
++  InteractionClient,
++  InteractionResult,
++  InteractionSpec,
++  SourceRequestOptions,
++} from "@kkkiio/pi-web-ui/interactions/v1";
++import { registerKnowledgeStudioV2 } from "../extensions/v2.ts";
++import { createOptionalInteractionRunner } from "../extensions/web-interactions.ts";
++import { KnowledgeRuntime } from "../src/application/knowledge-runtime.ts";
++import {
++  PdfGenerations,
++  type ProfileInput,
++} from "../src/application/pdf-generation-store.ts";
++
++type RegisteredTool = ToolDefinition<Record<string, unknown>, unknown>;
++type RegisteredCommand = {
++  handler: (args: string, ctx: ExtensionContext) => Promise<void> | void;
++};
++
++const runnerManifest = {
++  id: "knowledge-studio-test",
++  version: "1",
++  packageName: "knowledge-studio-test",
++  actions: { confirm: { classification: "sensitive" as const, method: "confirm" as const } },
++};
++const runnerEvents = { emit() {}, on() { return () => {}; } };
++const pendingConfirm = (deadline: number): InteractionSpec => ({
++  action: "confirm",
++  revision: "runner-test-v1",
++  classification: "sensitive",
++  method: "confirm",
++  schema: { kind: "confirm" },
++  content: { title: "runner test" },
++  deadline,
++});
++
++function scriptedClient(
++  run: (
++    spec: InteractionSpec,
++    options: SourceRequestOptions,
++  ) => Promise<InteractionResult>,
++): InteractionClient {
++  return {
++    status: () => "available",
++    interact: run,
++    request: () => {
++      throw new Error("request() is not used by the Knowledge Studio adapter");
++    },
++    dispose() {},
++  };
++}
++
++function register(
++  root: string,
++  interactions: InteractionClient,
++  env: Record<string, string> = {},
++) {
++  const saved = { ...process.env };
++  for (const key of Object.keys(process.env))
++    if (key.startsWith("PI_KS_V2_")) delete process.env[key];
++  process.env.PI_KS_V2_DATA_DIR = root;
++  Object.assign(process.env, env);
++  const tools = new Map<string, RegisteredTool>();
++  const commands = new Map<string, RegisteredCommand>();
++  const lifecycle = new Map<string, Array<(...args: never[]) => unknown>>();
++  try {
++    registerKnowledgeStudioV2({
++      events: { emit() {}, on() { return () => {}; } },
++      on(name: string, handler: (...args: never[]) => unknown) {
++        lifecycle.set(name, [...(lifecycle.get(name) ?? []), handler]);
++        return () => {};
++      },
++      registerTool(tool: RegisteredTool) { tools.set(tool.name, tool); },
++      registerCommand(name: string, command: RegisteredCommand) {
++        commands.set(name, command);
++      },
++    } as unknown as ExtensionAPI, { interactions });
++  } finally {
++    for (const key of Object.keys(process.env))
++      if (key.startsWith("PI_KS_V2_")) delete process.env[key];
++    Object.assign(process.env, saved);
++  }
++  return {
++    tools,
++    commands,
++    async advance(name: string) {
++      for (const handler of lifecycle.get(name) ?? []) await handler();
++    },
++  };
++}
++
++function context(
++  cwd: string,
++  ui: Partial<ExtensionContext["ui"]> = {},
++): ExtensionContext {
++  return {
++    cwd,
++    hasUI: true,
++    signal: undefined,
++    ui: {
++      confirm: async () => {
++        throw new Error("unexpected terminal confirmation");
++      },
++      select: async () => {
++        throw new Error("unexpected terminal selection");
++      },
++      notify() {},
++      ...ui,
++    },
++  } as unknown as ExtensionContext;
++}
++
++async function invoke(
++  tools: Map<string, RegisteredTool>,
++  name: string,
++  params: Record<string, unknown>,
++  ctx: ExtensionContext,
++) {
++  const tool = tools.get(name);
++  assert.ok(tool, name);
++  return tool.execute("fixture-call", params, undefined, undefined, ctx as never);
++}
++
++const profile = (id: string, model: string): ProfileInput => ({
++  id,
++  endpoint: "http://127.0.0.1:7777/embeddings",
++  kind: "openai",
++  space: {
++    provider: "fixture",
++    model,
++    revision: "1",
++    dimension: 2,
++    queryInstruction: "query: ",
++    documentInstruction: "document: ",
++  },
++  credentialEnv: null,
++});
++
++test("Web approval aborts the local import confirmation and persists the real collection mutation", async (t) => {
++  const cwd = await mkdtemp(join(tmpdir(), "ks-web-import-"));
++  const dataRoot = join(cwd, ".pi", "knowledge-studio");
++  t.after(() => rm(cwd, { recursive: true, force: true }));
++  await writeFile(join(cwd, "input.txt"), "Web-approved source entry fixture");
++  let localStarted = false;
++  let localAborted = false;
++  let request: InteractionSpec | undefined;
++  const interactions = scriptedClient(async (spec, options) => {
++    request = structuredClone(spec);
++    assert.equal(options.isCurrent(), true);
++    assert.ok(options.local);
++    const controller = new AbortController();
++    const local = options.local(controller.signal);
++    await new Promise<void>((resolve) => setImmediate(resolve));
++    controller.abort();
++    await local;
++    return { state: "allowed", answer: true, winner: "web" };
++  });
++  const { tools } = register(dataRoot, interactions);
++  const ctx = context(cwd, {
++    confirm: async (_title, _message, options) => {
++      localStarted = true;
++      return new Promise<boolean>((resolve) => {
++        options?.signal?.addEventListener("abort", () => {
++          localAborted = true;
++          resolve(false);
++        }, { once: true });
++      });
++    },
++  });
++
++  await invoke(tools, "ks_v2_import", {
++    collection: "demo",
++    path: "input.txt",
++  }, ctx);
++
++  assert.equal(localStarted, true);
++  assert.equal(localAborted, true);
++  assert.equal(request?.action, "import");
++  assert.equal(request?.classification, "sensitive");
++  assert.equal(request?.method, "confirm");
++  assert.match(String(request?.revision), /^approval-v1:/);
++  assert.match(JSON.stringify(request?.content), /input\.txt/);
++  const runtime = new KnowledgeRuntime(join(dataRoot, "collections", "demo"));
++  assert.equal((await runtime.list()).length, 1);
++  assert.equal(
++    (await runtime.search("Web-approved source entry fixture")).bundle.texts[0]?.text,
++    "Web-approved source entry fixture",
++  );
++});
++
++test("missing optional Web package fallback cancels a non-returning local prompt on source abort", async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  const source = new AbortController();
++  let localSignal: AbortSignal | undefined;
++  const pending = runner.interact(pendingConfirm(Date.now() + 1_000), {
++    signal: source.signal,
++    isCurrent: () => true,
++    local: async (signal) => {
++      localSignal = signal;
++      return new Promise<boolean>(() => {});
++    },
++  });
++  await new Promise<void>((resolve) => setImmediate(resolve));
++  source.abort();
++  const result = await Promise.race([
++    pending,
++    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("fallback cancellation hung")), 250)),
++  ]);
++  assert.equal(result.state, "cancelled");
++  assert.equal(localSignal?.aborted, true);
++});
++
++test("missing optional Web package fallback expires and aborts a non-returning local prompt at the absolute deadline", async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  let localSignal: AbortSignal | undefined;
++  const result = await Promise.race([
++    runner.interact(pendingConfirm(Date.now() + 25), {
++      isCurrent: () => true,
++      local: async (signal) => {
++        localSignal = signal;
++        return new Promise<boolean>(() => {});
++      },
++    }),
++    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("fallback deadline hung")), 500)),
++  ]);
++  assert.equal(result.state, "expired");
++  assert.equal(localSignal?.aborted, true);
++});
++
++test("fallback source abort queued after currentness check prevents the local prompt from starting", async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  const source = new AbortController();
++  let localCalls = 0;
++  const result = await runner.interact(pendingConfirm(Date.now() + 1_000), {
++    signal: source.signal,
++    isCurrent: () => {
++      queueMicrotask(() => source.abort());
++      return true;
++    },
++    local: async () => {
++      localCalls++;
++      return true;
++    },
++  });
++  assert.equal(result.state, "cancelled");
++  assert.equal(localCalls, 0);
++});
++
++test("fallback runner disposal queued after currentness check prevents the local prompt from starting", async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  let localCalls = 0;
++  const result = await runner.interact(pendingConfirm(Date.now() + 1_000), {
++    isCurrent: () => {
++      queueMicrotask(() => runner.dispose());
++      return true;
++    },
++    local: async () => {
++      localCalls++;
++      return true;
++    },
++  });
++  assert.equal(result.state, "cancelled");
++  assert.equal(localCalls, 0);
++});
++
++test("fallback stale transition queued after the initial check prevents the local prompt from starting", async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  let current = true;
++  let checks = 0;
++  let localCalls = 0;
++  const result = await runner.interact(pendingConfirm(Date.now() + 1_000), {
++    isCurrent: () => {
++      checks++;
++      if (checks === 1) queueMicrotask(() => { current = false; });
++      return current;
++    },
++    local: async () => {
++      localCalls++;
++      return true;
++    },
++  });
++  assert.equal(result.state, "stale");
++  assert.equal(localCalls, 0);
++});
++
++test("fallback effective deadline reached before the queued prompt prevents local startup", async (t) => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  const nativeNow = Date.now;
++  let now = nativeNow();
++  Date.now = () => now;
++  t.after(() => { Date.now = nativeNow; });
++  let checks = 0;
++  let localCalls = 0;
++  const result = await runner.interact(pendingConfirm(now + 600_000), {
++    isCurrent: () => {
++      checks++;
++      if (checks === 1) queueMicrotask(() => { now += 120_001; });
++      return true;
++    },
++    local: async () => {
++      localCalls++;
++      return true;
++    },
++  });
++  assert.equal(result.state, "expired");
++  assert.equal(localCalls, 0);
++});
++
++test("fallback completion after the capped effective deadline expires even when the source deadline is later", async (t) => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  const nativeNow = Date.now;
++  let now = nativeNow();
++  Date.now = () => now;
++  t.after(() => { Date.now = nativeNow; });
++  let release!: (answer: boolean) => void;
++  const held = new Promise<boolean>((resolve) => { release = resolve; });
++  let entered!: () => void;
++  const started = new Promise<void>((resolve) => { entered = resolve; });
++  let localSignal: AbortSignal | undefined;
++  const pending = runner.interact(pendingConfirm(now + 600_000), {
++    isCurrent: () => true,
++    local: async (signal) => {
++      localSignal = signal;
++      entered();
++      return held;
++    },
++  });
++  await started;
++  now += 120_001;
++  release(true);
++  const result = await pending;
++  assert.equal(result.state, "expired");
++  assert.equal(localSignal?.aborted, true);
++});
++
++test("Web rejection performs no import or provider/filesystem side effect", async (t) => {
++  const cwd = await mkdtemp(join(tmpdir(), "ks-web-reject-"));
++  const dataRoot = join(cwd, ".pi", "knowledge-studio");
++  t.after(() => rm(cwd, { recursive: true, force: true }));
++  await writeFile(join(cwd, "input.txt"), "must not persist");
++  const network = t.mock.method(globalThis, "fetch", async () => {
++    throw new Error("unexpected provider call");
++  });
++  const interactions = scriptedClient(async (spec) => {
++    assert.equal(spec.action, "import");
++    return { state: "rejected", answer: false, winner: "web" };
++  });
++  const { tools } = register(dataRoot, interactions);
++
++  await assert.rejects(
++    invoke(tools, "ks_v2_import", { collection: "demo", path: "input.txt" }, context(cwd)),
++    /V2 import denied/,
++  );
++  await assert.rejects(access(dataRoot), { code: "ENOENT" });
++  assert.equal(network.mock.callCount(), 0);
++});
++
++test("an available interaction client error fails closed without terminal retry or import", async (t) => {
++  const cwd = await mkdtemp(join(tmpdir(), "ks-web-error-"));
++  const dataRoot = join(cwd, ".pi", "knowledge-studio");
++  t.after(() => rm(cwd, { recursive: true, force: true }));
++  await writeFile(join(cwd, "input.txt"), "must fail closed");
++  const interactions = scriptedClient(async () => {
++    throw new Error("fixture broker failure");
++  });
++  const { tools } = register(dataRoot, interactions);
++
++  await assert.rejects(
++    invoke(tools, "ks_v2_import", { collection: "demo", path: "input.txt" }, context(cwd)),
++    /fixture broker failure/,
++  );
++  await assert.rejects(access(dataRoot), { code: "ENOENT" });
++});
++
++test("Web rejection of the bound generation workflow prevents model egress and export", async (t) => {
++  const cwd = await mkdtemp(join(tmpdir(), "ks-web-generation-reject-"));
++  const dataRoot = join(cwd, ".pi", "knowledge-studio");
++  t.after(() => rm(cwd, { recursive: true, force: true }));
++  await writeFile(join(cwd, "input.txt"), "Web workflow evidence fixture");
++  const requests: InteractionSpec[] = [];
++  const interactions = scriptedClient(async (spec) => {
++    requests.push(structuredClone(spec));
++    if (spec.action === "import")
++      return { state: "allowed", answer: true, winner: "web" };
++    assert.equal(spec.action, "generate");
++    assert.equal(spec.classification, "sensitive");
++    assert.equal(spec.method, "confirm");
++    assert.deepEqual(spec.content.workflowGrants, ["search", "generate", "export"]);
++    assert.match(String(spec.content.message), /Web workflow evidence fixture/);
++    assert.match(String(spec.content.message), /generation-fixture/);
++    assert.match(String(spec.content.message), /127\.0\.0\.1:9876/);
++    assert.match(String(spec.content.message), /exports.*report/);
++    return { state: "rejected", answer: false, winner: "web" };
++  });
++  const { tools } = register(dataRoot, interactions, {
++    PI_KS_V2_GENERATE_ENDPOINT: "http://127.0.0.1:9876/v1/chat/completions",
++    PI_KS_V2_GENERATE_MODEL: "generation-fixture",
++  });
++  const ctx = context(cwd, {
++    confirm: async () => {
++      assert.fail("the terminal dialog must not win this Web fixture");
++    },
++  });
++  const network = t.mock.method(globalThis, "fetch", async () => {
++    throw new Error("generation rejection must prevent provider egress");
++  });
++  await invoke(tools, "ks_v2_import", {
++    collection: "demo",
++    path: "input.txt",
++  }, ctx);
++  await assert.rejects(
++    invoke(tools, "ks_v2_generate", {
++      collection: "demo",
++      query: "workflow evidence",
++      title: "Rejected report",
++      output: "report",
++    }, ctx),
++    /generation workflow was not approved/,
++  );
++  assert.deepEqual(requests.map((request) => request.action), ["import", "generate"]);
++  assert.equal(network.mock.callCount(), 0);
++  await assert.rejects(access(join(dataRoot, "exports", "report")), { code: "ENOENT" });
++});
++
++test("session lifecycle fences an old approved operation while a new context can proceed", async (t) => {
++  const cwd = await mkdtemp(join(tmpdir(), "ks-web-lifecycle-"));
++  const dataRoot = join(cwd, ".pi", "knowledge-studio");
++  t.after(() => rm(cwd, { recursive: true, force: true }));
++  await writeFile(join(cwd, "old.txt"), "old context must not persist");
++  await writeFile(join(cwd, "new.txt"), "new context may persist");
++  let release!: () => void;
++  const held = new Promise<void>((resolve) => { release = resolve; });
++  let requests = 0;
++  let entered!: () => void;
++  const started = new Promise<void>((resolve) => { entered = resolve; });
++  const interactions = scriptedClient(async () => {
++    requests++;
++    if (requests === 1) {
++      entered();
++      await held;
++    }
++    return { state: "allowed", answer: true, winner: "web" };
++  });
++  const registration = register(dataRoot, interactions);
++  const old = invoke(registration.tools, "ks_v2_import", {
++    collection: "demo",
++    path: "old.txt",
++  }, context(cwd));
++  await started;
++  await registration.advance("session_before_switch");
++  release();
++
++  await assert.rejects(old, /abort/i);
++  await invoke(registration.tools, "ks_v2_import", {
++    collection: "demo",
++    path: "new.txt",
++  }, context(cwd));
++  const result = await new KnowledgeRuntime(join(dataRoot, "collections", "demo"))
++    .search("new context may persist");
++  assert.deepEqual(result.bundle.texts.map((text) => text.text), ["new context may persist"]);
++});
++
++test("profile command uses Web selection then confirms and commits the exact catalog snapshot", async (t) => {
++  const cwd = await mkdtemp(join(tmpdir(), "ks-web-profile-"));
++  const dataRoot = join(cwd, ".pi", "knowledge-studio");
++  t.after(() => rm(cwd, { recursive: true, force: true }));
++  const store = new PdfGenerations(join(dataRoot, "pdf-generations"));
++  const alpha = await store.addProfile(profile("alpha", "model-a"));
++  const beta = await store.addProfile(profile("beta", "model-b"));
++  await store.selectProfile(alpha.id, alpha.revision);
++  const snapshot = await store.profiles();
++  const requests: InteractionSpec[] = [];
++  const interactions = scriptedClient(async (spec) => {
++    requests.push(structuredClone(spec));
++    if (spec.action === "profile-choice") {
++      assert.deepEqual(spec.schema, {
++        kind: "select",
++        options: ["alpha@1", "beta@1"],
++      });
++      return { state: "allowed", answer: "beta@1", winner: "web" };
++    }
++    assert.equal(spec.action, "profile-select");
++    assert.equal(spec.revision, `profile-catalog-v1:${snapshot.catalogRevision}`);
++    assert.equal(spec.content.catalogRevision, snapshot.catalogRevision);
++    assert.deepEqual(spec.content.target, beta);
++    assert.deepEqual(spec.content.previous, { id: "alpha", revision: 1 });
++    assert.match(String(spec.content.message), /Existing indexes remain unchanged/);
++    return { state: "allowed", answer: true, winner: "web" };
++  });
++  const { commands } = register(dataRoot, interactions);
++  const command = commands.get("ks-v2-profiles");
++  assert.ok(command);
++  const notices: string[] = [];
++
++  await command.handler("", context(cwd, {
++    notify(message) { notices.push(message); },
++  }));
++
++  assert.deepEqual(requests.map((request) => request.action), ["profile-choice", "profile-select"]);
++  assert.deepEqual((await store.profiles()).selected, { id: "beta", revision: 1 });
++  assert.deepEqual(notices, ["Selected beta@1; no book index changed."]);
++});
++
++test("profile command rejects a catalog changed after confirmation and preserves the prior selection", async (t) => {
++  const cwd = await mkdtemp(join(tmpdir(), "ks-web-profile-cas-"));
++  const dataRoot = join(cwd, ".pi", "knowledge-studio");
++  t.after(() => rm(cwd, { recursive: true, force: true }));
++  const store = new PdfGenerations(join(dataRoot, "pdf-generations"));
++  const alpha = await store.addProfile(profile("alpha", "model-a"));
++  await store.addProfile(profile("beta", "model-b"));
++  await store.selectProfile(alpha.id, alpha.revision);
++  const concurrent = new PdfGenerations(join(dataRoot, "pdf-generations"));
++  const interactions = scriptedClient(async (spec) => {
++    if (spec.action === "profile-choice")
++      return { state: "allowed", answer: "beta@1", winner: "web" };
++    await concurrent.addProfile(profile("gamma", "model-c"));
++    return { state: "allowed", answer: true, winner: "web" };
++  });
++  const { commands } = register(dataRoot, interactions);
++  const command = commands.get("ks-v2-profiles");
++  assert.ok(command);
++
++  await assert.rejects(
++    Promise.resolve(command.handler("", context(cwd))),
++    /Profile catalog changed/,
++  );
++  assert.deepEqual((await store.profiles()).selected, { id: "alpha", revision: 1 });
++});
++
++test("profile-select tool confirms full trusted target and uses catalog CAS", async (t) => {
++  const cwd = await mkdtemp(join(tmpdir(), "ks-web-profile-tool-"));
++  const dataRoot = join(cwd, ".pi", "knowledge-studio");
++  t.after(() => rm(cwd, { recursive: true, force: true }));
++  const store = new PdfGenerations(join(dataRoot, "pdf-generations"));
++  const alpha = await store.addProfile(profile("alpha", "model-a"));
++  const beta = await store.addProfile(profile("beta", "model-b"));
++  await store.selectProfile(alpha.id, alpha.revision);
++  const snapshot = await store.profiles();
++  const interactions = scriptedClient(async (spec) => {
++    assert.equal(spec.action, "profile-select");
++    assert.equal(spec.revision, `profile-catalog-v1:${snapshot.catalogRevision}`);
++    assert.equal(spec.content.catalogRevision, snapshot.catalogRevision);
++    assert.deepEqual(spec.content.target, beta);
++    assert.match(String(spec.content.message), /Credential environment reference: none/);
++    return { state: "allowed", answer: true, winner: "web" };
++  });
++  const { tools } = register(dataRoot, interactions);
++
++  await invoke(tools, "ks_v2_profile_select", { id: "beta", revision: 1 }, context(cwd));
++  assert.deepEqual((await store.profiles()).selected, { id: "beta", revision: 1 });
++});

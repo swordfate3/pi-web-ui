@@ -40,7 +40,7 @@ test("offline package ships ordinary Web and Hub without archived terminal or in
   const start = result.stdout.indexOf("[\n");
   assert.ok(start >= 0);
   const files = JSON.parse(result.stdout.slice(start))[0].files.map((entry) => entry.path);
-  for (const file of ["dist/index.html", "dist/hub/pi-web-hub.mjs", "extensions/mirror-server.ts", "extensions/terminal-prompt.ts"])
+  for (const file of ["dist/index.html", "dist/hub/pi-web-hub.mjs", "extensions/mirror-server.ts", "extensions/terminal-prompt.ts", "extensions/interactions/client.ts", "integrations/check-adapter.mjs", "integrations/adapters/manifest.json", "docs/web-interactions.md"])
     assert.ok(files.includes(file), `required package artifact: ${file}`);
   assert.equal(files.some((file) => /^(runtime\/|dist\/(runtime|terminal)\/)/.test(file)), false);
   assert.equal(files.some((file) => file.includes("__pycache__")), false, "unverified interpreter caches must not ship");

@@ -1,5 +1,24 @@
 # Pi Web UI 开发日志
 
+## 2026-10-24 · 四类扩展的 Web 交互接入（本地开发，未上线）
+
+- 在 `codex/web-extension-interactions` 实现协作式公开 API、有界请求与一次性操作、
+  私有签名控制通道、当前聊天内的 MCP/子代理面板，以及复用既有登录的独立敏感确认页。
+  不拦截任意终端 UI，不恢复已归档原生终端，不新增固定密码或管理码。
+- Memory、Knowledge V2、MCP、Agents 在精确开发副本上保留原有 prepare/guard/effect，
+  发布物是可校验 pre/post SHA-256 的四份源码补丁；仅更新 Web 不会修改原扩展安装。
+- 取消原生切换后面板消失由真实 Pi 复现 `0 !== 2`，以新输入上下文重新发现面板修复；
+  旧授权/操作不复活。真实 Pi 另覆盖竞争、拒绝、超时、取消、断线、成功替换、重载和 Hub 重启恢复。
+- 独立审查关闭 MCP 实际执行目标绑定、本地预览不完整、批准后取消仍写入三项 P2；
+  后续长文本重复编码 P2 也已修复：完整意图只传一次，本地单独格式化，不截断任务。
+- 最终 Web 单元回归 762 项：761 pass、0 fail、1 显式 1 GiB opt-in skip；独立管理页 Chromium
+  41/41；实际 Pi/Hub 桌面及手机尺寸浏览器 1/1 并检查截图。四份补丁在干净副本重放后
+  56/56；含真实 MCP factory/OAuth state/PKCE、真实 Agents 配置/协调器/SDK 子会话。
+- 双类型、生产构建/dist、26 文件 lint（0 error、1 原有 warning）、隔离 Git 安装/升级、
+  11 项陈旧源码拒绝、npm tarball 和已安装 Hub 生命周期通过。原始上游全套/PDF worker、
+  物理手机、公网与真实 OAuth 不作通过声明，详见[验收记录](validation/2026-10-24-web-extension-interactions.md)。
+- 未推送、合并 main、安装四包补丁、登记生产密钥或重启 Hub/Gate/Pi；保留用户无关文件与其他工作树。
+
 ## 2026-10-22 · 独立原生终端归档
 
 - 按用户要求，将完整终端实现与部署证据保留在 `codex/archive-native-terminal-20261022`。

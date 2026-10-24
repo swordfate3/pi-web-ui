@@ -6,6 +6,7 @@ import path from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { BOUNDED_PROTOCOL, HUB_GENERATION_SOURCE, isBoundedGeneration } from "../extensions/hub-generation.ts";
+import { type InteractionRegistration, readInteractionRegistration } from "../extensions/interactions/protocol.ts";
 import { type RuntimeMetadata, readRuntimeMetadata } from "../extensions/runtime-metadata.ts";
 import { readSoftwareMetadata, type SoftwareMetadata } from "../extensions/software-metadata.ts";
 import { proxySessionResponse } from "./asset-transfer.ts";
@@ -27,7 +28,11 @@ import {
 } from "./config.ts";
 import { ForwardQueue } from "./forward-queue.ts";
 import { gatewayIdentity } from "./gateway-auth.ts";
+import type { InteractionTarget } from "./interaction-control.ts";
+import { interactionPageCss, interactionPageJs, renderInteractionPageHtml } from "./interaction-page.ts";
+import { createInteractionApi } from "./interactions.ts";
 import { HUB_LIMITS } from "./limits.ts";
+import { HubManagement } from "./management.ts";
 import { portalCss, portalJs, portalManagementCss, portalManagementJs, renderPortalHtml } from "./portal.ts";
 import { createRestartApi } from "./restart-api.ts";
 import { acquireStateLock, StateBudgetError, type StateWriter, withStateWriter } from "./state-budget.ts";
@@ -42,6 +47,7 @@ type Session = {
   sessionName: string | null;
   runtime?: RuntimeMetadata;
   software?: SoftwareMetadata;
+  interaction?: InteractionRegistration;
 };
 type Handoff = {
   grant: Grant;
@@ -265,6 +271,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
   const versionStatus = createVersionStatus(options.versions);
   let url = "";
   let managementUrl: string | undefined;
+  let interactionApi: ReturnType<typeof createInteractionApi> | undefined;
   const restarting = new Map<string, { id: string; runtimeId: string; deadline?: number }>();
   const activateRestart = (generation: string) => {
     const restart = restarting.get(generation);
@@ -276,6 +283,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     activateRestart(generation);
     const session = sessions.get(generation);
     sessions.delete(generation);
+    interactionApi?.retire(generation);
     for (const [ws, id] of webSockets) if (id === generation) ws.terminate();
     if (session && isBoundedGeneration(generation)) {
       const clear = (transaction: StateWriter) => {
@@ -331,102 +339,138 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
       return undefined;
     return session;
   };
-  const restartApi = createRestartApi(config, {
-    clearHandoff: (id) => {
-      for (const [generation, item] of restarting) if (item.id === id) restarting.delete(generation);
-      for (const [token, item] of handoffs) {
-        if (item.restart?.id !== id) continue;
-        const original = current(item.from);
-        if (
-          item.client?.readyState !== WebSocket.OPEN ||
-          webSockets.get(item.client) !== item.from ||
-          original?.grant.run_id !== item.grant.run_id ||
-          original.runtime?.runtimeId !== item.restart.runtimeId
-        ) {
-          handoffs.delete(token);
-          continue;
-        }
-        // The old connection survived. Drop all managed authority but retain
-        // ordinary recovery, pinned to this generation/runtime rather than any
-        // later registration. Its existing close handler starts the normal lease.
-        item.originalRuntimeId = item.restart.runtimeId;
-        item.restart = undefined;
-        item.successor = item.from;
-        item.expires = Infinity;
-        sendControl(
-          item.client,
-          JSON.stringify({
-            type: "event",
-            event: "hub_route",
-            payload: { generation: item.from, token },
-          }),
-        );
-      }
+  const management = new HubManagement(config);
+  const interactionTarget = (session: Session | undefined): InteractionTarget | undefined => {
+    const descriptor = session?.interaction ?? session?.runtime;
+    if (!session || !descriptor) return undefined;
+    return {
+      identity: {
+        runId: session.grant.run_id,
+        generation: session.generation,
+        runtimeId: descriptor.runtimeId,
+        sessionId: descriptor.sessionId,
+      },
+      backendHost: session.grant.backendHost,
+      port: session.port,
+      token: session.grant.token,
+    };
+  };
+  interactionApi = createInteractionApi(config, management, {
+    lookup: async (generation) => interactionTarget(await verified(generation)),
+    current: (target) => {
+      const fresh = interactionTarget(current(target.identity.generation));
+      return (
+        !!fresh &&
+        !stopped &&
+        fresh.identity.runId === target.identity.runId &&
+        fresh.identity.runtimeId === target.identity.runtimeId &&
+        fresh.identity.sessionId === target.identity.sessionId &&
+        fresh.backendHost === target.backendHost &&
+        fresh.port === target.port &&
+        fresh.token === target.token
+      );
     },
-    granted,
-    lookup: async (generation) => {
-      const session = await verified(generation);
-      return session ? { runId: session.grant.run_id, generation, runtime: session.runtime } : undefined;
-    },
-    successor: async (runId, runtimeId, sessionId, leafId, version) => {
-      for (const generation of sessions.keys()) {
-        const session = current(generation);
-        const runtime = session?.runtime;
-        if (
-          session?.grant.run_id !== runId ||
-          !runtime?.managed ||
-          runtime.runtimeId !== runtimeId ||
-          runtime.sessionId !== sessionId ||
-          runtime.leafId !== leafId ||
-          runtime.version !== version
-        )
-          continue;
-        const proved = await verified(generation);
-        const fresh = proved?.runtime;
-        if (
-          proved?.grant.run_id === runId &&
-          fresh?.managed &&
-          fresh.runtimeId === runtimeId &&
-          fresh.sessionId === sessionId &&
-          fresh.leafId === leafId &&
-          fresh.version === version
-        )
-          return `/s/${generation}/`;
-      }
-      return undefined;
-    },
-    prepareHandoff: (runId, receipt) => {
-      const selected = current(receipt.generation);
-      if (
-        !selected ||
-        selected.grant.run_id !== runId ||
-        selected.runtime?.runtimeId !== receipt.runtimeId ||
-        selected.runtime.sessionId !== receipt.sessionId ||
-        selected.runtime.leafId !== receipt.leafId
-      )
-        throw new Error("Session changed");
-      const restart: { id: string; runtimeId: string; deadline?: number } = {
-        id: receipt.id,
-        runtimeId: receipt.runtimeId,
-      };
-      restarting.set(receipt.generation, restart);
-      for (const [token, item] of handoffs) {
-        if (item.from !== receipt.generation || item.grant.run_id !== runId) continue;
-        item.restart = restart;
-        item.expires = Infinity;
-        if (!item.client) activateRestart(receipt.generation);
-        if (item.client?.readyState === WebSocket.OPEN)
+  });
+  const restartApi = createRestartApi(
+    config,
+    {
+      clearHandoff: (id) => {
+        for (const [generation, item] of restarting) if (item.id === id) restarting.delete(generation);
+        for (const [token, item] of handoffs) {
+          if (item.restart?.id !== id) continue;
+          const original = current(item.from);
+          if (
+            item.client?.readyState !== WebSocket.OPEN ||
+            webSockets.get(item.client) !== item.from ||
+            original?.grant.run_id !== item.grant.run_id ||
+            original.runtime?.runtimeId !== item.restart.runtimeId
+          ) {
+            handoffs.delete(token);
+            continue;
+          }
+          // The old connection survived. Drop all managed authority but retain
+          // ordinary recovery, pinned to this generation/runtime rather than any
+          // later registration. Its existing close handler starts the normal lease.
+          item.originalRuntimeId = item.restart.runtimeId;
+          item.restart = undefined;
+          item.successor = item.from;
+          item.expires = Infinity;
           sendControl(
             item.client,
             JSON.stringify({
               type: "event",
               event: "hub_route",
-              payload: { generation: item.from, token, restart: { id: receipt.id, timeoutMs: 120_000 } },
+              payload: { generation: item.from, token },
             }),
           );
-      }
+        }
+      },
+      granted,
+      lookup: async (generation) => {
+        const session = await verified(generation);
+        return session ? { runId: session.grant.run_id, generation, runtime: session.runtime } : undefined;
+      },
+      successor: async (runId, runtimeId, sessionId, leafId, version) => {
+        for (const generation of sessions.keys()) {
+          const session = current(generation);
+          const runtime = session?.runtime;
+          if (
+            session?.grant.run_id !== runId ||
+            !runtime?.managed ||
+            runtime.runtimeId !== runtimeId ||
+            runtime.sessionId !== sessionId ||
+            runtime.leafId !== leafId ||
+            runtime.version !== version
+          )
+            continue;
+          const proved = await verified(generation);
+          const fresh = proved?.runtime;
+          if (
+            proved?.grant.run_id === runId &&
+            fresh?.managed &&
+            fresh.runtimeId === runtimeId &&
+            fresh.sessionId === sessionId &&
+            fresh.leafId === leafId &&
+            fresh.version === version
+          )
+            return `/s/${generation}/`;
+        }
+        return undefined;
+      },
+      prepareHandoff: (runId, receipt) => {
+        const selected = current(receipt.generation);
+        if (
+          !selected ||
+          selected.grant.run_id !== runId ||
+          selected.runtime?.runtimeId !== receipt.runtimeId ||
+          selected.runtime.sessionId !== receipt.sessionId ||
+          selected.runtime.leafId !== receipt.leafId
+        )
+          throw new Error("Session changed");
+        const restart: { id: string; runtimeId: string; deadline?: number } = {
+          id: receipt.id,
+          runtimeId: receipt.runtimeId,
+        };
+        restarting.set(receipt.generation, restart);
+        for (const [token, item] of handoffs) {
+          if (item.from !== receipt.generation || item.grant.run_id !== runId) continue;
+          item.restart = restart;
+          item.expires = Infinity;
+          if (!item.client) activateRestart(receipt.generation);
+          if (item.client?.readyState === WebSocket.OPEN)
+            sendControl(
+              item.client,
+              JSON.stringify({
+                type: "event",
+                event: "hub_route",
+                payload: { generation: item.from, token, restart: { id: receipt.id, timeoutMs: 120_000 } },
+              }),
+            );
+        }
+      },
     },
-  });
+    management,
+  );
   const register = async (value: Record<string, unknown>) => {
     const authenticate = () => {
       if (stopped || typeof value.run_id !== "string") throw new RegistryError("AUTH_FAILED");
@@ -533,6 +577,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
       typeof value.sessionName === "string" ? value.sessionName.replace(/\p{Cc}/gu, " ").trim() || null : null;
     const runtime = value.runtime === undefined ? undefined : readRuntimeMetadata(value.runtime);
     const software = value.software === undefined ? undefined : readSoftwareMetadata(value.software);
+    const interaction = readInteractionRegistration(value.interaction);
     const port = Number(value.port);
     const prepared = withStateWriter(config, (writer) => {
       const grant = authenticate();
@@ -584,6 +629,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         session.sessionName = sessionName;
         session.runtime = runtime;
         session.software = software;
+        session.interaction = interaction;
       } else
         sessions.set(generation, {
           grant,
@@ -594,6 +640,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
           sessionName,
           runtime,
           software,
+          interaction,
         });
       pruneHandoffs();
       if (!session) {
@@ -713,9 +760,21 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
           fail(response, 401);
           return;
         }
+        if (await interactionApi?.handle(request, response, allowedBrowser(request, request.method !== "GET", true)))
+          return;
         if (await restartApi.handle(request, response, allowedBrowser(request, true, true))) return;
         if (
-          !["/", "/sessions/", "/api/sessions", "/hub.js", "/hub-management.js", "/hub.css"].includes(pathname ?? "") ||
+          (![
+            "/",
+            "/sessions/",
+            "/api/sessions",
+            "/hub.js",
+            "/hub-management.js",
+            "/hub.css",
+            "/interaction-page.js",
+            "/interaction-page.css",
+          ].includes(pathname ?? "") &&
+            !new RegExp(`^/interactions/${HUB_GENERATION_SOURCE}/[a-f0-9]{32}/$`).test(pathname ?? "")) ||
           request.headers["service-worker"] !== undefined
         ) {
           fail(response, 404);
@@ -890,18 +949,24 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
         return;
       }
       const asset =
-        pathname === "/sessions/"
-          ? [
-              "text/html",
-              renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl),
-            ]
-          : pathname === "/hub.js"
-            ? ["text/javascript", portalJs]
-            : admin && pathname === "/hub-management.js"
-              ? ["text/javascript", portalManagementJs]
-              : pathname === "/hub.css"
-                ? ["text/css", portalCss + portalManagementCss]
-                : undefined;
+        admin && new RegExp(`^/interactions/${HUB_GENERATION_SOURCE}/[a-f0-9]{32}/$`).test(pathname ?? "")
+          ? ["text/html", renderInteractionPageHtml()]
+          : admin && pathname === "/interaction-page.js"
+            ? ["text/javascript", interactionPageJs]
+            : admin && pathname === "/interaction-page.css"
+              ? ["text/css", interactionPageCss]
+              : pathname === "/sessions/"
+                ? [
+                    "text/html",
+                    renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl),
+                  ]
+                : pathname === "/hub.js"
+                  ? ["text/javascript", portalJs]
+                  : admin && pathname === "/hub-management.js"
+                    ? ["text/javascript", portalManagementJs]
+                    : pathname === "/hub.css"
+                      ? ["text/css", portalCss + portalManagementCss]
+                      : undefined;
       if (!asset) {
         fail(response, pathname?.startsWith("/s/") ? 410 : 404);
         return;
@@ -1160,6 +1225,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     }
   } catch (error) {
     stopped = true;
+    interactionApi?.close();
     versionStatus.close();
     for (const peer of peers) peer.destroy();
     for (const connection of connections) connection.destroy();
@@ -1188,6 +1254,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     close() {
       if (closing) return closing;
       stopped = true;
+      interactionApi?.close();
       handoffs.clear();
       versionStatus.close();
       clearInterval(sweep);

@@ -31,6 +31,13 @@ const SOURCE_FILES = [
   "extensions/hub-generation.ts",
   "extensions/live-transport.ts",
   "extensions/terminal-prompt.ts",
+  "extensions/interactions/protocol.ts",
+  "extensions/interactions/broker.ts",
+  "extensions/interactions/proof.ts",
+  "extensions/interactions/client.ts",
+  "extensions/interactions/control.ts",
+  "extensions/interactions/enrollment.ts",
+  "extensions/interactions/panels.ts",
   "extensions/message-revision.ts",
   "extensions/message-versions.ts",
   "extensions/session-usage.ts",
@@ -47,6 +54,7 @@ async function fixture({ dist = true } = {}) {
   await mkdir(path.join(root, "src/web/nested"), { recursive: true });
   await mkdir(path.join(root, "public/icons"), { recursive: true });
   await mkdir(path.join(root, "extensions/remote-access"), { recursive: true });
+  await mkdir(path.join(root, "extensions/interactions"), { recursive: true });
   await mkdir(path.join(root, "scripts"), { recursive: true });
   await mkdir(path.join(root, "hub"), { recursive: true });
   await mkdir(path.join(root, "bin"), { recursive: true });
@@ -121,6 +129,13 @@ test("creates and verifies deterministic source and output inventories", async (
       "extensions/file-downloads.ts",
       "extensions/history-envelope.ts",
       "extensions/hub-generation.ts",
+      "extensions/interactions/broker.ts",
+      "extensions/interactions/client.ts",
+      "extensions/interactions/control.ts",
+      "extensions/interactions/enrollment.ts",
+      "extensions/interactions/panels.ts",
+      "extensions/interactions/proof.ts",
+      "extensions/interactions/protocol.ts",
       "extensions/live-transport.ts",
       "extensions/message-revision.ts",
       "extensions/message-versions.ts",

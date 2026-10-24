@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "protocol": "pi-web-interactions-v1",
+  "sources": [
+    {
+      "id": "memory",
+      "packageName": "pi-scoped-memory",
+      "version": "0.10.0",
+      "file": "memory.patch",
+      "sha256": "3620e3184c1c04aed312d3c89b88bf266d8dffe9a6f027bda8218504bd667689",
+      "changes": [
+        {
+          "path": "package.json",
+          "before": "b426cdd9d4951bfec4bdaef4aba6361220aefade9dcbb8bc19ef74e6745c9124",
+          "after": "f5809dcc67c4b8db9fd19d81bc4e3c300f2a9d4f3043680c0e9231675b1f0853"
+        },
+        {
+          "path": "src/pi/index.ts",
+          "before": "652162c2cff3879999f96cae9e5fd648a615972f8ac247f6892a1b7263ac70be",
+          "after": "6241b6b32ed301555307f0d70c43f913cd8943f7afe153af72d7addd4c6f41b8"
+        },
+        {
+          "path": "src/pi/pi-web-ui-interactions-v1.d.ts",
+          "before": null,
+          "after": "e071cef34e7f9589a9364fbc9eb38da5d6e79a285c2742b2e5a11e392fbf3a7c"
+        },
+        {
+          "path": "src/pi/web-interactions.ts",
+          "before": null,
+          "after": "0a8fbf337e69536a53744be505d4872ee96e31036c673887729ac6dfcbb57f0c"
+        },
+        {
+          "path": "tests/web-interactions.test.ts",
+          "before": null,
+          "after": "fcd77b7d2436b392e970a8dd1897cc4116015f38de76c72db74f0657f84d1ab6"
+        }
+      ]
+    },
+    {
+      "id": "knowledge",
+      "packageName": "pi-knowledge-studio",
+      "version": "0.1.0",
+      "file": "knowledge.patch",
+      "sha256": "e2ff999906d011bfece1d1b13d90624ac5273f92ac0a6b6605b76d9892f61516",
+      "changes": [
+        {
+          "path": "extensions/v2.ts",
+          "before": "8cd44934344e06741fdb9f623858dfe7ad7e0fa40b61b115219a943e8589d9b4",
+          "after": "80c3dc40bd49072154419511cc29aeb8faf489ead85f9c6e9f17fc659d6141df"
+        },
+        {
+          "path": "package-lock.json",
+          "before": "313b5803fedd87361965c0f07650ecf668a12d78d2e6159f0f8026487db600b5",
+          "after": "a1e160d178b526183c311fb68e8dca66033d7d53ac5706afa8d05352623359f7"
+        },
+        {
+          "path": "package.json",
+          "before": "f9753c24452d4808fb6b7206290f02095305cb4def2bab7b704ba0e85b528d08",
+          "after": "1c7acb1fa52d11d4d362fa357835b33353f6d21136194733711b9ea29a9b1dda"
+        },
+        {
+          "path": "src/application/pdf-generation-store.ts",
+          "before": "a4e1f6d2b4d49c5579d6d2cda892fcd3eeff461a538a9242f1e4cff10c47aa83",
+          "after": "f7ab299cd30908a5a6580d7aec276c56641ac9b7b906750d641a4f0e0a22755d"
+        },
+        {
+          "path": "tests/answer-extension.test.ts",
+          "before": "5d568a3dd83559f384d09091cc96ed285a3edb867083c6199c807ab8333f625b",
+          "after": "ab20063629025e234bc990587fbf27d90d5a3a29744d9925d5db397b5c824162"
+        },
+        {
+          "path": "tests/ocr-extension.test.ts",
+          "before": "31476df62db07065fd30ddf1a6d5f9a2d9d131b1c8ce9ba665e622cb7f9ac777",
+          "after": "dafecfd3533171cad1bf93663aa05ab3dc829706cb909bf6ea9a9582dcb65483"
+        },
+        {
+          "path": "tests/pdf-generations.test.ts",
+          "before": "82925582567fa6ded7c87e23ae4ecc4be2a304fa818bd82fe7ce9adbd5fa2673",
+          "after": "a28964fce81eb071382ace9ccbf2378eae98a2f81577984f73673d67ec37d8d7"
+        },
+        {
+          "path": "tests/v2-extension.test.ts",
+          "before": "1c60c4548d347a91d75030bcbbc68ace7c1a80a623debde5ae6b308b3f51f5ca",
+          "after": "0336f9c2122b2dc63af1294ebdbf5b2140fc06d261d6bd86295997201eb06966"
+        },
+        {
+          "path": "extensions/pi-web-ui-interactions-v1.d.ts",
+          "before": null,
+          "after": "dba79b35e4562ec16c118b4e1c508cd2d10154d9d1b105476335926de7d1b473"
+        },
+        {
+          "path": "extensions/web-interactions.ts",
+          "before": null,
+          "after": "b8b04c5231a8c2ab861607eaf2f595c13702d8a246957ce718d1de38082ba1d0"
+        },
+        {
+          "path": "tests/web-interactions.test.ts",
+          "before": null,
+          "after": "b97d73210119e3d91c90bc93e52c5519396919ffc85073770f111f4cfa390069"
+        }
+      ]
+    },
+    {
+      "id": "mcp",
+      "packageName": "pi-mcp-adapter",
+      "version": "6.0.0",
+      "file": "mcp.patch",
+      "sha256": "82292345097a80d6702980c9d1ad728040615ecf2498e31dfa768ac8dd30c231",
+      "changes": [
+        {
+          "path": "index.ts",
+          "before": "7c58bd3c8af3b860f9f515be9963d00a5317adb25cdcc25c2ab0856e3fef6d60",
+          "after": "2edc46af8d7d59a67de60459fc64e3a3ded016949c954541946846af75b009f7"
+        },
+        {
+          "path": "package.json",
+          "before": "e68ca86a1553cf8add0990252510bb9453b628f6ac5a017be5bbc9819344793d",
+          "after": "cdde040d305e3fed51da4b55f0f11ee0c7ce11c750a9c606b7f59e3c95478947"
+        },
+        {
+          "path": "mcp-index-load.test.ts",
+          "before": null,
+          "after": "80c84a98bca951b92af28ac8e932614bea1bffe695729dceb82ee53940eac91d"
+        },
+        {
+          "path": "mcp-oauth-acceptance.test.ts",
+          "before": null,
+          "after": "2af1df53fb06cce3f494929341b966c108e8e9d2d2aa19d13cb4eebac0fa147a"
+        },
+        {
+          "path": "web-interactions.test.ts",
+          "before": null,
+          "after": "52d60e7f12835c474f9ec6b168ec1fced6109cefedb32c0c206a280ed75300bb"
+        },
+        {
+          "path": "web-interactions.ts",
+          "before": null,
+          "after": "410e9ff09e7b1e2619756f150f4a2cede0732f120a0b5c752579301fad1331e9"
+        }
+      ]
+    },
+    {
+      "id": "agents",
+      "packageName": "pi-subagents-lite",
+      "version": "1.17.0-thinking.1",
+      "file": "agents.patch",
+      "sha256": "a77cad0e6c7dc6222bb16343542ec1b0915222cc15ed881f9f37925dbae9e0d4",
+      "changes": [
+        {
+          "path": "package.json",
+          "before": "072d9dcf1b5d4369571f573b9e8d59837e365d829670b9e189c23f6d8cc28cf6",
+          "after": "902080b570135bf6d288ea597477b65174a359304183bcfe8d88f250f583693b"
+        },
+        {
+          "path": "src/config/config-store.ts",
+          "before": "6c1d275c5d909534904ca60391fc7b81a2b7308a6dff8197fa0bef65229923ac",
+          "after": "c8a02d0516886d60c91a9a3499b2dd39691056329ab795483cd6287e41b9e63d"
+        },
+        {
+          "path": "src/events.ts",
+          "before": "b316b22cd7ac36ae3cc81781b5c14b0d1d5b6b1891f1b2e60c3a951fa4b231e8",
+          "after": "d54509e1423fba30a702305379e86d5f362c665c90d354eb8b60bf93c8b11d3d"
+        },
+        {
+          "path": "src/web-interactions.ts",
+          "before": null,
+          "after": "90f44f49530021d071b1a8df16f21644e8e8d405ba808c560546ea72bd8fde29"
+        },
+        {
+          "path": "test/web-interactions-acceptance.test.ts",
+          "before": null,
+          "after": "a23e89e7acad6c87049bcc7cd66c0f19234a606d9bfcf4e4c4818464176c57c5"
+        },
+        {
+          "path": "test/web-interactions-agent-manager-acceptance.test.ts",
+          "before": null,
+          "after": "1a549e31cdf8ebe801c00845c5955de3de57e02d12bd8e31f2e082baf58ac67d"
+        },
+        {
+          "path": "test/web-interactions.test.ts",
+          "before": null,
+          "after": "6c8c7bd3841721d658935e000120f1b6f27f621c4a4b65dc26c1516a533f0b02"
+        }
+      ]
+    }
+  ]
+}

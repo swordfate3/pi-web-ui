@@ -30,6 +30,7 @@ import type {
   WorkspaceArtifact,
 } from "../types";
 import type { UiText } from "../ui-text";
+import type { InteractionSlice } from "./interaction-slice";
 
 export type ConnectionSlice = {
   client: PiClient | null;
@@ -177,6 +178,7 @@ export type DialogSlice = {
 };
 
 export type PiWebUiStore = ConnectionSlice &
+  InteractionSlice &
   SessionSlice &
   SettingsSlice &
   WorkspaceSlice &

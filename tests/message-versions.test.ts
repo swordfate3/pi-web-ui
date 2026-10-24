@@ -6,6 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
 import { type RawData, WebSocket } from "ws";
 import { resolveMessageVersions, type VersionEntry } from "../extensions/message-versions.ts";
 
@@ -399,6 +400,7 @@ test("mock WS message version scope, navigation and mutation fences", async (t) 
     };
   }
   const pi = {
+    events: createEventBus(),
     on(name: string, handler: (event: unknown, ctx: unknown) => unknown) {
       const list = events.get(name) ?? [];
       list.push(handler);

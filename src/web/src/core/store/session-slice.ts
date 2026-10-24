@@ -256,6 +256,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
         sync.sessionId && sync.runtimeId && get().runtimeId && sync.runtimeId !== get().runtimeId,
       );
       if (sessionChanged || runtimeChanged) {
+        get().clearInteractions?.();
         if (revisionInFlight) {
           revisionOperation++;
           revisionInFlight = false;
@@ -369,6 +370,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
             }
           : {}),
       });
+      if (sync.extensionInteractions) get().applyInteractions?.(sync.extensionInteractions);
       get().requestGitStatusRefresh({ debounce: true });
       if (keepPage && !get().historyLoading) void get().loadHistory(range, get().historyBefore ?? undefined);
     },

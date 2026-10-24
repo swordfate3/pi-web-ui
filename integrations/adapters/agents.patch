@@ -1,0 +1,1639 @@
+diff --git a/package.json b/package.json
+index 80b4809..6b92012 100644
+--- a/package.json
++++ b/package.json
+@@ -37,7 +37,9 @@
+   "scripts": {
+     "test": "node test/local-policy.mjs && node test/real-sdk.mjs",
+     "test:policy": "node test/local-policy.mjs",
+-    "test:sdk": "node test/real-sdk.mjs"
++    "test:sdk": "node test/real-sdk.mjs",
++    "test:web-interactions": "node --no-warnings test/web-interactions.test.ts",
++    "test:web-interactions:acceptance": "node --experimental-transform-types --import ../../pi-web-ui/integrations/source-test-loader.mjs --test --test-concurrency=1 test/web-interactions-acceptance.test.ts test/web-interactions-agent-manager-acceptance.test.ts"
+   },
+   "pi": {
+     "extensions": [
+diff --git a/src/config/config-store.ts b/src/config/config-store.ts
+index 0bc12b7..654c885 100644
+--- a/src/config/config-store.ts
++++ b/src/config/config-store.ts
+@@ -321,6 +321,21 @@ export class ConfigStore {
+     return this.config.agent;
+   }
+ 
++  /**
++   * Private source-owned CAS input for cooperative Web settings. This value is
++   * never sent to the panel: it includes each persisted/session layer so a
++   * terminal menu mutation cannot be hidden by an unchanged effective value.
++   */
++  interactionConfigFingerprint(): string {
++    return JSON.stringify({
++      global: this.globalRaw,
++      project: this.projectRaw,
++      sessionModels: this.sessionOverrides,
++      sessionConcurrency: this.sessionConcurrencyLayer,
++      projectStatus: this.projectStatus,
++    });
++  }
++
+   /**
+    * Resolve the effective model for a spawn, hiding resolveModel's option
+    * assembly. Precedence: session per-type → session default → config per-type
+diff --git a/src/events.ts b/src/events.ts
+index 735d69b..dedc96f 100644
+--- a/src/events.ts
++++ b/src/events.ts
+@@ -1,10 +1,11 @@
+-import type { AgentRecord } from "./types.js";
++import type { AgentRecord, ThinkingChoice } from "./types.js";
+ 
+ import * as path from "node:path";
+ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+ import { getAgentDir } from "@earendil-works/pi-coding-agent";
++import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+ import { matchesKey, isKeyRelease } from "@earendil-works/pi-tui";
+-import { registerAgents, setAgentScanDirs, scanAndMerge } from "./agents/agent-types.js";
++import { getAgentConfig, getVisibleAgentInfos, registerAgents, resolveType, setAgentScanDirs, scanAndMerge } from "./agents/agent-types.js";
+ import { AgentManager } from "./agents/agent-manager.js";
+ import { AgentWidget, type UICtx } from "./ui/agent-widget.js";
+ import { ConversationViewer } from "./ui/conversation-viewer.js";
+@@ -16,12 +17,18 @@ import {
+   getManager,
+   getWidget,
+   getCoordinator,
++  getPiInstance,
++  getSessionCtx,
+   getStore,
+   setSessionCtx,
+   setManager,
+   setWidget,
+   setCoordinator,
+ } from "./shell.js";
++import { THINKING_PROFILES } from "./models/thinking-policy.js";
++import { installAgentsInteractionPanel } from "./web-interactions.js";
++
++const PACKAGE_VERSION = "1.17.0-thinking.1";
+ 
+ // --- Config loader — session_start handler logic ---
+ 
+@@ -209,9 +216,12 @@ export function setupEventListeners(pi: ExtensionAPI): void {
+   });
+ 
+   let unregisterTerminalInput: (() => void) | undefined;
++  let interactionPanel: { dispose(): void } | undefined;
++  let interactionContext: ExtensionContext | undefined;
+ 
+   pi.on("session_start", async (_event: unknown, ctx: ExtensionContext) => {
+     setSessionCtx(ctx);
++    interactionContext = ctx;
+     await loadConfigAndRegisterAgents(ctx);
+     // Re-register with updated agent type list (now includes user/project agents)
+     registerAgentTool(pi);
+@@ -221,9 +231,139 @@ export function setupEventListeners(pi: ExtensionAPI): void {
+     }
+     // Sync compact mode with initial tool expansion state
+     getStore().notifyToolsExpanded(false);
++
++    interactionPanel?.dispose();
++    interactionPanel = undefined;
++    const availableModels = () => {
++      const current = getSessionCtx();
++      const scoped = (current as ExtensionContext & {
++        scopedModels?: ReadonlyArray<{ model: { provider: string; id: string } }>;
++      }).scopedModels;
++      const listed = scoped?.length ? scoped.map(({ model }) => model) : current.modelRegistry.getAvailable();
++      return listed.flatMap((listedModel) => {
++        const model = current.modelRegistry.find(listedModel.provider, listedModel.id) ?? listedModel;
++        const key = `${model.provider}/${model.id}`;
++        const allowed = THINKING_PROFILES[key] ?? [];
++        const thinkingLevels = getSupportedThinkingLevels(model).filter((level) => allowed.includes(level));
++        return [{ key, thinkingLevels, model }];
++      });
++    };
++    const parentModelKey = () => {
++      const model = getSessionCtx().model;
++      return model ? `${model.provider}/${model.id}` : "";
++    };
++    const effectiveModel = (type: string) => getStore().modelFor(type, parentModelKey(), getAgentConfig(type));
++    const mutateConfig = (mutation: () => void) => {
++      try {
++        mutation();
++      } catch (error) {
++        console.error(`[subagents] Web settings mutation failed: ${error instanceof Error ? error.message : String(error)}`);
++        throw new Error("Failed to update Subagents settings");
++      }
++    };
++    try {
++      interactionPanel = await installAgentsInteractionPanel(pi.events, {
++        packageVersion: PACKAGE_VERSION,
++        isCurrent: () => interactionContext !== undefined && getSessionCtx() === interactionContext,
++        getConfigFingerprint: () => getStore().interactionConfigFingerprint(),
++        listAgents: () => getManager()?.listAgents() ?? [],
++        visibleAgentTypes: () => getVisibleAgentInfos(),
++        availableModels,
++        config: () => {
++          const store = getStore();
++          const config = store.agentConfigSnapshot();
++          const visible = getVisibleAgentInfos();
++          return {
++            defaultModel: store.sessionDefaultModel ?? config.default ?? null,
++            defaultThinking: store.agent.defaultThinking ?? null,
++            typeModels: Object.fromEntries(visible.map(({ name }) => [name, effectiveModel(name)])),
++            concurrency: store.concurrency,
++          };
++        },
++        effectiveModel,
++        setDefaultModel: (model, target) => mutateConfig(() => {
++          const store = getStore();
++          if (target === "project" && !store.projectTargetOffered) throw new Error("Project settings target is unavailable");
++          if (model === null) store.mutate.agent.clearModelOverride("default", target);
++          else store.mutate.agent.setDefaultModel(model, target);
++        }),
++        setAgentModel: (type, model, target) => mutateConfig(() => {
++          const store = getStore();
++          if (target === "project" && !store.projectTargetOffered) throw new Error("Project settings target is unavailable");
++          if (model === null) store.mutate.agent.clearModelOverride(type, target);
++          else store.mutate.agent.setModelOverride(type, model, target);
++        }),
++        setDefaultThinking: (thinking, target) => mutateConfig(() => {
++          const store = getStore();
++          if (target === "project" && !store.projectTargetOffered) throw new Error("Project settings target is unavailable");
++          store.mutate.agent.setDefaultThinking((thinking ?? undefined) as ThinkingChoice | undefined, target);
++        }),
++        setConcurrency: (scope, key, value, target) => mutateConfig(() => {
++          const store = getStore();
++          if (target === "project" && !store.projectTargetOffered) throw new Error("Project settings target is unavailable");
++          if (scope === "default") store.mutate.concurrency.setDefault(value, target);
++          else if (scope === "provider") store.mutate.concurrency.setProvider(key!, value, target);
++          else store.mutate.concurrency.setModel(key!, value, target);
++        }),
++        spawn: async (intent, signal) => {
++          signal.throwIfAborted();
++          const current = getSessionCtx();
++          if (interactionContext === undefined || current !== interactionContext) throw new Error("Stale Subagents runtime");
++          if (!getVisibleAgentInfos().some(({ name }) => name === intent.type)) throw new Error("Agent type is no longer visible");
++          const resolution = resolveType(intent.type);
++          if (resolution.kind !== "resolved" || resolution.key !== intent.type) throw new Error("Agent type is no longer available");
++          const slash = intent.modelKey.indexOf("/");
++          const provider = slash > 0 ? intent.modelKey.slice(0, slash) : "";
++          const modelId = slash > 0 ? intent.modelKey.slice(slash + 1) : "";
++          const model = provider && modelId ? current.modelRegistry.find(provider, modelId) : undefined;
++          if (!model) throw new Error("Selected Subagents model is no longer available");
++          try {
++            const result = await getCoordinator()!.spawn(getPiInstance(), current, {
++              type: intent.type,
++              prompt: intent.task,
++              description: intent.description,
++              model,
++              modelKey: intent.modelKey,
++              ...(intent.thinkingLevel ? { thinkingLevel: intent.thinkingLevel as any } : {}),
++              thinkingSource: "manual",
++              graceTurns: getStore().agent.graceTurns,
++              invocation: {
++                modelName: model.id,
++                ...(intent.thinkingLevel ? { thinkingLevel: intent.thinkingLevel as any } : {}),
++                runInBackground: intent.runInBackground,
++              },
++              runInBackground: intent.runInBackground,
++              ...(!intent.runInBackground ? { signal } : {}),
++            });
++            return { agentId: result.agentId };
++          } catch (error) {
++            console.error(`[subagents] Web spawn failed: ${error instanceof Error ? error.message : String(error)}`);
++            throw new Error("Subagent spawn failed");
++          }
++        },
++        confirm: async (message, signal) => {
++          const current = interactionContext;
++          if (!current || getSessionCtx() !== current || !current.hasUI) return undefined;
++          return current.ui.confirm("Subagents Web action", message, { signal });
++        },
++      });
++    } catch (error) {
++      console.error(`[subagents] Optional Web interaction panel unavailable: ${error instanceof Error ? error.message : String(error)}`);
++    }
++  });
++
++  pi.on("session_tree", (_event: unknown, ctx: ExtensionContext) => {
++    // Pi supplies a fresh ExtensionContext object for every event. Keep the
++    // cooperative panel on the current tree context; the public panel helper
++    // re-registers this source when the Web host announces post-tree readiness.
++    setSessionCtx(ctx);
++    interactionContext = ctx;
+   });
+ 
+   pi.on("session_shutdown", async (_event: unknown, ctx: ExtensionContext) => {
++    interactionContext = undefined;
++    interactionPanel?.dispose();
++    interactionPanel = undefined;
+     const currentManager = getManager();
+     if (currentManager) {
+       const records = currentManager.listAgents();
+diff --git a/src/web-interactions.ts b/src/web-interactions.ts
+new file mode 100644
+--- /dev/null
++++ b/src/web-interactions.ts
+@@ -0,0 +1,490 @@
++import { randomBytes } from "node:crypto";
++
++export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
++
++type InteractionSpec = {
++  action: string;
++  revision: string;
++  classification: "session" | "sensitive";
++  method: "confirm" | "select" | "input" | "editor";
++  schema: { kind: "confirm" } | { kind: "select"; options: string[] } | { kind: "text"; maxBytes: number };
++  content: Record<string, Json>;
++  deadline: number;
++};
++
++type InteractionResult = {
++  state: "pending" | "delivering" | "allowed" | "rejected" | "cancelled" | "expired" | "stale" | "delivery_unknown";
++  answer?: boolean | string;
++};
++
++type InvokeContext = { actionId: string; revision: string; signal: AbortSignal };
++type PanelSnapshot = {
++  revision: string;
++  items: Record<string, Json>[];
++  cursor?: string | null;
++  config?: Record<string, Json>;
++};
++
++type ConfigTarget = "session" | "global" | "project";
++type ThinkingTarget = "global" | "project";
++type ModelChoice = { key: string; thinkingLevels: string[]; model?: unknown };
++
++export interface AgentsInteractionDependencies {
++  packageVersion: string;
++  isCurrent(): boolean;
++  getConfigFingerprint(): string;
++  listAgents(): Array<Record<string, any>>;
++  visibleAgentTypes(): Array<{ name: string; description: string }>;
++  availableModels(): ModelChoice[];
++  config(): {
++    defaultModel: string | null;
++    defaultThinking: string | null;
++    typeModels: Record<string, string>;
++    concurrency: { default: number; providers: Record<string, number>; models: Record<string, number> };
++  };
++  effectiveModel(type: string): string;
++  setDefaultModel(model: string | null, target: ConfigTarget): void;
++  setAgentModel(type: string, model: string | null, target: ConfigTarget): void;
++  setDefaultThinking(thinking: string | null, target: ThinkingTarget): void;
++  setConcurrency(scope: "default" | "provider" | "model", key: string | undefined, value: number, target: ConfigTarget): void;
++  spawn(intent: {
++    type: string;
++    task: string;
++    description: string;
++    modelKey: string;
++    model?: unknown;
++    thinkingLevel?: string;
++    thinkingSource: "manual";
++    runInBackground: boolean;
++  }, signal: AbortSignal): Promise<{ agentId: string }>;
++  interact?: (
++    spec: InteractionSpec,
++    options: {
++      signal?: AbortSignal;
++      isCurrent: () => boolean;
++      local?: (signal: AbortSignal) => Promise<boolean | string | undefined>;
++    },
++  ) => Promise<InteractionResult>;
++  confirm?: (message: string, signal: AbortSignal) => Promise<boolean | undefined>;
++  revision?: () => string;
++  now?: () => number;
++}
++
++type PublicInteractionModule = {
++  createInteractionClient?: (events: unknown, manifest: Record<string, unknown>) => {
++    interact: AgentsInteractionDependencies["interact"];
++    dispose(): void;
++  };
++  registerInteractionPanel?: (
++    events: unknown,
++    options: {
++      manifest: { id: string; version: string; packageName: string; commands: string[]; methods: string[] };
++      isCurrent: () => boolean;
++      snapshot: (cursor?: string) => Promise<PanelSnapshot>;
++      invoke: (method: string, params: Record<string, Json>, context: InvokeContext) => Promise<Json>;
++    },
++  ) => { dispose(): void };
++};
++
++export type InteractionModuleLoader = () => Promise<PublicInteractionModule | undefined>;
++
++const PACKAGE_NAME = "pi-subagents-lite";
++const METHODS = ["set-default-model", "set-agent-model", "set-default-thinking", "set-concurrency", "spawn"];
++const MAX_SPAWN_RECEIPTS = 128;
++const PANEL_PAGE_SIZE = 100;
++
++function pageOffset(cursor?: string): number {
++  if (cursor === undefined) return 0;
++  if (!/^(0|[1-9][0-9]*)$/.test(cursor)) throw new Error("Invalid Subagents panel cursor");
++  const offset = Number(cursor);
++  if (!Number.isSafeInteger(offset)) throw new Error("Invalid Subagents panel cursor");
++  return offset;
++}
++
++function plainRecord(value: unknown): value is Record<string, unknown> {
++  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
++}
++
++function exactKeys(params: Record<string, Json>, required: string[], optional: string[] = []): void {
++  if (!plainRecord(params)
++    || required.some((key) => !Object.hasOwn(params, key))
++    || Object.keys(params).some((key) => !required.includes(key) && !optional.includes(key))) {
++    throw new Error("Invalid Subagents panel parameters");
++  }
++}
++
++function target(value: Json): ConfigTarget {
++  if (value === "session" || value === "global" || value === "project") return value;
++  throw new Error("Invalid Subagents config target");
++}
++
++function exactLocalApprovalMessage(label: string, intent: Record<string, Json>): string {
++  return `${label}:\n${JSON.stringify(intent, null, 2)}`;
++}
++
++class RevisionGate {
++  private fingerprint: string | undefined;
++  private value: string | undefined;
++  private readonly read: () => string;
++  private readonly generate: () => string;
++
++  constructor(read: () => string, generate: () => string) {
++    this.read = read;
++    this.generate = generate;
++  }
++
++  current(): string {
++    const fingerprint = this.read();
++    if (this.fingerprint !== fingerprint || this.value === undefined) {
++      this.fingerprint = fingerprint;
++      this.value = this.generate();
++    }
++    return this.value;
++  }
++
++  assert(expected: string): void {
++    if (this.current() !== expected) throw new Error("Stale Subagents configuration revision");
++  }
++
++  invalidate(): void {
++    this.fingerprint = undefined;
++    this.value = undefined;
++  }
++}
++
++export function createAgentsInteractionAdapter(deps: AgentsInteractionDependencies) {
++  const revision = new RevisionGate(deps.getConfigFingerprint, deps.revision ?? (() => randomBytes(16).toString("hex")));
++  const receipts = new Map<string, { promise: Promise<Json>; settled: boolean }>();
++  const now = deps.now ?? Date.now;
++  let disposed = false;
++
++  const isCurrent = () => !disposed && deps.isCurrent();
++  const guard = () => {
++    if (!isCurrent()) throw new Error("Stale Subagents runtime");
++  };
++  const interact = async (spec: InteractionSpec, signal: AbortSignal, localMessage: string) => {
++    if (!deps.interact) throw new Error("Subagents Web interaction client unavailable");
++    return deps.interact(spec, {
++      signal,
++      isCurrent,
++      ...(deps.confirm ? { local: (localSignal: AbortSignal) => deps.confirm!(localMessage, localSignal) } : {}),
++    });
++  };
++  const confirm = async (
++    action: "agents.config" | "agents.spawn",
++    label: string,
++    intent: Record<string, Json>,
++    expected: string,
++    signal: AbortSignal,
++  ) => {
++    const content = { ...intent, message: label };
++    const result = await interact({
++      action,
++      revision: expected,
++      classification: "sensitive",
++      method: "confirm",
++      schema: { kind: "confirm" },
++      content,
++      deadline: now() + 120_000,
++    }, signal, exactLocalApprovalMessage(label, intent));
++    return result.state === "allowed" && result.answer === true;
++  };
++  const currentTypes = () => deps.visibleAgentTypes();
++  const currentModels = () => deps.availableModels();
++  const findModel = (key: string) => currentModels().find((choice) => choice.key === key);
++  const requireModel = (value: Json, allowNull: boolean): string | null => {
++    if (allowNull && value === null) return null;
++    if (typeof value !== "string" || !findModel(value)) throw new Error("Model is not in the current available model list");
++    return value;
++  };
++  const trimReceipts = () => {
++    while (receipts.size >= MAX_SPAWN_RECEIPTS) {
++      const settled = [...receipts.entries()].find(([, entry]) => entry.settled);
++      if (!settled) throw new Error("Too many pending Subagents spawn actions");
++      receipts.delete(settled[0]);
++    }
++  };
++
++  const manifest = {
++    id: PACKAGE_NAME,
++    version: deps.packageVersion,
++    packageName: PACKAGE_NAME,
++    commands: ["agents"],
++    methods: [...METHODS],
++  };
++
++  return {
++    manifest,
++    isCurrent,
++    async snapshot(cursor?: string): Promise<PanelSnapshot> {
++      guard();
++      const models = currentModels().map(({ key, thinkingLevels }) => ({ key, thinkingLevels: [...thinkingLevels] }));
++      const agentTypes = currentTypes().map(({ name, description }) => ({ name, description, effectiveModel: deps.effectiveModel(name) }));
++      const config = deps.config();
++      const allItems = deps.listAgents()
++        .filter((record) => record.lifecycle?.status === "running" || record.lifecycle?.status === "queued")
++        .map((record) => ({
++          id: String(record.id),
++          status: String(record.lifecycle?.status ?? "unknown"),
++          type: String(record.display?.type ?? "unknown"),
++          description: String(record.display?.description ?? ""),
++          startedAt: Number(record.lifecycle?.startedAt ?? 0),
++          ...(record.lifecycle?.completedAt !== undefined ? { completedAt: Number(record.lifecycle.completedAt) } : {}),
++          ...((record.execution?.modelKey ?? record.display?.invocation?.modelName) ? { model: String(record.execution?.modelKey ?? record.display.invocation.modelName) } : {}),
++          ...(record.display?.invocation?.thinkingLevel ? { thinking: String(record.display.invocation.thinkingLevel) } : {}),
++          ...(typeof record.display?.invocation?.runInBackground === "boolean" ? { background: record.display.invocation.runInBackground } : {}),
++        } satisfies Record<string, Json>));
++      const offset = pageOffset(cursor);
++      if (offset > allItems.length) throw new Error("Invalid Subagents panel cursor");
++      const items = allItems.slice(offset, offset + PANEL_PAGE_SIZE);
++      const nextOffset = offset + items.length;
++      return {
++        revision: revision.current(),
++        items,
++        cursor: nextOffset < allItems.length ? String(nextOffset) : null,
++        config: {
++          agentTypes,
++          models,
++          defaultModel: config.defaultModel,
++          defaultThinking: config.defaultThinking,
++          typeModels: { ...config.typeModels },
++          concurrency: {
++            default: config.concurrency.default,
++            providers: { ...config.concurrency.providers },
++            models: { ...config.concurrency.models },
++          },
++        },
++      };
++    },
++    async invoke(method: string, params: Record<string, Json>, context: InvokeContext): Promise<Json> {
++      guard();
++      if (!METHODS.includes(method)) throw new Error("Unknown Subagents panel method");
++      if (!context.actionId.trim()) throw new Error("Subagents action id is required");
++      if (context.signal.aborted) context.signal.throwIfAborted();
++
++      if (method === "spawn") {
++        const duplicate = receipts.get(context.actionId);
++        if (duplicate) return duplicate.promise;
++        exactKeys(params, ["type", "task"], ["description", "model", "thinking", "background"]);
++        if (typeof params.type !== "string" || !currentTypes().some(({ name }) => name === params.type)) {
++          throw new Error("Spawn type must be an exact currently visible agent type");
++        }
++        if (typeof params.task !== "string" || !params.task.trim() || Buffer.byteLength(params.task) > 32 * 1024) {
++          throw new Error("Spawn task must be nonblank and no larger than 32 KiB");
++        }
++        if (params.description !== undefined && (typeof params.description !== "string" || !params.description.trim() || params.description.length > 256)) {
++          throw new Error("Spawn description must be nonblank and at most 256 characters");
++        }
++        if (params.background !== undefined && typeof params.background !== "boolean") throw new Error("Invalid spawn background value");
++        const modelKey = params.model === undefined ? deps.effectiveModel(params.type) : requireModel(params.model, false)!;
++        const selected = findModel(modelKey);
++        if (!selected) throw new Error("Spawn model is not in the current available model list");
++        const thinking = params.thinking;
++        if (thinking !== undefined && (typeof thinking !== "string" || !selected.thinkingLevels.includes(thinking))) {
++          throw new Error("Spawn thinking level is not allowed for the selected model");
++        }
++        revision.assert(context.revision);
++        trimReceipts();
++        const spawnType = params.type;
++        const spawnTask = params.task.trim();
++        const spawnDescription = typeof params.description === "string" ? params.description.trim() : spawnTask.slice(0, 50);
++        const spawnThinking = typeof thinking === "string" ? thinking : undefined;
++        const spawnBackground = params.background !== false;
++
++        let resolveReceipt!: (value: Json) => void;
++        let rejectReceipt!: (reason: unknown) => void;
++        const promise = new Promise<Json>((resolve, reject) => {
++          resolveReceipt = resolve;
++          rejectReceipt = reject;
++        });
++        const receipt = { promise, settled: false };
++        receipts.set(context.actionId, receipt);
++
++        void (async (): Promise<Json> => {
++          const intent = {
++            method: "spawn",
++            type: spawnType,
++            task: spawnTask,
++            description: spawnDescription,
++            model: modelKey,
++            thinking: spawnThinking ?? null,
++            background: spawnBackground,
++          } satisfies Record<string, Json>;
++          if (!await confirm(
++            "agents.spawn",
++            "Spawn Subagent with exact parameters",
++            intent,
++            context.revision,
++            context.signal,
++          )) {
++            return { ok: false, cancelled: true };
++          }
++          context.signal.throwIfAborted();
++          guard();
++          revision.assert(context.revision);
++          const freshType = currentTypes().find(({ name }) => name === spawnType);
++          const freshModel = findModel(modelKey);
++          if (!freshType) throw new Error("Spawn type is no longer a visible agent type");
++          if (!freshModel) throw new Error("Spawn model is no longer available");
++          if (spawnThinking !== undefined && !freshModel.thinkingLevels.includes(spawnThinking)) {
++            throw new Error("Spawn thinking level is no longer allowed for the selected model");
++          }
++          const result = await deps.spawn({
++            type: freshType.name,
++            task: spawnTask,
++            description: spawnDescription,
++            modelKey: freshModel.key,
++            ...(freshModel.model !== undefined ? { model: freshModel.model } : {}),
++            ...(spawnThinking !== undefined ? { thinkingLevel: spawnThinking } : {}),
++            thinkingSource: "manual",
++            runInBackground: spawnBackground,
++          }, context.signal);
++          return { ok: true, agentId: result.agentId };
++        })().then(resolveReceipt, rejectReceipt).finally(() => { receipt.settled = true; });
++        return promise;
++      }
++
++      revision.assert(context.revision);
++      if (method === "set-default-model") {
++        exactKeys(params, ["model", "target"]);
++        const model = requireModel(params.model, true);
++        const mutationTarget = target(params.target);
++        if (!await confirm("agents.config", "Change Subagents settings with exact parameters", {
++          method: "set-default-model",
++          model,
++          target: mutationTarget,
++        }, context.revision, context.signal)) return { ok: false, cancelled: true };
++        context.signal.throwIfAborted();
++        guard();
++        revision.assert(context.revision);
++        deps.setDefaultModel(model, mutationTarget);
++      } else if (method === "set-agent-model") {
++        exactKeys(params, ["type", "model", "target"]);
++        if (typeof params.type !== "string" || !currentTypes().some(({ name }) => name === params.type)) throw new Error("Model override requires an exact visible agent type");
++        const model = requireModel(params.model, true);
++        const mutationTarget = target(params.target);
++        if (!await confirm("agents.config", "Change Subagents settings with exact parameters", {
++          method: "set-agent-model",
++          type: params.type,
++          model,
++          target: mutationTarget,
++        }, context.revision, context.signal)) return { ok: false, cancelled: true };
++        context.signal.throwIfAborted();
++        guard();
++        revision.assert(context.revision);
++        deps.setAgentModel(params.type, model, mutationTarget);
++      } else if (method === "set-default-thinking") {
++        exactKeys(params, ["thinking", "target"]);
++        const levels = new Set(currentModels().flatMap(({ thinkingLevels }) => thinkingLevels));
++        const thinking = params.thinking;
++        if (thinking !== null && (typeof thinking !== "string" || (thinking !== "parent" && !levels.has(thinking)))) {
++          throw new Error("Default thinking is not in the current supported choices");
++        }
++        if (params.target !== "global" && params.target !== "project") throw new Error("Default thinking target must be global or project");
++        if (!await confirm("agents.config", "Change Subagents settings with exact parameters", {
++          method: "set-default-thinking",
++          thinking,
++          target: params.target,
++        }, context.revision, context.signal)) return { ok: false, cancelled: true };
++        context.signal.throwIfAborted();
++        guard();
++        revision.assert(context.revision);
++        deps.setDefaultThinking(thinking, params.target);
++      } else {
++        exactKeys(params, ["scope", "value", "target"], ["key"]);
++        if (params.scope !== "default" && params.scope !== "provider" && params.scope !== "model") throw new Error("Invalid concurrency scope");
++        if (typeof params.value !== "number" || !Number.isSafeInteger(params.value) || params.value < 1) {
++          throw new Error("Concurrency value must be a positive safe integer");
++        }
++        const mutationTarget = target(params.target);
++        let key: string | undefined;
++        if (params.scope !== "default") {
++          if (typeof params.key !== "string" || !params.key) throw new Error("Concurrency key is required");
++          key = params.key;
++          const models = currentModels();
++          if (params.scope === "model" && !models.some((model) => model.key === key)) throw new Error("Concurrency model is not currently available");
++          if (params.scope === "provider" && !models.some((model) => model.key.split("/")[0] === key)) throw new Error("Concurrency provider is not currently available");
++        } else if (params.key !== undefined) {
++          throw new Error("Default concurrency does not accept a key");
++        }
++        if (!await confirm("agents.config", "Change Subagents settings with exact parameters", {
++          method: "set-concurrency",
++          scope: params.scope,
++          key: key ?? null,
++          value: params.value,
++          target: mutationTarget,
++        }, context.revision, context.signal)) return { ok: false, cancelled: true };
++        context.signal.throwIfAborted();
++        guard();
++        revision.assert(context.revision);
++        deps.setConcurrency(params.scope, key, params.value, mutationTarget);
++      }
++      revision.invalidate();
++      return {
++        ok: true,
++        appliesTo: method === "set-concurrency" ? "future-and-queued-scheduling" : "future-spawns",
++        runningAgentsRestarted: false,
++      };
++    },
++    dispose() {
++      disposed = true;
++      revision.invalidate();
++      receipts.clear();
++    },
++  };
++}
++
++async function importPublicInteractions(): Promise<PublicInteractionModule | undefined> {
++  try {
++    const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<PublicInteractionModule>;
++    return await dynamicImport("@kkkiio/pi-web-ui/interactions/v1");
++  } catch (error) {
++    const code = (error as { code?: unknown })?.code;
++    if (code === "ERR_MODULE_NOT_FOUND" || code === "ERR_PACKAGE_PATH_NOT_EXPORTED") return undefined;
++    throw error;
++  }
++}
++
++export async function installAgentsInteractionPanel(
++  events: unknown,
++  dependencies: AgentsInteractionDependencies,
++  load: InteractionModuleLoader = importPublicInteractions,
++): Promise<{ dispose(): void } | undefined> {
++  const api = await load();
++  if (typeof api?.createInteractionClient !== "function" || typeof api.registerInteractionPanel !== "function") return undefined;
++  const client = api.createInteractionClient(events, {
++    id: PACKAGE_NAME,
++    version: dependencies.packageVersion,
++    packageName: PACKAGE_NAME,
++    actions: {
++      "agents.config": { classification: "sensitive", method: "confirm" },
++      "agents.spawn": { classification: "sensitive", method: "confirm" },
++    },
++  });
++  const interact = client.interact;
++  if (typeof interact !== "function") {
++    client.dispose();
++    return undefined;
++  }
++  const adapter = createAgentsInteractionAdapter({ ...dependencies, interact });
++  let panel: { dispose(): void };
++  try {
++    panel = api.registerInteractionPanel(events, {
++      manifest: adapter.manifest,
++      isCurrent: adapter.isCurrent,
++      snapshot: adapter.snapshot,
++      invoke: adapter.invoke,
++    });
++  } catch (error) {
++    adapter.dispose();
++    client.dispose();
++    throw error;
++  }
++  return {
++    dispose() {
++      panel.dispose();
++      adapter.dispose();
++      client.dispose();
++    },
++  };
++}
+diff --git a/test/web-interactions-acceptance.test.ts b/test/web-interactions-acceptance.test.ts
+new file mode 100644
+--- /dev/null
++++ b/test/web-interactions-acceptance.test.ts
+@@ -0,0 +1,298 @@
++import assert from "node:assert/strict";
++import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import test from "node:test";
++
++test("escape-heavy spawn intent fits the real public client and broker budget without truncating local approval", async (t) => {
++  const interactionsEntrypoint = import.meta.resolve("@kkkiio/pi-web-ui/interactions/v1");
++  const brokerModule = new URL("./broker.ts", interactionsEntrypoint).href;
++  const [{ createAgentsInteractionAdapter }, publicApi, { InteractionBroker }, sdk] = await Promise.all([
++    import("../src/web-interactions.ts"),
++    import("@kkkiio/pi-web-ui/interactions/v1"),
++    import(brokerModule),
++    import("@earendil-works/pi-coding-agent"),
++  ]);
++  const events = sdk.createEventBus();
++  const broker = new InteractionBroker({
++    runId: "a".repeat(32),
++    generation: "b".repeat(32),
++    runtimeId: "runtime-budget",
++    sessionId: "session-budget",
++  });
++  const uninstall = publicApi.installInteractionBroker(events, broker);
++  const client = publicApi.createInteractionClient(events, {
++    id: "pi-subagents-lite",
++    version: "1.17.0-thinking.1",
++    packageName: "pi-subagents-lite",
++    actions: {
++      "agents.config": { classification: "sensitive", method: "confirm" },
++      "agents.spawn": { classification: "sensitive", method: "confirm" },
++    },
++  });
++  const task = "\"".repeat(16 * 1024);
++  let localMessage = "";
++  const spawnedTasks: string[] = [];
++  const adapter = createAgentsInteractionAdapter({
++    packageVersion: "1.17.0-thinking.1",
++    isCurrent: () => true,
++    getConfigFingerprint: () => "budget-config",
++    listAgents: () => [],
++    visibleAgentTypes: () => [{ name: "worker", description: "Budget acceptance worker" }],
++    availableModels: () => [{ key: "test/model", thinkingLevels: ["high"] }],
++    config: () => ({
++      defaultModel: "test/model",
++      defaultThinking: "high",
++      typeModels: { worker: "test/model" },
++      concurrency: { default: 1, providers: { test: 1 }, models: {} },
++    }),
++    effectiveModel: () => "test/model",
++    setDefaultModel: () => {},
++    setAgentModel: () => {},
++    setDefaultThinking: () => {},
++    setConcurrency: () => {},
++    spawn: async (intent) => {
++      spawnedTasks.push(intent.task);
++      return { agentId: "budget-child" };
++    },
++    interact: client.interact,
++    confirm: async (message) => {
++      localMessage = message;
++      return true;
++    },
++    revision: () => "budget-revision",
++  });
++  t.after(() => {
++    adapter.dispose();
++    client.dispose();
++    uninstall();
++    broker.close();
++    events.clear();
++  });
++
++  const { revision } = await adapter.snapshot();
++  const result = await adapter.invoke(
++    "spawn",
++    { type: "worker", task, model: "test/model", thinking: "high", background: false },
++    { actionId: "budget-spawn", revision, signal: new AbortController().signal },
++  );
++
++  assert.deepEqual(result, { ok: true, agentId: "budget-child" });
++  assert.deepEqual(spawnedTasks, [task]);
++  assert.equal(localMessage.includes(JSON.stringify(task)), true);
++  assert.equal(broker.completions().length, 1);
++});
++
++test("real ConfigStore CAS and SpawnCoordinator keep one child record for a duplicated action id", async (t) => {
++  const root = await mkdtemp(join(tmpdir(), "pi-agents-web-acceptance-"));
++  const agentDir = join(root, "agent");
++  const projectDir = join(root, "project");
++  await mkdir(agentDir, { recursive: true });
++  await mkdir(projectDir, { recursive: true });
++  process.env.PI_CODING_AGENT_DIR = agentDir;
++  t.after(async () => {
++    delete process.env.PI_CODING_AGENT_DIR;
++    await rm(root, { recursive: true, force: true });
++  });
++
++  const [{ createAgentsInteractionAdapter }, { SpawnCoordinator }, shell] = await Promise.all([
++    import("../src/web-interactions.ts"),
++    import("../src/spawn/spawn-coordinator.ts"),
++    import("../src/shell.ts"),
++  ]);
++
++  const model: any = {
++    id: "gpt-6-luna",
++    name: "Synthetic GPT-6 Luna",
++    api: "openai-completions",
++    provider: "subopenai",
++    baseUrl: "http://127.0.0.1.invalid/v1",
++    input: ["text"],
++    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++    reasoning: true,
++    thinkingLevelMap: { xhigh: "xhigh", max: "max" },
++    contextWindow: 128_000,
++    maxTokens: 16_384,
++  };
++  const modelKey = `${model.provider}/${model.id}`;
++  const context = {
++    cwd: projectDir,
++    model,
++    thinkingLevel: "xhigh",
++    modelRegistry: {
++      find: (provider: string, id: string) => provider === model.provider && id === model.id ? model : undefined,
++      getAvailable: () => [model],
++    },
++  } as any;
++  const pi = {} as any;
++
++  class ChildBoundary {
++    readonly records = new Map<string, any>();
++
++    spawn(_pi: unknown, _ctx: unknown, type: string, prompt: string, options: any): string {
++      const id = `child-${this.records.size + 1}`;
++      this.records.set(id, {
++        id,
++        prompt,
++        lifecycle: { status: "queued", startedAt: Date.now(), started: false },
++        display: { type, description: options.description, invocation: options.invocation },
++        execution: {
++          modelKey: options.modelKey,
++          settled: false,
++          settlementCount: 0,
++          promise: Promise.resolve(""),
++        },
++        stats: {
++          lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
++          toolUses: 0,
++          turnCount: 1,
++          compactionCount: 0,
++        },
++      });
++      return id;
++    }
++
++    getRecord(id: string): any {
++      return this.records.get(id);
++    }
++  }
++
++  const childBoundary = new ChildBoundary();
++  const coordinator = new SpawnCoordinator(childBoundary as any);
++  const store = shell.getStore();
++  shell.setSessionCtx(context);
++  shell.setPiInstance(pi);
++  store.mutate.agent.setDefaultModel(modelKey, "global");
++  store.mutate.agent.setDefaultThinking("xhigh", "global");
++
++  let releaseSpawnConfirmation!: () => void;
++  let markSpawnConfirmationStarted!: () => void;
++  const spawnConfirmationStarted = new Promise<void>((resolve) => { markSpawnConfirmationStarted = resolve; });
++  const spawnConfirmationGate = new Promise<void>((resolve) => { releaseSpawnConfirmation = resolve; });
++  const interactions: Array<{ action: string; content: Record<string, unknown> }> = [];
++  let revisionSequence = 0;
++
++  const adapter = createAgentsInteractionAdapter({
++    packageVersion: "1.17.0-thinking.1",
++    isCurrent: () => true,
++    getConfigFingerprint: () => store.interactionConfigFingerprint(),
++    listAgents: () => [...childBoundary.records.values()],
++    visibleAgentTypes: () => [{ name: "researcher", description: "Synthetic acceptance agent" }],
++    availableModels: () => [{ key: modelKey, thinkingLevels: ["xhigh", "max"], model }],
++    config: () => ({
++      defaultModel: store.sessionDefaultModel ?? store.agentConfigSnapshot().default ?? null,
++      defaultThinking: store.agent.defaultThinking ?? null,
++      typeModels: { researcher: store.modelFor("researcher", modelKey) },
++      concurrency: store.concurrency,
++    }),
++    effectiveModel: (type) => store.modelFor(type, modelKey),
++    setDefaultModel: (value, target) => {
++      if (value === null) store.mutate.agent.clearModelOverride("default", target);
++      else store.mutate.agent.setDefaultModel(value, target);
++    },
++    setAgentModel: (type, value, target) => {
++      if (value === null) store.mutate.agent.clearModelOverride(type, target);
++      else store.mutate.agent.setModelOverride(type, value, target);
++    },
++    setDefaultThinking: (value, target) => store.mutate.agent.setDefaultThinking((value ?? undefined) as any, target),
++    setConcurrency: (scope, key, value, target) => {
++      if (scope === "default") store.mutate.concurrency.setDefault(value, target);
++      else if (scope === "provider") store.mutate.concurrency.setProvider(key!, value, target);
++      else store.mutate.concurrency.setModel(key!, value, target);
++    },
++    spawn: async (intent, signal) => {
++      signal.throwIfAborted();
++      const result = await coordinator.spawn(pi, context, {
++        type: intent.type,
++        prompt: intent.task,
++        description: intent.description,
++        model,
++        modelKey: intent.modelKey,
++        thinkingLevel: intent.thinkingLevel as any,
++        thinkingSource: "manual",
++        graceTurns: store.agent.graceTurns,
++        invocation: {
++          modelName: model.id,
++          thinkingLevel: intent.thinkingLevel as any,
++          runInBackground: intent.runInBackground,
++        },
++        runInBackground: intent.runInBackground,
++      });
++      return { agentId: result.agentId };
++    },
++    interact: async (spec) => {
++      interactions.push({ action: spec.action, content: spec.content });
++      if (spec.action === "agents.spawn") {
++        markSpawnConfirmationStarted();
++        await spawnConfirmationGate;
++      }
++      return { state: "allowed", answer: true };
++    },
++    revision: () => `acceptance-revision-${++revisionSequence}`,
++  });
++  t.after(() => {
++    adapter.dispose();
++    coordinator.dispose();
++  });
++
++  const initial = await adapter.snapshot();
++  const configResult = await adapter.invoke(
++    "set-concurrency",
++    { scope: "default", value: 2, target: "global" },
++    { actionId: "config-real-store", revision: initial.revision, signal: new AbortController().signal },
++  );
++  assert.deepEqual(configResult, {
++    ok: true,
++    appliesTo: "future-and-queued-scheduling",
++    runningAgentsRestarted: false,
++  });
++  assert.equal(store.concurrency.default, 2);
++  const persisted = JSON.parse(await readFile(join(agentDir, "subagents-lite.json"), "utf8"));
++  assert.equal(persisted.concurrency.default, 2);
++
++  const current = await adapter.snapshot();
++  assert.notEqual(current.revision, initial.revision);
++  const invokeContext = {
++    actionId: "spawn-real-coordinator-once",
++    revision: current.revision,
++    signal: new AbortController().signal,
++  };
++  const params = {
++    type: "researcher",
++    task: "  Inspect the real coordinator boundary  ",
++    description: "  Real boundary acceptance  ",
++    model: modelKey,
++    thinking: "xhigh",
++    background: true,
++  };
++
++  const first = adapter.invoke("spawn", params, invokeContext);
++  await spawnConfirmationStarted;
++  const duplicate = adapter.invoke("spawn", params, invokeContext);
++  releaseSpawnConfirmation();
++  const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
++  const replayResult = await adapter.invoke("spawn", params, invokeContext);
++
++  assert.deepEqual(firstResult, { ok: true, agentId: "child-1" });
++  assert.deepEqual(duplicateResult, firstResult);
++  assert.deepEqual(replayResult, firstResult);
++  assert.equal(childBoundary.records.size, 1);
++  const record = childBoundary.records.get("child-1");
++  assert.equal(record.prompt, "Inspect the real coordinator boundary");
++  assert.equal(record.execution.modelKey, modelKey);
++  assert.equal(record.display.invocation.thinkingLevel, "xhigh");
++  assert.equal(record.display.invocation.runInBackground, true);
++  assert.equal(record.execution.liveView instanceof Object, true);
++  assert.equal(record.execution.spawnCtx, context);
++  assert.equal(interactions.filter(({ action }) => action === "agents.spawn").length, 1);
++  assert.deepEqual(interactions.at(-1)?.content, {
++    method: "spawn",
++    type: "researcher",
++    task: "Inspect the real coordinator boundary",
++    description: "Real boundary acceptance",
++    model: modelKey,
++    thinking: "xhigh",
++    background: true,
++    message: "Spawn Subagent with exact parameters",
++  });
++});
+diff --git a/test/web-interactions-agent-manager-acceptance.test.ts b/test/web-interactions-agent-manager-acceptance.test.ts
+new file mode 100644
+--- /dev/null
++++ b/test/web-interactions-agent-manager-acceptance.test.ts
+@@ -0,0 +1,224 @@
++import assert from "node:assert/strict";
++import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import test from "node:test";
++
++test("duplicate adapter spawn executes one real AgentManager child session with the faux provider", async (t) => {
++  const root = await mkdtemp(join(tmpdir(), "pi-agents-web-manager-acceptance-"));
++  const agentDir = join(root, "agent");
++  const projectDir = join(root, "project");
++  await mkdir(agentDir, { recursive: true });
++  await mkdir(projectDir, { recursive: true });
++
++  const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
++  const priorOffline = process.env.PI_OFFLINE;
++  process.env.PI_CODING_AGENT_DIR = agentDir;
++  process.env.PI_OFFLINE = "1";
++  t.after(async () => {
++    if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
++    else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
++    if (priorOffline === undefined) delete process.env.PI_OFFLINE;
++    else process.env.PI_OFFLINE = priorOffline;
++    await rm(root, { recursive: true, force: true });
++  });
++
++  await writeFile(join(agentDir, "subagents-lite.json"), JSON.stringify({
++    agent: {
++      default: "subopenai/gpt-6-luna",
++      defaultThinking: "xhigh",
++      loadExtensionsImplicitly: false,
++      loadSkillsImplicitly: false,
++      includeContextFiles: false,
++    },
++    concurrency: { default: 1 },
++  }));
++  await writeFile(join(agentDir, "models.json"), JSON.stringify({
++    providers: {
++      subopenai: {
++        baseUrl: "http://127.0.0.1.invalid",
++        api: "faux-acceptance",
++        apiKey: "isolated-test-key",
++        models: [{
++          id: "gpt-6-luna",
++          name: "Isolated Faux Agent",
++          api: "faux-acceptance",
++          reasoning: true,
++          thinkingLevelMap: { xhigh: "xhigh", max: "max" },
++          input: ["text"],
++          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++          contextWindow: 8_192,
++          maxTokens: 512,
++        }],
++      },
++    },
++  }));
++
++  const [
++    { fauxAssistantMessage },
++    { registerFauxProvider },
++    { AgentManager },
++    { SpawnCoordinator },
++    { createAgentsInteractionAdapter },
++    shell,
++    sdk,
++  ] = await Promise.all([
++    import("@earendil-works/pi-ai"),
++    import("@earendil-works/pi-ai/compat"),
++    import("../src/agents/agent-manager.ts"),
++    import("../src/spawn/spawn-coordinator.ts"),
++    import("../src/web-interactions.ts"),
++    import("../src/shell.ts"),
++    import("@earendil-works/pi-coding-agent"),
++  ]);
++
++  const faux = registerFauxProvider({
++    api: "faux-acceptance",
++    provider: "subopenai",
++    models: [{ id: "gpt-6-luna", name: "Isolated Faux Agent", reasoning: true }],
++  });
++  faux.setResponses([fauxAssistantMessage("REAL_CHILD_COMPLETED")]);
++  t.after(() => faux.unregister());
++
++  const model = Object.assign(faux.getModel(), { thinkingLevelMap: { xhigh: "xhigh", max: "max" } });
++  const modelKey = `${model.provider}/${model.id}`;
++  const events = sdk.createEventBus();
++  const parentSession = sdk.SessionManager.inMemory(projectDir);
++  const context = {
++    cwd: projectDir,
++    model,
++    thinkingLevel: "xhigh",
++    modelRegistry: {
++      find: (provider: string, id: string) => provider === model.provider && id === model.id ? model : undefined,
++      getAvailable: () => [model],
++    },
++    sessionManager: parentSession,
++    isProjectTrusted: () => false,
++    getSystemPrompt: () => "",
++    isIdle: () => true,
++    ui: { notify: () => {} },
++  } as any;
++  const pi = {
++    events,
++    exec: async () => ({ code: 1, stdout: "", stderr: "" }),
++    sendMessage: () => {},
++  } as any;
++
++  const manager = new AgentManager(undefined, { default: 1 });
++  const coordinator = new SpawnCoordinator(manager);
++  const store = shell.getStore();
++  store.reload();
++  store.setDeps({ manager });
++  shell.setPiInstance(pi);
++  shell.setSessionCtx(context);
++  shell.setManager(manager);
++  shell.setCoordinator(coordinator);
++  t.after(async () => {
++    coordinator.dispose();
++    await manager.dispose();
++    events.clear();
++    shell.setCoordinator(null);
++    shell.setManager(null);
++  });
++
++  let releaseConfirmation!: () => void;
++  let confirmationStarted!: () => void;
++  const confirmationGate = new Promise<void>((resolve) => { releaseConfirmation = resolve; });
++  const confirmationObserved = new Promise<void>((resolve) => { confirmationStarted = resolve; });
++  const previews: Array<Record<string, unknown>> = [];
++  let revisionSequence = 0;
++  const adapter = createAgentsInteractionAdapter({
++    packageVersion: "1.17.0-thinking.1",
++    isCurrent: () => true,
++    getConfigFingerprint: () => store.interactionConfigFingerprint(),
++    listAgents: () => manager.listAgents(),
++    visibleAgentTypes: () => [{ name: "general-purpose", description: "Actual source child" }],
++    availableModels: () => [{ key: modelKey, thinkingLevels: ["xhigh", "max"], model }],
++    config: () => ({
++      defaultModel: modelKey,
++      defaultThinking: "xhigh",
++      typeModels: { "general-purpose": modelKey },
++      concurrency: store.concurrency,
++    }),
++    effectiveModel: () => modelKey,
++    setDefaultModel: () => assert.fail("config mutation not expected"),
++    setAgentModel: () => assert.fail("config mutation not expected"),
++    setDefaultThinking: () => assert.fail("config mutation not expected"),
++    setConcurrency: () => assert.fail("config mutation not expected"),
++    spawn: async (intent, signal) => {
++      signal.throwIfAborted();
++      const result = await coordinator.spawn(pi, context, {
++        type: intent.type,
++        prompt: intent.task,
++        description: intent.description,
++        model,
++        modelKey: intent.modelKey,
++        thinkingLevel: intent.thinkingLevel as any,
++        thinkingSource: "manual",
++        graceTurns: store.agent.graceTurns,
++        invocation: {
++          modelName: model.id,
++          thinkingLevel: intent.thinkingLevel as any,
++          runInBackground: intent.runInBackground,
++        },
++        runInBackground: intent.runInBackground,
++      });
++      return { agentId: result.agentId };
++    },
++    interact: async (spec) => {
++      if (spec.action !== "agents.spawn") assert.fail(`unexpected interaction ${spec.action}`);
++      previews.push(spec.content);
++      confirmationStarted();
++      await confirmationGate;
++      return { state: "allowed", answer: true };
++    },
++    revision: () => `real-manager-revision-${++revisionSequence}`,
++  });
++  t.after(() => adapter.dispose());
++
++  const snapshot = await adapter.snapshot();
++  const invokeContext = {
++    actionId: "real-agent-manager-duplicate-action",
++    revision: snapshot.revision,
++    signal: new AbortController().signal,
++  };
++  const params = {
++    type: "general-purpose",
++    task: "  Execute one actual isolated child session  ",
++    description: "  Real AgentManager acceptance  ",
++    model: modelKey,
++    thinking: "xhigh",
++    background: false,
++  };
++
++  const first = adapter.invoke("spawn", params, invokeContext);
++  await confirmationObserved;
++  const duplicate = adapter.invoke("spawn", params, invokeContext);
++  releaseConfirmation();
++  const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
++  const replayResult = await adapter.invoke("spawn", params, invokeContext);
++
++  assert.deepEqual(duplicateResult, firstResult);
++  assert.deepEqual(replayResult, firstResult);
++  assert.equal(previews.length, 1);
++  assert.deepEqual(previews[0], {
++    method: "spawn",
++    task: "Execute one actual isolated child session",
++    type: "general-purpose",
++    model: modelKey,
++    thinking: "xhigh",
++    background: false,
++    description: "Real AgentManager acceptance",
++    message: "Spawn Subagent with exact parameters",
++  });
++  assert.equal(faux.state.callCount, 1);
++  assert.equal(faux.getPendingResponseCount(), 0);
++  const records = manager.listAgents();
++  assert.equal(records.length, 1);
++  assert.equal((firstResult as { agentId: string }).agentId, records[0].id);
++  assert.equal(records[0].lifecycle.status, "completed");
++  assert.equal(records[0].lifecycle.started, true);
++  assert.equal(records[0].execution.settlementCount, 1);
++  assert.ok(records[0].execution.session instanceof sdk.AgentSession);
++  assert.equal(records[0].result, "REAL_CHILD_COMPLETED");
++});
+diff --git a/test/web-interactions.test.ts b/test/web-interactions.test.ts
+new file mode 100644
+--- /dev/null
++++ b/test/web-interactions.test.ts
+@@ -0,0 +1,376 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++import {
++  createAgentsInteractionAdapter,
++  installAgentsInteractionPanel,
++  type AgentsInteractionDependencies,
++} from "../src/web-interactions.ts";
++
++function fixture() {
++  let fingerprint = "config-a";
++  let spawnCount = 0;
++  const mutations: Array<Record<string, unknown>> = [];
++  const spawnIntents: Array<Record<string, unknown>> = [];
++  const interactions: Array<Record<string, unknown>> = [];
++
++  const deps: AgentsInteractionDependencies = {
++    packageVersion: "1.17.0-thinking.1",
++    isCurrent: () => true,
++    getConfigFingerprint: () => fingerprint,
++    listAgents: () => [{
++      id: "abc123",
++      lifecycle: { status: "running", startedAt: 100, started: true },
++      display: {
++        type: "researcher",
++        description: "Public description",
++        outputFile: "/secret/transcript.md",
++        invocation: { modelName: "gpt-6-luna", thinkingLevel: "xhigh", runInBackground: true },
++      },
++      execution: { session: { secret: true }, pendingSteers: ["secret"], spawnCtx: { secret: true } },
++      stats: {},
++      result: "private result",
++      error: "private error",
++    }],
++    visibleAgentTypes: () => [{ name: "researcher", description: "Research safely" }],
++    availableModels: () => [{ key: "subopenai/gpt-6-luna", thinkingLevels: ["xhigh", "max"] }],
++    config: () => ({
++      defaultModel: "subopenai/gpt-6-luna",
++      defaultThinking: "xhigh",
++      typeModels: { researcher: "subopenai/gpt-6-luna" },
++      concurrency: { default: 2, providers: { subopenai: 2 }, models: {} },
++    }),
++    effectiveModel: () => "subopenai/gpt-6-luna",
++    setDefaultModel: (model, target) => {
++      mutations.push({ kind: "default-model", model, target });
++      fingerprint = "config-default-model";
++    },
++    setAgentModel: (type, model, target) => {
++      mutations.push({ kind: "agent-model", type, model, target });
++      fingerprint = "config-agent-model";
++    },
++    setDefaultThinking: (thinking, target) => {
++      mutations.push({ kind: "default-thinking", thinking, target });
++      fingerprint = "config-thinking";
++    },
++    setConcurrency: (scope, key, value, target) => {
++      mutations.push({ kind: "concurrency", scope, key, value, target });
++      fingerprint = "config-concurrency";
++    },
++    spawn: async (intent) => {
++      spawnCount++;
++      spawnIntents.push(intent as unknown as Record<string, unknown>);
++      await Promise.resolve();
++      return { agentId: "spawned-1" };
++    },
++    interact: async (spec) => {
++      interactions.push(spec as unknown as Record<string, unknown>);
++      return { state: "allowed", answer: true };
++    },
++    revision: (() => {
++      let n = 0;
++      return () => `revision-${++n}`;
++    })(),
++  };
++
++  return {
++    deps,
++    mutations,
++    spawnIntents,
++    interactions,
++    get spawnCount() { return spawnCount; },
++    changeConfig() { fingerprint = "config-external"; },
++  };
++}
++
++test("snapshot is allowlisted and includes current model, thinking, concurrency, and type choices", async () => {
++  const f = fixture();
++  const adapter = createAgentsInteractionAdapter(f.deps);
++  const snapshot = await adapter.snapshot();
++
++  assert.deepEqual(snapshot.items, [{
++    id: "abc123",
++    status: "running",
++    type: "researcher",
++    description: "Public description",
++    startedAt: 100,
++    model: "gpt-6-luna",
++    thinking: "xhigh",
++    background: true,
++  }]);
++  assert.deepEqual(snapshot.config, {
++    agentTypes: [{ name: "researcher", description: "Research safely", effectiveModel: "subopenai/gpt-6-luna" }],
++    models: [{ key: "subopenai/gpt-6-luna", thinkingLevels: ["xhigh", "max"] }],
++    defaultModel: "subopenai/gpt-6-luna",
++    defaultThinking: "xhigh",
++    typeModels: { researcher: "subopenai/gpt-6-luna" },
++    concurrency: { default: 2, providers: { subopenai: 2 }, models: {} },
++  });
++  const serialized = JSON.stringify(snapshot);
++  for (const forbidden of ["private result", "private error", "/secret/", "pendingSteers", "spawnCtx", "session", "prompt"]) {
++    assert.equal(serialized.includes(forbidden), false, forbidden);
++  }
++});
++
++test("source CAS rejects terminal-side config changes before settings mutation", async () => {
++  const f = fixture();
++  const adapter = createAgentsInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++  f.changeConfig();
++
++  await assert.rejects(
++    adapter.invoke(
++      "set-default-model",
++      { model: "subopenai/gpt-6-luna", target: "session" },
++      { actionId: "config-1", revision, signal: new AbortController().signal },
++    ),
++    /stale/i,
++  );
++  assert.deepEqual(f.mutations, []);
++});
++
++test("snapshot paginates active agents at the host panel limit", async () => {
++  const f = fixture();
++  f.deps.listAgents = () => Array.from({ length: 101 }, (_, index) => ({
++    id: `agent-${index}`,
++    lifecycle: { status: index % 2 === 0 ? "running" : "queued", startedAt: index, started: index % 2 === 0 },
++    display: { type: "researcher", description: `Agent ${index}` },
++    execution: {},
++    stats: {},
++  }));
++  const adapter = createAgentsInteractionAdapter(f.deps);
++
++  const first = await adapter.snapshot();
++  const second = await adapter.snapshot(first.cursor ?? undefined);
++  assert.equal(first.items.length, 100);
++  assert.equal(first.cursor, "100");
++  assert.equal(second.items.length, 1);
++  assert.equal(second.items[0]?.id, "agent-100");
++  assert.equal(second.cursor, null);
++  assert.equal(second.revision, first.revision);
++  await assert.rejects(adapter.snapshot("not-an-offset"), /cursor/i);
++});
++
++test("settings use actual mutation seams and concurrency requires a positive safe integer", async () => {
++  const f = fixture();
++  const adapter = createAgentsInteractionAdapter(f.deps);
++  let revision = (await adapter.snapshot()).revision;
++  await adapter.invoke(
++    "set-default-thinking",
++    { thinking: "xhigh", target: "global" },
++    { actionId: "thinking-1", revision, signal: new AbortController().signal },
++  );
++  revision = (await adapter.snapshot()).revision;
++  await assert.rejects(
++    adapter.invoke(
++      "set-concurrency",
++      { scope: "default", value: 1.5, target: "session" },
++      { actionId: "concurrency-bad", revision, signal: new AbortController().signal },
++    ),
++    /safe integer/i,
++  );
++  await adapter.invoke(
++    "set-concurrency",
++    { scope: "provider", key: "subopenai", value: 3, target: "session" },
++    { actionId: "concurrency-ok", revision, signal: new AbortController().signal },
++  );
++
++  assert.deepEqual(f.mutations, [
++    { kind: "default-thinking", thinking: "xhigh", target: "global" },
++    { kind: "concurrency", scope: "provider", key: "subopenai", value: 3, target: "session" },
++  ]);
++  assert.deepEqual(f.interactions[0]?.content, {
++    method: "set-default-thinking",
++    thinking: "xhigh",
++    target: "global",
++    message: "Change Subagents settings with exact parameters",
++  });
++  assert.deepEqual(f.interactions[1]?.content, {
++    method: "set-concurrency",
++    scope: "provider",
++    key: "subopenai",
++    value: 3,
++    target: "session",
++    message: "Change Subagents settings with exact parameters",
++  });
++});
++
++test("model confirmations bind the exact target, type, and nullable model", async () => {
++  const f = fixture();
++  const adapter = createAgentsInteractionAdapter(f.deps);
++  let revision = (await adapter.snapshot()).revision;
++  await adapter.invoke(
++    "set-default-model",
++    { model: "subopenai/gpt-6-luna", target: "project" },
++    { actionId: "default-model-preview", revision, signal: new AbortController().signal },
++  );
++  revision = (await adapter.snapshot()).revision;
++  await adapter.invoke(
++    "set-agent-model",
++    { type: "researcher", model: null, target: "session" },
++    { actionId: "agent-model-preview", revision, signal: new AbortController().signal },
++  );
++
++  assert.deepEqual(f.interactions[0]?.content, {
++    method: "set-default-model",
++    model: "subopenai/gpt-6-luna",
++    target: "project",
++    message: "Change Subagents settings with exact parameters",
++  });
++  assert.deepEqual(f.interactions[1]?.content, {
++    method: "set-agent-model",
++    type: "researcher",
++    model: null,
++    target: "session",
++    message: "Change Subagents settings with exact parameters",
++  });
++});
++
++test("terminal fallback approvals show exact settings and spawn intent", async () => {
++  const f = fixture();
++  const localMessages: string[] = [];
++  f.deps.confirm = async (message) => {
++    localMessages.push(message);
++    return true;
++  };
++  f.deps.interact = async (_spec, options) => {
++    const answer = await options.local?.(new AbortController().signal);
++    return { state: answer === true ? "allowed" : "cancelled", answer };
++  };
++  const adapter = createAgentsInteractionAdapter(f.deps);
++
++  let revision = (await adapter.snapshot()).revision;
++  await adapter.invoke(
++    "set-concurrency",
++    { scope: "provider", key: "subopenai", value: 3, target: "session" },
++    { actionId: "local-concurrency", revision, signal: new AbortController().signal },
++  );
++  revision = (await adapter.snapshot()).revision;
++  await adapter.invoke(
++    "spawn",
++    {
++      type: "researcher",
++      task: "Inspect exact approval intent",
++      description: "Approval audit",
++      model: "subopenai/gpt-6-luna",
++      thinking: "xhigh",
++      background: false,
++    },
++    { actionId: "local-spawn", revision, signal: new AbortController().signal },
++  );
++
++  assert.deepEqual(localMessages, [
++    "Change Subagents settings with exact parameters:\n{\n  \"method\": \"set-concurrency\",\n  \"scope\": \"provider\",\n  \"key\": \"subopenai\",\n  \"value\": 3,\n  \"target\": \"session\"\n}",
++    "Spawn Subagent with exact parameters:\n{\n  \"method\": \"spawn\",\n  \"type\": \"researcher\",\n  \"task\": \"Inspect exact approval intent\",\n  \"description\": \"Approval audit\",\n  \"model\": \"subopenai/gpt-6-luna\",\n  \"thinking\": \"xhigh\",\n  \"background\": false\n}",
++  ]);
++});
++
++test("all settings refuse to mutate when the invoke signal aborts after approval", async () => {
++  const cases = [
++    ["set-default-model", { model: "subopenai/gpt-6-luna", target: "project" }],
++    ["set-agent-model", { type: "researcher", model: null, target: "session" }],
++    ["set-default-thinking", { thinking: "xhigh", target: "global" }],
++    ["set-concurrency", { scope: "provider", key: "subopenai", value: 3, target: "session" }],
++  ] as const;
++
++  for (const [method, params] of cases) {
++    const f = fixture();
++    const controller = new AbortController();
++    f.deps.interact = async () => {
++      const result = Promise.resolve({ state: "allowed", answer: true } as const);
++      void result.then(() => controller.abort());
++      return result;
++    };
++    const adapter = createAgentsInteractionAdapter(f.deps);
++    const { revision } = await adapter.snapshot();
++
++    await assert.rejects(
++      adapter.invoke(method, params, { actionId: `abort-${method}`, revision, signal: controller.signal }),
++      { name: "AbortError" },
++    );
++    assert.deepEqual(f.mutations, []);
++  }
++});
++
++test("spawn reserves action id before awaits and duplicate delivery cannot create a second child", async () => {
++  const f = fixture();
++  const adapter = createAgentsInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++  const context = { actionId: "spawn-once", revision, signal: new AbortController().signal };
++  const params = {
++    type: "researcher",
++    task: "  Investigate the source API  ",
++    description: "  Inspect source API  ",
++    model: "subopenai/gpt-6-luna",
++    thinking: "xhigh",
++    background: false,
++  };
++  const [first, duplicate] = await Promise.all([
++    adapter.invoke("spawn", params, context),
++    adapter.invoke("spawn", params, context),
++  ]);
++
++  assert.deepEqual(first, { ok: true, agentId: "spawned-1" });
++  assert.deepEqual(duplicate, first);
++  assert.equal(f.spawnCount, 1);
++  assert.equal(f.spawnIntents[0]?.type, "researcher");
++  assert.equal(f.spawnIntents[0]?.thinkingSource, "manual");
++  assert.equal(f.spawnIntents[0]?.thinkingLevel, "xhigh");
++  assert.equal(f.spawnIntents[0]?.task, "Investigate the source API");
++  assert.equal(f.spawnIntents[0]?.description, "Inspect source API");
++  assert.equal(f.spawnIntents[0]?.runInBackground, false);
++  assert.equal(f.interactions.at(-1)?.action, "agents.spawn");
++  assert.deepEqual(f.interactions.at(-1)?.content, {
++    method: "spawn",
++    type: "researcher",
++    task: "Investigate the source API",
++    description: "Inspect source API",
++    model: "subopenai/gpt-6-luna",
++    thinking: "xhigh",
++    background: false,
++    message: "Spawn Subagent with exact parameters",
++  });
++});
++
++test("spawn requires exact visible type and currently available model", async () => {
++  const f = fixture();
++  const adapter = createAgentsInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++
++  await assert.rejects(
++    adapter.invoke(
++      "spawn",
++      { type: "Researcher", task: "Task", model: "subopenai/gpt-6-luna", thinking: "xhigh" },
++      { actionId: "spawn-case", revision, signal: new AbortController().signal },
++    ),
++    /visible agent type/i,
++  );
++  await assert.rejects(
++    adapter.invoke(
++      "spawn",
++      { type: "researcher", task: "Task", model: "missing/model", thinking: "high" },
++      { actionId: "spawn-model", revision, signal: new AbortController().signal },
++    ),
++    /available model/i,
++  );
++  assert.equal(f.spawnCount, 0);
++});
++
++test("optional installer leaves the terminal-only extension unchanged when public panel API is unavailable", async () => {
++  const f = fixture();
++  let registered = 0;
++  assert.equal(await installAgentsInteractionPanel({}, f.deps, async () => undefined), undefined);
++  assert.equal(await installAgentsInteractionPanel({}, f.deps, async () => ({
++    createInteractionClient: () => ({ interact: f.deps.interact!, dispose() {} }),
++  })), undefined);
++  const handle = await installAgentsInteractionPanel({}, f.deps, async () => ({
++    createInteractionClient: () => ({ interact: f.deps.interact!, dispose() {} }),
++    registerInteractionPanel: (_events, options) => {
++      registered++;
++      assert.deepEqual(options.manifest.commands, ["agents"]);
++      return { dispose() {} };
++    },
++  }));
++  assert.equal(registered, 1);
++  handle?.dispose();
++});

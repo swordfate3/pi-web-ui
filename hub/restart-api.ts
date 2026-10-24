@@ -65,8 +65,7 @@ async function body(request: IncomingMessage): Promise<Record<string, unknown>> 
   return value;
 }
 
-export function createRestartApi(config: HubConfig, hooks: Hooks) {
-  const management = new HubManagement(config);
+export function createRestartApi(config: HubConfig, hooks: Hooks, management = new HubManagement(config)) {
   const provider = config.lifecycle ? new GateLifecycle(config.lifecycle) : undefined;
   const runtimeProvider = config.runtimeUpdates ? new GateRuntimeUpdates(config.runtimeUpdates) : undefined;
   const receipts = path.join(config.stateDir, "restarts");

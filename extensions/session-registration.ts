@@ -4,6 +4,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import net from "node:net";
 import { type RegistrationConfig, validatedPublicUrl } from "./connection-config.ts";
 import { BOUNDED_PROTOCOL, isBoundedGeneration } from "./hub-generation.ts";
+import { type InteractionPin, validateInteractionPin } from "./interactions/enrollment.ts";
+import {
+  type InteractionIdentity,
+  type InteractionRegistration,
+  readInteractionRegistration,
+} from "./interactions/protocol.ts";
 import { type RuntimeMetadata, readRuntimeMetadata } from "./runtime-metadata.ts";
 import { readSoftwareMetadata, type SoftwareMetadata } from "./software-metadata.ts";
 
@@ -25,6 +31,7 @@ type RegistrationTarget = {
   onUrl: (url: string | null) => void;
   getSessionName: () => unknown;
   getRuntime: () => RuntimeMetadata | undefined;
+  getInteraction?: () => InteractionRegistration | undefined;
   software?: SoftwareMetadata;
   mode?: "bounded" | "legacy";
   boot?: string;
@@ -34,6 +41,7 @@ type RegistrationTarget = {
 
 /** One Pi server lifetime, not a multi-process session manager or login provider. */
 export class SessionRegistration {
+  readonly interactionPin?: InteractionPin;
   private credential: Credential;
   private socketPath: string;
   private timeoutMs: number;
@@ -45,11 +53,23 @@ export class SessionRegistration {
   private target: RegistrationTarget | undefined;
   private queued: RefreshBatch | undefined;
 
-  constructor(credential: Credential, socketPath: string, options: { timeoutMs?: number; renewMs?: number } = {}) {
+  constructor(
+    credential: Credential,
+    socketPath: string,
+    options: { timeoutMs?: number; renewMs?: number; interactionPin?: InteractionPin } = {},
+  ) {
     this.credential = credential;
     this.socketPath = socketPath;
     this.timeoutMs = options.timeoutMs ?? 5000;
     this.renewMs = options.renewMs ?? 15000;
+    this.interactionPin =
+      options.interactionPin === undefined ? undefined : validateInteractionPin(options.interactionPin);
+  }
+
+  interactionIdentity(runtimeId: string, sessionId: string): InteractionIdentity | null {
+    return this.generation
+      ? { runId: this.credential.run_id, generation: this.generation, runtimeId, sessionId }
+      : null;
   }
 
   private request(
@@ -120,6 +140,7 @@ export class SessionRegistration {
     getSessionName: () => unknown = () => null,
     getRuntime: () => RuntimeMetadata | undefined = () => undefined,
     software?: SoftwareMetadata,
+    getInteraction?: () => InteractionRegistration | undefined,
   ): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
@@ -127,7 +148,7 @@ export class SessionRegistration {
     this.generation = null;
     // This is an initialization-time immutable display snapshot. Renewals never
     // reread package files, and do not imply that an on-disk update is running.
-    this.target = { epoch, port, onUrl, getSessionName, getRuntime, software };
+    this.target = { epoch, port, onUrl, getSessionName, getRuntime, software, getInteraction };
     await this.enqueueRefresh(this.target).done;
     if (epoch !== this.epoch) return;
     this.timer = setInterval(() => {
@@ -186,6 +207,7 @@ export class SessionRegistration {
           : null;
       const runtime = readRuntimeMetadata(target.getRuntime());
       const software = readSoftwareMetadata(target.software);
+      const interaction = readInteractionRegistration(target.getInteraction?.());
       if (!target.mode || (target.mode === "bounded" && !target.boot)) {
         const nonce = randomBytes(16).toString("hex");
         const negotiated = await this.request(
@@ -262,7 +284,10 @@ export class SessionRegistration {
         sessionName,
         runtime,
         software,
-        target.mode === "bounded" ? { protocol: BOUNDED_PROTOCOL, boot: target.boot } : {},
+        {
+          ...(target.mode === "bounded" ? { protocol: BOUNDED_PROTOCOL, boot: target.boot } : {}),
+          ...(interaction ? { interaction } : {}),
+        },
       )) as {
         url?: unknown;
       };
@@ -379,7 +404,11 @@ export function createSessionRegistration(config: RegistrationConfig): SessionRe
     ) {
       throw new Error();
     }
-    return new SessionRegistration({ run_id: credential.run_id, token: credential.token }, config.socketPath);
+    return new SessionRegistration({ run_id: credential.run_id, token: credential.token }, config.socketPath, {
+      ...(credential.interactions === undefined
+        ? {}
+        : { interactionPin: validateInteractionPin(credential.interactions) }),
+    });
   } catch {
     throw new Error("Invalid Pi Web registration credentials");
   }

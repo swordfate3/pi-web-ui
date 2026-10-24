@@ -71,12 +71,14 @@ export async function copyFixture(destination) {
     "README.md",
     "docs/remote-access.md",
     "docs/hub.md",
+    "docs/web-interactions.md",
+    "integrations/check-adapter.mjs",
     "scripts/web-dist.mjs",
     "vite.config.ts",
     "vite.hub.config.ts",
     "tsconfig.json",
   ];
-  const dirs = ["bin", "hub", "extensions", "src/web", "public", "dist", "docs/images"];
+  const dirs = ["bin", "hub", "extensions", "src/web", "public", "dist", "docs/images", "integrations/adapters"];
   for (const file of files) {
     await mkdir(path.dirname(path.join(destination, file)), { recursive: true });
     await cp(path.join(project, file), path.join(destination, file));

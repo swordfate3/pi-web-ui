@@ -236,6 +236,7 @@ export type TerminalPrompt = {
 };
 
 export type StateSyncPayload = {
+  extensionInteractions?: Record<string, unknown>;
   terminalPrompt?: TerminalPrompt | null;
   history?: HistoryMetadata;
   entries?: SessionEntry[];

@@ -1,0 +1,1299 @@
+diff --git a/index.ts b/index.ts
+index ef934b3..b960150 100644
+--- a/index.ts
++++ b/index.ts
+@@ -10,6 +10,7 @@ import type { NestedCallHandOff } from "./proxy-modes.ts";
+ import { Type } from "typebox";
+ import type { TSchema } from "typebox";
+ import { cloneMcpConfig, discoverConfiguredClaudePluginSkills, getLegacyMcpMigrationNotices, getPiGlobalConfigPath, getPiMcpAuthPath, getProjectConfigPath, getProjectPiConfigPath, isExclusiveConfigMode, loadMcpConfig, loadMcpConfigWithSources, resolveConfiguredClaudePluginMcp, setPiMcpConfigEnabled, translatePiMcpServer, writeProjectServerDisabledOverride, writeSharedServerEntry } from "./config.ts";
++import { isBuiltInAgentPlugin } from "./agent-plugin-provenance.ts";
+ import { approveProjectScriptTool, approveProjectServer, describeBlockedScriptTool, excludeProjectServersAtLoadTime, hasProjectScriptToolDefinitions, hasProjectServerDefinitions, loadedScriptToolIssues } from "./project-server-trust.ts";
+ import { buildProxyDescription, getLargeDirectToolsAdvisory, getMissingConfiguredDirectToolServers, prepareDirectToolArguments, resolveDirectTools } from "./direct-tool-surface.ts";
+ import { deferredToolKey, resolveDeferredToolSpecs, type DeferredToolSpec } from "./deferred-tool-surface.ts";
+@@ -22,18 +23,19 @@ import { isServerCacheValid, loadMetadataCache, parseDirectToolSelectors, withSe
+ import { isExecutorCatalogEntry } from "./executor-catalog.ts";
+ import { createPromptCommand, resolveCachedPrompts } from "./prompts.ts";
+ import { logger } from "./logger.ts";
+-import { formatMcpFooterStatus, formatTerminalError, getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
++import { expandHomePath, formatMcpFooterStatus, formatTerminalError, getConfigPathFromArgv, interpolateEnvVars, normalizeDirectToolInputSchema, resolveConfigPath, resolveServerUrl, truncateAtWord } from "./utils.ts";
+ import { createMcpDirectToolCallRenderer, createMcpProxyToolCallRenderer, createMcpToolResultRenderer, resolveMcpToolRenderOptions } from "./tool-result-renderer.ts";
+ import { toolErrorOverride } from "./error-signal.ts";
+ import { createMcpRuntimeOwner, createOwnedUi, isAbortError, type McpRuntimeOwner } from "./runtime-owner.ts";
+ import { cleanupMaterializedBinaryResources } from "./tool-registrar.ts";
+-import { publishMcpStatusShutdown } from "./mcp-status.ts";
++import { createMcpStatusSnapshot, publishMcpStatusShutdown } from "./mcp-status.ts";
+ import { syncNamespaceProxyTools } from "./namespace-tools.ts";
+ import { restoreSessionApprovalState } from "./session-approvals.ts";
+ import { createRetryableLoader } from "./lazy-loader.ts";
+ import { toToolParameters } from "./tool-parameters.ts";
+ import { readPanelOpenKeys } from "./panel-keys.ts";
+ import { getAgentPath } from "./agent-dir.ts";
++import { installMcpInteractionPanel, type McpExecutionPreview, type McpInteractionBinding } from "./web-interactions.ts";
+ 
+ export type { McpAdapterOptions } from "./types.ts";
+ export type { ServerEntry } from "./types.ts";
+@@ -69,6 +71,7 @@ const INIT_FAILURE_MESSAGE_MAX_CHARS = 1_000;
+ const INIT_WAIT_TIMED_OUT: unique symbol = Symbol("init-wait-timed-out");
+ // A call that reaches an unregistered server waits this long for it, then runs regardless.
+ const LATE_REGISTRATION_WAIT_MS = 10_000;
++const MCP_PACKAGE_VERSION = "6.0.0";
+ 
+ /** Pi 0.99+ has its own MCP config; on Pi 0.84–0.87, `mcp.json` is an old adapter config. */
+ function piSupportsMcp(pi: ExtensionAPI): boolean {
+@@ -1533,6 +1536,157 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+         statusPublicationAttempted = true;
+         callReentrant(() => loadedCoreRuntime.updateStatusBar(nextState));
+         guard();
++        try {
++          const panelContextIsCurrent = () => {
++            if (!owner.isActive()
++              || generation !== lifecycleGeneration
++              || currentOwner !== owner
++              || state !== nextState
++              || sessionCtx === null) return false;
++            try {
++              return sessionCtx.sessionManager === nextState.sessionManager;
++            } catch {
++              return false;
++            }
++          };
++          const panelContext = () => {
++            if (!panelContextIsCurrent()) throw new Error("Stale MCP panel context");
++            return sessionCtx!;
++          };
++          const panelConfigFingerprint = () => JSON.stringify(
++            programmaticConfig ? nextState.config : loadMcpConfig(earlyConfigPath, panelContext().cwd),
++          );
++          const panelRuntimeFingerprint = () => JSON.stringify(nextState.config);
++          const panelExecutionPreview = (name: string): McpExecutionPreview => {
++            const definition = nextState.config.mcpServers[name];
++            if (!definition) throw new Error("MCP server is not present in the loaded runtime configuration");
++            if (definition.command) {
++              const command = resolveConfigPath(definition.command) ?? definition.command;
++              const args = isBuiltInAgentPlugin(definition, "args")
++                ? [...(definition.args ?? [])]
++                : (definition.args ?? []).map((argument) => expandHomePath(interpolateEnvVars(argument)) ?? argument);
++              const cwd = (isBuiltInAgentPlugin(definition, "cwd")
++                ? expandHomePath(definition.cwd)
++                : resolveConfigPath(definition.cwd)) ?? null;
++              return { transport: "stdio", command, args, cwd };
++            }
++            if (definition.url) {
++              const url = resolveServerUrl(definition);
++              if (!url) throw new Error("The MCP server URL is unavailable");
++              return { transport: "http", url };
++            }
++            if (definition.socket) {
++              return { transport: "unix-socket", socket: resolveConfigPath(definition.socket) ?? definition.socket };
++            }
++            throw new Error("MCP server has no executable or endpoint");
++          };
++          const panelBinding = (name: string): McpInteractionBinding => ({
++            configFingerprint: panelConfigFingerprint(),
++            runtimeFingerprint: panelRuntimeFingerprint(),
++            execution: panelExecutionPreview(name),
++          });
++          const assertPanelBinding = (name: string, expected: McpInteractionBinding) => {
++            if (JSON.stringify(panelBinding(name)) !== JSON.stringify(expected)) {
++              throw new Error("Stale MCP configuration revision");
++            }
++          };
++          const panel = await installMcpInteractionPanel(pi.events, {
++            packageVersion: MCP_PACKAGE_VERSION,
++            ownsMcpCommand: !programmaticConfig || !piSupportsMcp(pi),
++            isCurrent: panelContextIsCurrent,
++            getConfigFingerprint: panelConfigFingerprint,
++            getRuntimeFingerprint: panelRuntimeFingerprint,
++            getExecutionPreview: panelExecutionPreview,
++            getStatus: () => createMcpStatusSnapshot(nextState),
++            hasServer: (name) => Object.hasOwn(nextState.config.mcpServers, name),
++            isProgrammaticConfig: () => programmaticConfig,
++            reconnect: async (name, signal, binding) => {
++              signal.throwIfAborted();
++              guard();
++              assertPanelBinding(name, binding);
++              const commands = await loadCommands();
++              guard();
++              signal.throwIfAborted();
++              assertPanelBinding(name, binding);
++              return commands.reconnectServer(nextState, createCommandContext(panelContext(), owner), name);
++            },
++            setDisabled: (name, disabled) => {
++              guard();
++              try {
++                return writeProjectServerDisabledOverride(earlyConfigPath, panelContext().cwd, name, disabled);
++              } catch (error) {
++                logger.debug(`MCP: Web panel failed to persist enabled state: ${formatTerminalError(error)}`);
++                throw new Error("Failed to update MCP enabled state");
++              }
++            },
++            oauth: async (name, input, signal, binding) => {
++              signal.throwIfAborted();
++              guard();
++              assertPanelBinding(name, binding);
++              const definition = nextState.config.mcpServers[name];
++              const oauth = await loadOAuthRuntime();
++              guard();
++              signal.throwIfAborted();
++              assertPanelBinding(name, binding);
++              if (!definition || !oauth.supportsOAuth(definition)) {
++                throw new Error("This MCP server does not support the adapter OAuth flow");
++              }
++              let serverUrl: string;
++              try {
++                serverUrl = resolveServerUrl(definition) ?? "";
++              } catch {
++                logger.debug("MCP: Web panel could not resolve the OAuth server URL");
++                throw new Error("The MCP OAuth server URL is unavailable");
++              }
++              if (!serverUrl) throw new Error("The MCP OAuth server URL is unavailable");
++              let status: Awaited<ReturnType<typeof oauth.authenticate>>;
++              try {
++                status = await oauth.authenticate(name, serverUrl, definition, {
++                  authStorageOptions: nextState.authStorageOptions,
++                  onAuthorizationUrl: () => {},
++                  openAuthorizationUrl: () => {},
++                  onAuthorizationInput: (_authorizationUrl) => input(_authorizationUrl),
++                  signal,
++                  runtime: nextState.oauthRuntime,
++                });
++              } catch (error) {
++                if (isAbortError(error, signal)) throw error;
++                logger.debug("MCP: Web panel OAuth failed");
++                throw new Error("MCP OAuth authentication failed");
++              }
++              signal.throwIfAborted();
++              guard();
++              assertPanelBinding(name, binding);
++              if (status !== "authenticated") return { authenticated: false, reconnected: false };
++              const commands = await loadCommands();
++              guard();
++              signal.throwIfAborted();
++              assertPanelBinding(name, binding);
++              const reconnected = await commands.reconnectServer(nextState, createCommandContext(panelContext(), owner), name);
++              return { authenticated: true, reconnected };
++            },
++            confirm: async (message, signal) => {
++              const current = panelContext();
++              if (!current.hasUI) return undefined;
++              return current.ui.confirm("MCP Web action", message, { signal });
++            },
++            oauthLocalInput: async (authorizationUrl, signal) => {
++              const current = panelContext();
++              if (!current.hasUI) return undefined;
++              return current.ui.input(
++                `Complete MCP OAuth\n\n${authorizationUrl}\n\nApprove access, then paste the full callback URL from the browser address bar.`,
++                undefined,
++                { signal },
++              );
++            },
++          });
++          guard();
++          if (panel) owner.addCleanup(() => panel.dispose());
++        } catch (error) {
++          if (isOwnerAbortError(error, owner)) throw error;
++          logger.debug(`MCP: optional Web interaction panel unavailable: ${formatTerminalError(error)}`);
++        }
++        guard();
+         clearRetainedInitFailure();
+         guard();
+         if (earlyConfig.settings?.freezeDirectTools === true) {
+@@ -1786,6 +1940,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+     }
+     if (sessionManager !== currentState.sessionManager) return;
+ 
++    // Pi creates a fresh ExtensionContext object for each event. Keep panel
++    // callbacks on the post-tree context before the host's ready announcement
++    // causes the cooperative registration to be discovered again.
++    sessionCtx = ctx;
+     restoreCurrentSessionApprovals(currentState);
+   });
+ 
+diff --git a/package.json b/package.json
+index a62b1ce..6abf2d2 100644
+--- a/package.json
++++ b/package.json
+@@ -55,6 +55,8 @@
+     "test:coverage": "vitest run --coverage",
+     "test:oauth": "PI_MCP_ADAPTER_TEST_AUTH_STORE=memory PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1 node --import tsx --test --test-concurrency=1 oauth-public-api.test.ts mcp-auth.test.ts mcp-auth-flow.test.ts mcp-auth-flow-timeout.test.ts mcp-auth-fetch.test.ts mcp-callback-server.test.ts mcp-oauth-provider.test.ts mcp-local-oauth-flow.test.ts",
+     "test:oauth-provider": "PI_MCP_ADAPTER_TEST_AUTH_STORE=memory PI_MCP_ADAPTER_DISABLE_AUTH_CACHE=1 node --import tsx --test mcp-oauth-provider.test.ts",
++    "test:web-interactions": "node web-interactions.test.ts",
++    "test:web-interactions:acceptance": "node --experimental-transform-types --import ../../pi-web-ui/integrations/source-test-loader.mjs --test --test-concurrency=1 mcp-oauth-acceptance.test.ts mcp-index-load.test.ts",
+     "test:conformance": "bash conformance/run.sh"
+   },
+   "repository": {
+@@ -148,6 +150,7 @@
+     "resource-tools.ts",
+     "lifecycle.ts",
+     "mcp-status.ts",
++    "web-interactions.ts",
+     "metadata-cache.ts",
+     "host-html-template.ts",
+     "sandbox-proxy-template.ts",
+diff --git a/mcp-index-load.test.ts b/mcp-index-load.test.ts
+new file mode 100644
+--- /dev/null
++++ b/mcp-index-load.test.ts
+@@ -0,0 +1,160 @@
++import assert from "node:assert/strict";
++import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import test from "node:test";
++import { setImmediate } from "node:timers/promises";
++
++async function waitFor(check: () => boolean, message: string): Promise<void> {
++  for (let attempt = 0; attempt < 200; attempt++) {
++    if (check()) return;
++    await setImmediate();
++  }
++  assert.fail(message);
++}
++
++test("the real MCP index factory registers a source panel through the actual SDK event bus", async (t) => {
++  const root = await mkdtemp(join(tmpdir(), "pi-mcp-index-acceptance-"));
++  const agentDir = join(root, "agent");
++  const projectDir = join(root, "project");
++  await mkdir(agentDir, { recursive: true });
++  await mkdir(projectDir, { recursive: true });
++  await writeFile(join(agentDir, "mcp-adapter.json"), JSON.stringify({
++    mcpServers: {
++      "disabled-acceptance": {
++        command: "this-command-must-never-run",
++        disabled: true,
++      },
++    },
++  }));
++
++  const priorHome = process.env.HOME;
++  const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
++  process.env.HOME = root;
++  process.env.PI_CODING_AGENT_DIR = agentDir;
++  t.after(async () => {
++    if (priorHome === undefined) delete process.env.HOME;
++    else process.env.HOME = priorHome;
++    if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
++    else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
++    await rm(root, { recursive: true, force: true });
++  });
++
++  const sdkEntrypoint = import.meta.resolve("@earendil-works/pi-coding-agent");
++  const sdkLoader = new URL("./core/extensions/loader.js", sdkEntrypoint).href;
++  const interactionsEntrypoint = import.meta.resolve("@kkkiio/pi-web-ui/interactions/v1");
++  const panelsModule = new URL("./panels.ts", interactionsEntrypoint).href;
++  const [index, sdk, loader, panelApi] = await Promise.all([
++    import("./index.ts"),
++    import("@earendil-works/pi-coding-agent"),
++    import(sdkLoader),
++    import(panelsModule),
++  ]);
++
++  const events = sdk.createEventBus();
++  const panels = new panelApi.InteractionPanels();
++  const uninstallPanels = panelApi.installInteractionPanels(events, panels);
++  const runtime = loader.createExtensionRuntime();
++  const extension = await loader.loadExtensionFromFactory(
++    index.default,
++    projectDir,
++    events,
++    runtime,
++    "pi-mcp-adapter:index-acceptance",
++  );
++  t.after(() => {
++    runtime.invalidate("MCP index acceptance finished");
++    uninstallPanels();
++    panels.close();
++    events.clear();
++  });
++
++  assert.equal(extension.commands.has("mcp-adapter"), true);
++  assert.equal(extension.commands.has("mcp-auth"), true);
++  assert.equal(extension.commands.has("mcp"), true);
++
++  const sessionManager = sdk.SessionManager.inMemory(projectDir);
++  const context = {
++    cwd: projectDir,
++    mode: "print",
++    hasUI: false,
++    ui: {
++      notify: () => {},
++      setStatus: () => {},
++      setWidget: () => {},
++    },
++    sessionManager,
++    modelRegistry: {
++      getApiKeyForProvider: async () => undefined,
++      getAvailable: () => [],
++      find: () => undefined,
++    },
++    model: undefined,
++    scopedModels: [],
++    thinkingLevel: "off",
++    isIdle: () => true,
++    isProjectTrusted: () => false,
++    signal: undefined,
++    abort: () => {},
++    hasPendingMessages: () => false,
++    shutdown: () => {},
++    getContextUsage: () => undefined,
++    compact: () => {},
++    getSystemPrompt: () => "",
++  } as any;
++
++  for (const handler of extension.handlers.get("session_start") ?? []) {
++    await handler({ type: "session_start" }, context);
++  }
++  await waitFor(
++    () => panels.list().some((manifest) => manifest.id === "pi-mcp-adapter"),
++    "MCP source panel was not registered after session_start",
++  );
++
++  assert.deepEqual(panels.list(), [{
++    id: "pi-mcp-adapter",
++    version: "6.0.0",
++    packageName: "pi-mcp-adapter",
++    commands: ["mcp-adapter", "mcp-auth", "mcp"],
++    methods: ["reconnect", "enable", "disable", "oauth"],
++  }]);
++  const snapshot = await panels.snapshot("pi-mcp-adapter");
++  assert.deepEqual(snapshot.items, [{
++    name: "disabled-acceptance",
++    status: "disabled",
++    listenState: "disconnected",
++    toolCount: 0,
++    directToolCount: 0,
++    disabled: true,
++  }]);
++  assert.deepEqual(snapshot.config, {
++    ownsMcpCommand: true,
++    programmaticConfig: false,
++    totalTools: 0,
++    totalResources: 0,
++    connectedCount: 0,
++    disabledCount: 1,
++  });
++
++  const action = panels.prepare("pi-mcp-adapter", {
++    registrationId: snapshot.registrationId,
++    revision: snapshot.revision,
++    method: "reconnect",
++    params: { name: "disabled-acceptance" },
++  });
++  panels.start("pi-mcp-adapter", action);
++  await waitFor(
++    () => panels.actionStatus("pi-mcp-adapter", action.actionId).state !== "pending",
++    "MCP source panel invoke did not settle",
++  );
++  assert.deepEqual(panels.actionStatus("pi-mcp-adapter", action.actionId), {
++    actionId: action.actionId,
++    state: "succeeded",
++    outcome: { ok: false, cancelled: true },
++  });
++
++  for (const handler of extension.handlers.get("session_shutdown") ?? []) {
++    await handler({ type: "session_shutdown" }, context);
++  }
++  assert.deepEqual(panels.list(), []);
++});
+diff --git a/mcp-oauth-acceptance.test.ts b/mcp-oauth-acceptance.test.ts
+new file mode 100644
+--- /dev/null
++++ b/mcp-oauth-acceptance.test.ts
+@@ -0,0 +1,179 @@
++import assert from "node:assert/strict"
++import { createHash } from "node:crypto"
++import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
++import test from "node:test"
++
++type ObservedTokenRequest = {
++  code: string
++  codeVerifier: string
++  redirectUri: string
++  clientId: string
++}
++
++function json(res: ServerResponse, status: number, value: unknown): void {
++  res.writeHead(status, { "content-type": "application/json" })
++  res.end(JSON.stringify(value))
++}
++
++async function requestBody(req: IncomingMessage): Promise<string> {
++  const chunks: Buffer[] = []
++  for await (const chunk of req) chunks.push(Buffer.from(chunk))
++  return Buffer.concat(chunks).toString("utf8")
++}
++
++test("real OAuth flow rejects a wrong state and exchanges the callback code with the matching PKCE verifier", async (t) => {
++  process.env.PI_MCP_ADAPTER_TEST_AUTH_STORE = "memory"
++  process.env.PI_MCP_ADAPTER_DISABLE_AUTH_CACHE = "1"
++
++  const serverName = `oauth-acceptance-${process.pid}-${Date.now()}`
++  const authorizationCode = "synthetic-authorization-code"
++  const accessToken = "synthetic-access-token"
++  let origin = ""
++  let serverUrl = ""
++  let observedTokenRequest: ObservedTokenRequest | undefined
++
++  const provider = createServer(async (req, res) => {
++    const url = new URL(req.url ?? "/", origin)
++    if (req.method === "POST" && url.pathname === "/mcp") {
++      res.writeHead(401, {
++        "content-type": "application/json",
++        "www-authenticate": `Bearer resource_metadata="${origin}/resource-metadata", scope="mcp.read"`,
++      })
++      res.end(JSON.stringify({ error: "unauthorized" }))
++      return
++    }
++    if (req.method === "GET" && url.pathname === "/resource-metadata") {
++      json(res, 200, {
++        resource: serverUrl,
++        authorization_servers: [origin],
++        scopes_supported: ["mcp.read"],
++      })
++      return
++    }
++    if (req.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
++      json(res, 200, {
++        issuer: origin,
++        authorization_endpoint: `${origin}/authorize`,
++        token_endpoint: `${origin}/token`,
++        response_types_supported: ["code"],
++        grant_types_supported: ["authorization_code"],
++        code_challenge_methods_supported: ["S256"],
++        token_endpoint_auth_methods_supported: ["none"],
++        scopes_supported: ["mcp.read"],
++        authorization_response_iss_parameter_supported: true,
++      })
++      return
++    }
++    if (req.method === "POST" && url.pathname === "/token") {
++      const form = new URLSearchParams(await requestBody(req))
++      observedTokenRequest = {
++        code: form.get("code") ?? "",
++        codeVerifier: form.get("code_verifier") ?? "",
++        redirectUri: form.get("redirect_uri") ?? "",
++        clientId: form.get("client_id") ?? "",
++      }
++      json(res, 200, {
++        access_token: accessToken,
++        token_type: "Bearer",
++        expires_in: 3600,
++        scope: "mcp.read",
++      })
++      return
++    }
++    res.writeHead(404)
++    res.end()
++  })
++
++  await new Promise<void>((resolve, reject) => {
++    provider.once("error", reject)
++    provider.listen(0, "127.0.0.1", resolve)
++  })
++  const address = provider.address()
++  assert(address && typeof address === "object")
++  origin = `http://127.0.0.1:${address.port}`
++  serverUrl = `${origin}/mcp`
++
++  t.after(async () => {
++    await new Promise<void>((resolve) => provider.close(() => resolve()))
++  })
++
++  const auth = await import("./mcp-auth.ts")
++  const flow = await import("./mcp-auth-flow.ts")
++  const callback = await import("./mcp-callback-server.ts")
++  const runtime = flow.createOAuthRuntime()
++  auth.resetTestAuthSecretStore()
++  auth.resetAuthEntryCache()
++
++  t.after(async () => {
++    await flow.shutdownOAuth(runtime).catch(() => {})
++    await callback.stopCallbackServer().catch(() => {})
++    auth.resetTestAuthSecretStore()
++    delete process.env.PI_MCP_ADAPTER_TEST_AUTH_STORE
++    delete process.env.PI_MCP_ADAPTER_DISABLE_AUTH_CACHE
++  })
++
++  let authorizationState = ""
++  let authorizationChallenge = ""
++  let authorizationRedirectUri = ""
++  const status = await flow.authenticate(
++    serverName,
++    serverUrl,
++    {
++      url: serverUrl,
++      auth: "oauth",
++      oauth: {
++        clientId: "synthetic-public-client",
++        scope: "mcp.read",
++        redirectUri: "http://127.0.0.1:{port}/callback",
++      },
++    },
++    {
++      runtime,
++      openAuthorizationUrl: async () => {},
++      onAuthorizationUrl: async (value) => {
++        const authorizationUrl = new URL(value)
++        assert.equal(authorizationUrl.origin, origin)
++        assert.equal(authorizationUrl.pathname, "/authorize")
++        assert.equal(authorizationUrl.searchParams.get("response_type"), "code")
++        assert.equal(authorizationUrl.searchParams.get("client_id"), "synthetic-public-client")
++        assert.equal(authorizationUrl.searchParams.get("code_challenge_method"), "S256")
++        authorizationState = authorizationUrl.searchParams.get("state") ?? ""
++        authorizationChallenge = authorizationUrl.searchParams.get("code_challenge") ?? ""
++        authorizationRedirectUri = authorizationUrl.searchParams.get("redirect_uri") ?? ""
++        assert.match(authorizationState, /^[a-f0-9]{64}$/)
++        assert.match(authorizationChallenge, /^[A-Za-z0-9_-]{43}$/)
++
++        const wrongState = new URL(authorizationRedirectUri)
++        wrongState.searchParams.set("code", "wrong-state-code")
++        wrongState.searchParams.set("state", `${authorizationState}-wrong`)
++        wrongState.searchParams.set("iss", origin)
++        const rejected = await fetch(wrongState)
++        assert.equal(rejected.status, 400)
++
++        const accepted = new URL(authorizationRedirectUri)
++        accepted.searchParams.set("code", authorizationCode)
++        accepted.searchParams.set("state", authorizationState)
++        accepted.searchParams.set("iss", origin)
++        const response = await fetch(accepted)
++        assert.equal(response.status, 200)
++      },
++    },
++  )
++
++  assert.equal(status, "authenticated")
++  assert(observedTokenRequest)
++  assert.equal(observedTokenRequest.code, authorizationCode)
++  assert.equal(observedTokenRequest.redirectUri, authorizationRedirectUri)
++  assert.equal(observedTokenRequest.clientId, "synthetic-public-client")
++  assert.ok(observedTokenRequest.codeVerifier.length >= 43)
++  assert.equal(
++    createHash("sha256").update(observedTokenRequest.codeVerifier).digest("base64url"),
++    authorizationChallenge,
++  )
++
++  const stored = auth.getAuthForUrl(serverName, serverUrl)
++  assert.equal(stored?.tokens?.accessToken, accessToken)
++  assert.equal(stored?.tokens?.scope, "mcp.read")
++  assert.equal(stored?.codeVerifier, undefined)
++  assert.equal(stored?.oauthState, undefined)
++})
+diff --git a/web-interactions.test.ts b/web-interactions.test.ts
+new file mode 100644
+--- /dev/null
++++ b/web-interactions.test.ts
+@@ -0,0 +1,332 @@
++import assert from "node:assert/strict";
++import { test } from "node:test";
++
++import {
++  createMcpInteractionAdapter,
++  installMcpInteractionPanel,
++  type McpInteractionDependencies,
++} from "./web-interactions.ts";
++
++function fixture() {
++  let fingerprint = "config-a";
++  let runtimeFingerprint = "runtime-a";
++  let reconnects = 0;
++  const writes: Array<{ name: string; disabled: boolean }> = [];
++  const interactions: Array<Record<string, unknown>> = [];
++  const reconnectBindings: unknown[] = [];
++  const oauthBindings: unknown[] = [];
++  let oauthInput = "";
++
++  const deps: McpInteractionDependencies = {
++    packageVersion: "6.0.0",
++    ownsMcpCommand: true,
++    isCurrent: () => true,
++    getConfigFingerprint: () => fingerprint,
++    getRuntimeFingerprint: () => runtimeFingerprint,
++    getExecutionPreview: () => ({
++      transport: "stdio",
++      command: "/usr/bin/node",
++      args: ["/opt/mcp/server.js", "--mode", "safe"],
++      cwd: "/workspace/project",
++    }),
++    getStatus: () => ({
++      version: 1,
++      servers: [{
++        name: "remote",
++        status: "needs-auth",
++        listenState: "disconnected",
++        toolCount: 2,
++        directToolCount: 1,
++        resourceCount: 3,
++        disabled: false,
++      }],
++      totalTools: 2,
++      totalResources: 3,
++      connectedCount: 0,
++      disabledCount: 0,
++    }),
++    hasServer: (name) => name === "remote",
++    isProgrammaticConfig: () => false,
++    reconnect: async (_name, _signal, binding) => {
++      reconnectBindings.push(binding);
++      reconnects++;
++      return true;
++    },
++    setDisabled: (_name, disabled) => {
++      writes.push({ name: "remote", disabled });
++      fingerprint = `config-${disabled ? "disabled" : "enabled"}`;
++      return { changed: true, path: "/tmp/project/.pi/settings.json" };
++    },
++    oauth: async (_name, input, _signal, binding) => {
++      oauthBindings.push(binding);
++      oauthInput = await input("https://issuer.example/authorize?secret=transient") ?? "";
++      return { authenticated: true, reconnected: true };
++    },
++    interact: async (spec) => {
++      interactions.push(spec as unknown as Record<string, unknown>);
++      if (spec.schema.kind === "text") return { state: "allowed", answer: "https://callback.example/?code=one&state=two" };
++      return { state: "allowed", answer: true };
++    },
++    revision: (() => {
++      let n = 0;
++      return () => `revision-${++n}`;
++    })(),
++  };
++
++  return {
++    deps,
++    writes,
++    interactions,
++    reconnectBindings,
++    oauthBindings,
++    get reconnects() { return reconnects; },
++    get oauthInput() { return oauthInput; },
++    changeConfig() { fingerprint = "config-external-change"; },
++    changeRuntimeConfig() { runtimeFingerprint = "runtime-external-change"; },
++  };
++}
++
++test("snapshot exposes only the redacted status DTO and exact command ownership", async () => {
++  const f = fixture();
++  const adapter = createMcpInteractionAdapter(f.deps);
++  const snapshot = await adapter.snapshot();
++
++  assert.deepEqual(adapter.manifest.commands, ["mcp-adapter", "mcp-auth", "mcp"]);
++  assert.deepEqual(snapshot.items, [{
++    name: "remote",
++    status: "needs-auth",
++    listenState: "disconnected",
++    toolCount: 2,
++    directToolCount: 1,
++    resourceCount: 3,
++    disabled: false,
++  }]);
++  assert.deepEqual(snapshot.config, {
++    ownsMcpCommand: true,
++    programmaticConfig: false,
++    totalTools: 2,
++    totalResources: 3,
++    connectedCount: 0,
++    disabledCount: 0,
++  });
++  const serialized = JSON.stringify(snapshot);
++  for (const forbidden of ["issuer.example", "secret=", "bearer", "headers", "env", "command", "args"]) {
++    assert.equal(serialized.includes(forbidden), false, forbidden);
++  }
++});
++
++test("snapshot paginates at the host panel limit without changing aggregate config", async () => {
++  const f = fixture();
++  const servers = Array.from({ length: 101 }, (_, index) => ({
++    name: `server-${index}`,
++    status: "connected",
++    listenState: "active",
++    toolCount: 1,
++    directToolCount: 0,
++    disabled: false,
++  }));
++  f.deps.getStatus = () => ({
++    version: 1,
++    servers,
++    totalTools: 101,
++    totalResources: 0,
++    connectedCount: 101,
++    disabledCount: 0,
++  });
++  const adapter = createMcpInteractionAdapter(f.deps);
++
++  const first = await adapter.snapshot();
++  const second = await adapter.snapshot(first.cursor ?? undefined);
++  assert.equal(first.items.length, 100);
++  assert.equal(first.cursor, "100");
++  assert.equal(second.items.length, 1);
++  assert.equal(second.items[0]?.name, "server-100");
++  assert.equal(second.cursor, null);
++  assert.equal(second.revision, first.revision);
++  assert.equal(second.config?.totalTools, 101);
++  await assert.rejects(adapter.snapshot("not-an-offset"), /cursor/i);
++});
++
++test("source CAS rejects config changes before reconnect or persistence", async () => {
++  const f = fixture();
++  const adapter = createMcpInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++  f.changeConfig();
++
++  await assert.rejects(
++    adapter.invoke("reconnect", { name: "remote" }, { actionId: "a", revision, signal: new AbortController().signal }),
++    /stale/i,
++  );
++  await assert.rejects(
++    adapter.invoke("disable", { name: "remote" }, { actionId: "b", revision, signal: new AbortController().signal }),
++    /stale/i,
++  );
++  assert.equal(f.reconnects, 0);
++  assert.deepEqual(f.writes, []);
++});
++
++test("source CAS also binds the loaded runtime definition used by reconnect", async () => {
++  const f = fixture();
++  const adapter = createMcpInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++  f.changeRuntimeConfig();
++
++  await assert.rejects(
++    adapter.invoke("reconnect", { name: "remote" }, { actionId: "runtime-change", revision, signal: new AbortController().signal }),
++    /stale/i,
++  );
++  assert.equal(f.reconnects, 0);
++  assert.deepEqual(f.interactions, []);
++});
++
++test("reconnect confirmation binds the exact method and server before using the source reconnect path", async () => {
++  const f = fixture();
++  const adapter = createMcpInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++  const result = await adapter.invoke(
++    "reconnect",
++    { name: "remote" },
++    { actionId: "reconnect-1", revision, signal: new AbortController().signal },
++  );
++
++  assert.deepEqual(result, { ok: true });
++  assert.equal(f.reconnects, 1);
++  assert.deepEqual(f.reconnectBindings, [{
++    configFingerprint: "config-a",
++    runtimeFingerprint: "runtime-a",
++    execution: {
++      transport: "stdio",
++      command: "/usr/bin/node",
++      args: ["/opt/mcp/server.js", "--mode", "safe"],
++      cwd: "/workspace/project",
++    },
++  }]);
++  assert.deepEqual(f.interactions[0]?.content, {
++    method: "reconnect",
++    name: "remote",
++    execution: {
++      transport: "stdio",
++      command: "/usr/bin/node",
++      args: ["/opt/mcp/server.js", "--mode", "safe"],
++      cwd: "/workspace/project",
++    },
++    message: "Reconnect MCP server with exact parameters",
++  });
++});
++
++test("disable uses sensitive confirmation, persists only the source override, and reports reload semantics", async () => {
++  const f = fixture();
++  const adapter = createMcpInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++  const result = await adapter.invoke(
++    "disable",
++    { name: "remote" },
++    { actionId: "disable-1", revision, signal: new AbortController().signal },
++  );
++
++  assert.deepEqual(f.writes, [{ name: "remote", disabled: true }]);
++  assert.deepEqual(result, { ok: true, changed: true, reloadRequired: true });
++  assert.equal(f.interactions[0]?.action, "mcp.config");
++  assert.equal(f.interactions[0]?.classification, "sensitive");
++  assert.deepEqual(f.interactions[0]?.content, {
++    method: "disable",
++    name: "remote",
++    disabled: true,
++    message: "Disable MCP server with exact parameters",
++  });
++  assert.equal(JSON.stringify(f.interactions[0]).includes("/tmp/project"), false);
++});
++
++test("enable confirmation binds the exact resulting disabled=false override", async () => {
++  const f = fixture();
++  const adapter = createMcpInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++  const result = await adapter.invoke(
++    "enable",
++    { name: "remote" },
++    { actionId: "enable-1", revision, signal: new AbortController().signal },
++  );
++
++  assert.deepEqual(f.writes, [{ name: "remote", disabled: false }]);
++  assert.deepEqual(result, { ok: true, changed: true, reloadRequired: true });
++  assert.deepEqual(f.interactions[0]?.content, {
++    method: "enable",
++    name: "remote",
++    disabled: false,
++    message: "Enable MCP server with exact parameters",
++  });
++});
++
++test("enable and disable refuse to persist when the invoke signal aborts after approval", async () => {
++  for (const method of ["enable", "disable"] as const) {
++    const f = fixture();
++    const controller = new AbortController();
++    f.deps.interact = async () => {
++      const result = Promise.resolve({ state: "allowed", answer: true } as const);
++      void result.then(() => controller.abort());
++      return result;
++    };
++    const adapter = createMcpInteractionAdapter(f.deps);
++    const { revision } = await adapter.snapshot();
++
++    await assert.rejects(
++      adapter.invoke(method, { name: "remote" }, { actionId: `abort-${method}`, revision, signal: controller.signal }),
++      { name: "AbortError" },
++    );
++    assert.deepEqual(f.writes, []);
++  }
++});
++
++test("OAuth keeps the authorization URL transient, accepts only trusted text, and reconnects through source flow", async () => {
++  const f = fixture();
++  const adapter = createMcpInteractionAdapter(f.deps);
++  const { revision } = await adapter.snapshot();
++  const result = await adapter.invoke(
++    "oauth",
++    { name: "remote" },
++    { actionId: "oauth-1", revision, signal: new AbortController().signal },
++  );
++
++  assert.deepEqual(result, { ok: true, authenticated: true, reconnected: true });
++  assert.equal(f.oauthInput, "https://callback.example/?code=one&state=two");
++  assert.deepEqual(f.oauthBindings, [{
++    configFingerprint: "config-a",
++    runtimeFingerprint: "runtime-a",
++    execution: {
++      transport: "stdio",
++      command: "/usr/bin/node",
++      args: ["/opt/mcp/server.js", "--mode", "safe"],
++      cwd: "/workspace/project",
++    },
++  }]);
++  assert.equal(f.interactions.at(-1)?.action, "mcp.oauth");
++  assert.equal(f.interactions.at(-1)?.purpose, "oauth");
++  assert.deepEqual(f.interactions.at(-1)?.content, {
++    method: "oauth",
++    name: "remote",
++    authorizationUrl: "https://issuer.example/authorize?secret=transient",
++    message: "Approve access, then paste the full callback URL from the browser address bar.",
++  });
++});
++
++test("optional installer is a no-op when the public package or panel export is unavailable", async () => {
++  const f = fixture();
++  let registered = 0;
++  const absent = await installMcpInteractionPanel({}, f.deps, async () => undefined);
++  const missingPanel = await installMcpInteractionPanel({}, f.deps, async () => ({
++    createInteractionClient: () => ({ interact: f.deps.interact!, dispose() {} }),
++  }));
++  const present = await installMcpInteractionPanel({}, f.deps, async () => ({
++    createInteractionClient: () => ({ interact: f.deps.interact!, dispose() {} }),
++    registerInteractionPanel: (_events, options) => {
++      registered++;
++      assert.equal(options.manifest.id, "pi-mcp-adapter");
++      return { dispose() {} };
++    },
++  }));
++
++  assert.equal(absent, undefined);
++  assert.equal(missingPanel, undefined);
++  assert.equal(registered, 1);
++  present?.dispose();
++});
+diff --git a/web-interactions.ts b/web-interactions.ts
+new file mode 100644
+--- /dev/null
++++ b/web-interactions.ts
+@@ -0,0 +1,376 @@
++import { randomBytes } from "node:crypto";
++
++export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
++
++type InteractionSpec = {
++  action: string;
++  revision: string;
++  classification: "session" | "sensitive";
++  method: "confirm" | "select" | "input" | "editor";
++  schema: { kind: "confirm" } | { kind: "select"; options: string[] } | { kind: "text"; maxBytes: number };
++  purpose?: "oauth";
++  content: Record<string, Json>;
++  deadline: number;
++};
++
++type InteractionResult = {
++  state: "pending" | "delivering" | "allowed" | "rejected" | "cancelled" | "expired" | "stale" | "delivery_unknown";
++  answer?: boolean | string;
++};
++
++type InvokeContext = { actionId: string; revision: string; signal: AbortSignal };
++type PanelSnapshot = {
++  revision: string;
++  items: Record<string, Json>[];
++  cursor?: string | null;
++  config?: Record<string, Json>;
++};
++
++type McpStatus = {
++  version: number;
++  servers: ReadonlyArray<{
++    name: string;
++    status: string;
++    listenState: string;
++    toolCount: number;
++    directToolCount: number;
++    resourceCount?: number;
++    failedAgoSeconds?: number;
++    disabled: boolean;
++    catalogStale?: boolean;
++    blockedReason?: string;
++  }>;
++  totalTools: number;
++  totalResources: number;
++  connectedCount: number;
++  disabledCount: number;
++};
++
++export type McpExecutionPreview =
++  | { transport: "stdio"; command: string; args: string[]; cwd: string | null }
++  | { transport: "http"; url: string }
++  | { transport: "unix-socket"; socket: string };
++
++export type McpInteractionBinding = {
++  configFingerprint: string;
++  runtimeFingerprint: string;
++  execution: McpExecutionPreview;
++};
++
++export interface McpInteractionDependencies {
++  packageVersion: string;
++  ownsMcpCommand: boolean;
++  isCurrent(): boolean;
++  getConfigFingerprint(): string;
++  getRuntimeFingerprint(): string;
++  getExecutionPreview(name: string): McpExecutionPreview;
++  getStatus(): McpStatus;
++  hasServer(name: string): boolean;
++  isProgrammaticConfig(): boolean;
++  reconnect(name: string, signal: AbortSignal, binding: McpInteractionBinding): Promise<boolean>;
++  setDisabled(name: string, disabled: boolean): { changed: boolean; path: string };
++  oauth(
++    name: string,
++    input: (authorizationUrl: string) => Promise<string | undefined>,
++    signal: AbortSignal,
++    binding: McpInteractionBinding,
++  ): Promise<{ authenticated: boolean; reconnected: boolean }>;
++  interact?: (
++    spec: InteractionSpec,
++    options: {
++      signal?: AbortSignal;
++      isCurrent: () => boolean;
++      local?: (signal: AbortSignal) => Promise<boolean | string | undefined>;
++    },
++  ) => Promise<InteractionResult>;
++  confirm?: (message: string, signal: AbortSignal) => Promise<boolean | undefined>;
++  oauthLocalInput?: (authorizationUrl: string, signal: AbortSignal) => Promise<string | undefined>;
++  revision?: () => string;
++  now?: () => number;
++}
++
++type PublicInteractionModule = {
++  createInteractionClient?: (events: unknown, manifest: Record<string, unknown>) => {
++    interact: McpInteractionDependencies["interact"];
++    dispose(): void;
++  };
++  registerInteractionPanel?: (
++    events: unknown,
++    options: {
++      manifest: { id: string; version: string; packageName: string; commands: string[]; methods: string[] };
++      isCurrent: () => boolean;
++      snapshot: (cursor?: string) => Promise<PanelSnapshot>;
++      invoke: (method: string, params: Record<string, Json>, context: InvokeContext) => Promise<Json>;
++    },
++  ) => { dispose(): void };
++};
++
++export type InteractionModuleLoader = () => Promise<PublicInteractionModule | undefined>;
++
++const PACKAGE_NAME = "pi-mcp-adapter";
++const METHODS = ["reconnect", "enable", "disable", "oauth"];
++const PANEL_PAGE_SIZE = 100;
++
++function pageOffset(cursor?: string): number {
++  if (cursor === undefined) return 0;
++  if (!/^(0|[1-9][0-9]*)$/.test(cursor)) throw new Error("Invalid MCP panel cursor");
++  const offset = Number(cursor);
++  if (!Number.isSafeInteger(offset)) throw new Error("Invalid MCP panel cursor");
++  return offset;
++}
++
++function plainRecord(value: unknown): value is Record<string, unknown> {
++  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
++}
++
++function serverName(params: Record<string, Json>): string {
++  if (!plainRecord(params) || Object.keys(params).length !== 1 || typeof params.name !== "string" || !params.name.trim()) {
++    throw new Error("Invalid MCP panel parameters");
++  }
++  return params.name;
++}
++
++class RevisionGate {
++  private fingerprint: string | undefined;
++  private value: string | undefined;
++  private readonly read: () => string;
++  private readonly generate: () => string;
++
++  constructor(read: () => string, generate: () => string) {
++    this.read = read;
++    this.generate = generate;
++  }
++
++  current(): string {
++    const fingerprint = this.read();
++    if (this.fingerprint !== fingerprint || this.value === undefined) {
++      this.fingerprint = fingerprint;
++      this.value = this.generate();
++    }
++    return this.value;
++  }
++
++  assert(expected: string): void {
++    if (this.current() !== expected) throw new Error("Stale MCP configuration revision");
++  }
++
++  invalidate(): void {
++    this.fingerprint = undefined;
++    this.value = undefined;
++  }
++}
++
++function interactionAllowed(result: InteractionResult): boolean {
++  return result.state === "allowed" && result.answer === true;
++}
++
++function exactLocalApprovalMessage(label: string, intent: Record<string, Json>): string {
++  return `${label}:\n${JSON.stringify(intent, null, 2)}`;
++}
++
++export function createMcpInteractionAdapter(deps: McpInteractionDependencies) {
++  const revision = new RevisionGate(
++    () => JSON.stringify([deps.getConfigFingerprint(), deps.getRuntimeFingerprint()]),
++    deps.revision ?? (() => randomBytes(16).toString("hex")),
++  );
++  const now = deps.now ?? Date.now;
++  let disposed = false;
++
++  const isCurrent = () => !disposed && deps.isCurrent();
++  const guard = () => {
++    if (!isCurrent()) throw new Error("Stale MCP runtime");
++  };
++  const interact = async (spec: InteractionSpec, local?: (signal: AbortSignal) => Promise<boolean | string | undefined>, signal?: AbortSignal) => {
++    if (!deps.interact) throw new Error("MCP Web interaction client unavailable");
++    return deps.interact(spec, { signal, isCurrent, ...(local ? { local } : {}) });
++  };
++  const binding = (name: string): McpInteractionBinding => ({
++    configFingerprint: deps.getConfigFingerprint(),
++    runtimeFingerprint: deps.getRuntimeFingerprint(),
++    execution: deps.getExecutionPreview(name),
++  });
++  const confirm = async (
++    action: "mcp.reconnect" | "mcp.config",
++    intent: Record<string, Json>,
++    expected: string,
++    signal: AbortSignal,
++  ) => {
++    const label = action === "mcp.reconnect"
++      ? "Reconnect MCP server with exact parameters"
++      : `${intent.method === "disable" ? "Disable" : "Enable"} MCP server with exact parameters`;
++    const content = { ...intent, message: label };
++    const localMessage = exactLocalApprovalMessage(label, intent);
++    const result = await interact({
++      action,
++      revision: expected,
++      classification: "sensitive",
++      method: "confirm",
++      schema: { kind: "confirm" },
++      content,
++      deadline: now() + 120_000,
++    }, deps.confirm ? (localSignal) => deps.confirm!(localMessage, localSignal) : undefined, signal);
++    return interactionAllowed(result);
++  };
++
++  const manifest = {
++    id: PACKAGE_NAME,
++    version: deps.packageVersion,
++    packageName: PACKAGE_NAME,
++    commands: ["mcp-adapter", "mcp-auth", ...(deps.ownsMcpCommand ? ["mcp"] : [])],
++    methods: [...METHODS],
++  };
++
++  return {
++    manifest,
++    isCurrent,
++    async snapshot(cursor?: string): Promise<PanelSnapshot> {
++      guard();
++      const status = deps.getStatus();
++      const allItems = status.servers.map((server) => ({
++        name: server.name,
++        status: server.status,
++        listenState: server.listenState,
++        toolCount: server.toolCount,
++        directToolCount: server.directToolCount,
++        ...(server.resourceCount !== undefined ? { resourceCount: server.resourceCount } : {}),
++        ...(server.failedAgoSeconds !== undefined ? { failedAgoSeconds: server.failedAgoSeconds } : {}),
++        disabled: server.disabled,
++        ...(server.catalogStale === true ? { catalogStale: true } : {}),
++        ...(server.blockedReason ? { blockedReason: server.blockedReason } : {}),
++      } satisfies Record<string, Json>));
++      const offset = pageOffset(cursor);
++      if (offset > allItems.length) throw new Error("Invalid MCP panel cursor");
++      const items = allItems.slice(offset, offset + PANEL_PAGE_SIZE);
++      const nextOffset = offset + items.length;
++      return {
++        revision: revision.current(),
++        items,
++        cursor: nextOffset < allItems.length ? String(nextOffset) : null,
++        config: {
++          ownsMcpCommand: deps.ownsMcpCommand,
++          programmaticConfig: deps.isProgrammaticConfig(),
++          totalTools: status.totalTools,
++          totalResources: status.totalResources,
++          connectedCount: status.connectedCount,
++          disabledCount: status.disabledCount,
++        },
++      };
++    },
++    async invoke(method: string, params: Record<string, Json>, context: InvokeContext): Promise<Json> {
++      guard();
++      if (!METHODS.includes(method)) throw new Error("Unknown MCP panel method");
++      if (!context.actionId.trim()) throw new Error("MCP action id is required");
++      if (context.signal.aborted) context.signal.throwIfAborted();
++      revision.assert(context.revision);
++      const name = serverName(params);
++      if (!deps.hasServer(name)) throw new Error("MCP server is not present in the current configuration");
++
++      if (method === "reconnect") {
++        const approvedBinding = binding(name);
++        if (!await confirm("mcp.reconnect", { method, name, execution: approvedBinding.execution }, context.revision, context.signal)) return { ok: false, cancelled: true };
++        context.signal.throwIfAborted();
++        guard();
++        revision.assert(context.revision);
++        return { ok: await deps.reconnect(name, context.signal, approvedBinding) };
++      }
++
++      if (method === "enable" || method === "disable") {
++        if (deps.isProgrammaticConfig()) throw new Error("MCP enabled state is read-only for programmatic configuration");
++        if (!await confirm("mcp.config", { method, name, disabled: method === "disable" }, context.revision, context.signal)) return { ok: false, cancelled: true };
++        context.signal.throwIfAborted();
++        guard();
++        revision.assert(context.revision);
++        const result = deps.setDisabled(name, method === "disable");
++        revision.invalidate();
++        return { ok: true, changed: result.changed, reloadRequired: result.changed };
++      }
++
++      const approvedBinding = binding(name);
++      const oauth = await deps.oauth(name, async (authorizationUrl) => {
++        guard();
++        revision.assert(context.revision);
++        const result = await interact({
++          action: "mcp.oauth",
++          revision: context.revision,
++          classification: "sensitive",
++          method: "input",
++          schema: { kind: "text", maxBytes: 32 * 1024 },
++          purpose: "oauth",
++          content: {
++            method: "oauth",
++            name,
++            authorizationUrl,
++            message: "Approve access, then paste the full callback URL from the browser address bar.",
++          },
++          deadline: now() + 600_000,
++        }, deps.oauthLocalInput ? (localSignal) => deps.oauthLocalInput!(authorizationUrl, localSignal) : undefined, context.signal);
++        context.signal.throwIfAborted();
++        guard();
++        revision.assert(context.revision);
++        return result.state === "allowed" && typeof result.answer === "string" ? result.answer : undefined;
++      }, context.signal, approvedBinding);
++      guard();
++      return { ok: oauth.authenticated, authenticated: oauth.authenticated, reconnected: oauth.reconnected };
++    },
++    dispose() {
++      disposed = true;
++      revision.invalidate();
++    },
++  };
++}
++
++async function importPublicInteractions(): Promise<PublicInteractionModule | undefined> {
++  try {
++    const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<PublicInteractionModule>;
++    return await dynamicImport("@kkkiio/pi-web-ui/interactions/v1");
++  } catch (error) {
++    const code = (error as { code?: unknown })?.code;
++    if (code === "ERR_MODULE_NOT_FOUND" || code === "ERR_PACKAGE_PATH_NOT_EXPORTED") return undefined;
++    throw error;
++  }
++}
++
++export async function installMcpInteractionPanel(
++  events: unknown,
++  dependencies: McpInteractionDependencies,
++  load: InteractionModuleLoader = importPublicInteractions,
++): Promise<{ dispose(): void } | undefined> {
++  const api = await load();
++  if (typeof api?.createInteractionClient !== "function" || typeof api.registerInteractionPanel !== "function") return undefined;
++  const client = api.createInteractionClient(events, {
++    id: PACKAGE_NAME,
++    version: dependencies.packageVersion,
++    packageName: PACKAGE_NAME,
++    actions: {
++      "mcp.reconnect": { classification: "sensitive", method: "confirm" },
++      "mcp.config": { classification: "sensitive", method: "confirm" },
++      "mcp.oauth": { classification: "sensitive", method: "input" },
++    },
++  });
++  const interact = client.interact;
++  if (typeof interact !== "function") {
++    client.dispose();
++    return undefined;
++  }
++  const adapter = createMcpInteractionAdapter({ ...dependencies, interact });
++  let panel: { dispose(): void };
++  try {
++    panel = api.registerInteractionPanel(events, {
++      manifest: adapter.manifest,
++      isCurrent: adapter.isCurrent,
++      snapshot: adapter.snapshot,
++      invoke: adapter.invoke,
++    });
++  } catch (error) {
++    adapter.dispose();
++    client.dispose();
++    throw error;
++  }
++  return {
++    dispose() {
++      panel.dispose();
++      adapter.dispose();
++      client.dispose();
++    },
++  };
++}

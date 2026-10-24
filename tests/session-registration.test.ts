@@ -6,7 +6,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { WebSocket } from "ws";
 import {
   createSessionRegistration,
@@ -631,6 +631,7 @@ test("both browser rename commands refresh over IPC before ACK and tolerate gett
     },
   } as unknown as ExtensionContext;
   mirror({
+    events: createEventBus(),
     on(event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) {
       const list = handlers.get(event) ?? [];
       list.push(handler);

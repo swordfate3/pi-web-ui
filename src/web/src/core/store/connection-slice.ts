@@ -18,6 +18,7 @@ export const createConnectionSlice: StoreSlice<ConnectionSlice> = (set, get) => 
   },
 
   setConnection: (connection) => {
+    if (connection !== "connected") get().clearInteractions?.();
     if (connection !== "connected") get().closeEntryDetail?.();
     set({ connection, ...(connection !== "connected" ? { terminalPrompt: null, dialog: null } : {}) });
   },

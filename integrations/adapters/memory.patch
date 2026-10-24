@@ -1,0 +1,895 @@
+diff --git a/package.json b/package.json
+index 141095e..ee1cfe3 100644
+--- a/package.json
++++ b/package.json
+@@ -35,8 +35,14 @@
+   },
+   "peerDependencies": {
+     "@earendil-works/pi-coding-agent": "*",
++    "@kkkiio/pi-web-ui": "^1.0.1",
+     "typebox": "*"
+   },
++  "peerDependenciesMeta": {
++    "@kkkiio/pi-web-ui": {
++      "optional": true
++    }
++  },
+   "devDependencies": {
+     "@earendil-works/pi-coding-agent": "0.85.1",
+     "typebox": "^1.1.3",
+diff --git a/src/pi/index.ts b/src/pi/index.ts
+index 9451204..f5fe475 100644
+--- a/src/pi/index.ts
++++ b/src/pi/index.ts
+@@ -1,5 +1,7 @@
+ import { CONFIG_DIR_NAME, getAgentDir, type ExtensionAPI, type ExtensionContext } from '@earendil-works/pi-coding-agent';
+ import { Type } from 'typebox';
++import { createHash } from 'node:crypto';
++import type { InteractionClient } from '@kkkiio/pi-web-ui/interactions/v1';
+ import { MemoryServiceError } from '../application/memory.ts';
+ import { ID_PATTERN, LIMITS, type Scope, type StoreLockStatus } from '../core/contracts.ts';
+ import type { IdentityOptions } from '../storage/folder-identity.ts';
+@@ -8,6 +10,7 @@ import { SessionStore as DurableSessionStore } from '../storage/session-store.ts
+ import { PiSessionStore } from '../storage/pi-session-store.ts';
+ import { ContinuityAdapter } from './continuity-adapter.ts';
+ import { CONTINUITY_CUSTOM_TYPE, type ContinuityBinding, type ContinuityCheckpointStore, type ContinuityStatus } from '../application/session-continuity.ts';
++import { createOptionalInteractionRunner } from './web-interactions.ts';
+ 
+ const CUSTOM_TYPE = 'scoped-memory-snapshot-v1';
+ const LEGACY_TOOLS = new Set(['memory_write', 'memory_read', 'memory_search', 'memory_forget', 'memory_restore', 'memory_status']);
+@@ -167,9 +170,22 @@ export interface ScopedMemoryOptions {
+   sessionStore?: SessionStore;
+   /** Best-effort by default preserves existing behavior; strict mode fails closed. */
+   compactionStrict?: boolean;
++  /** Optional test injection; production discovers the public Pi Web client lazily. */
++  interactions?: InteractionClient;
+ }
+ export function registerScopedMemory(pi: ExtensionAPI, options: ScopedMemoryOptions = { agentDir: getAgentDir(), configDir: CONFIG_DIR_NAME }): void {
+   const runtime = new Runtime(options.agentDir, options.configDir, options.identity);
++  const interactions = createOptionalInteractionRunner(pi.events, {
++    id: 'scoped-memory',
++    version: '0.10.0',
++    packageName: 'pi-scoped-memory',
++    actions: {
++      write: { classification: 'sensitive', method: 'confirm' },
++      forget: { classification: 'sensitive', method: 'confirm' },
++      restore: { classification: 'sensitive', method: 'confirm' },
++      'repair-lock': { classification: 'sensitive', method: 'confirm' },
++    },
++  }, options.interactions);
+   let compactionStrict = options.compactionStrict === true;
+   let durableSessionStore: PiSessionStore | undefined;
+   let continuity: ContinuityAdapter | undefined;
+@@ -238,11 +254,28 @@ export function registerScopedMemory(pi: ExtensionAPI, options: ScopedMemoryOpti
+     if (!ctx.hasUI) throw new Error('Interactive confirmation required (TUI or RPC)');
+     const prepared = await b.service.prepare(input, b.session); runtime.guard(b, ctx, signal);
+     const combined = signal ? AbortSignal.any([signal, b.controller.signal]) : b.controller.signal;
+-    const confirmed = await ctx.ui.confirm(
+-      `Scoped memory · ${input.action} · ${input.scope === 'global' ? 'GLOBAL — every folder' : `FOLDER — ${b.folder?.label ?? 'unavailable'} (${b.realCwd})`}`,
+-      `Save exactly this change? Folder scope does not include parents or children.\n\n${prepared.preview}\n\nForget retains a local tombstone for explicit restore; it is not secure erasure.`,
+-      { signal: combined, timeout: 120000 },
+-    );
++    const title = `Scoped memory · ${input.action} · ${input.scope === 'global' ? 'GLOBAL — every folder' : `FOLDER — ${b.folder?.label ?? 'unavailable'} (${b.realCwd})`}`;
++    const message = `Save exactly this change? Folder scope does not include parents or children.\n\n${prepared.preview}\n\nForget retains a local tombstone for explicit restore; it is not secure erasure.`;
++    const decision = await interactions.interact({
++      action: input.action,
++      revision: `memory-v1:${prepared.operationDay}:${prepared.day}:${prepared.etag}`,
++      classification: 'sensitive',
++      method: 'confirm',
++      schema: { kind: 'confirm' },
++      content: { title, message, preview: prepared.preview, scope: prepared.scope, id: prepared.id },
++      deadline: Date.now() + 120000,
++    }, {
++      signal: combined,
++      isCurrent: () => {
++        try { checkLegacy(); runtime.guard(b, ctx, combined); return true; }
++        catch { return false; }
++      },
++      local: async (localSignal) => ctx.ui.confirm(title, message, {
++        signal: AbortSignal.any([combined, localSignal]),
++        timeout: 120000,
++      }),
++    });
++    const confirmed = decision.state === 'allowed' && decision.answer === true;
+     runtime.guard(b, ctx, combined); checkLegacy();
+     if (!confirmed) return result({ status: 'cancelled', changed: false });
+     const committed = await b.service.commit(prepared, combined, () => { checkLegacy(); runtime.guard(b, ctx, combined); });
+@@ -263,11 +296,29 @@ export function registerScopedMemory(pi: ExtensionAPI, options: ScopedMemoryOpti
+       const legacyWarning = before.ownerless === true
+         ? 'This is an ownerless legacy lock. Continue only after confirming that no other Pi session or memory writer is running.'
+         : 'The recorded lock owner is stale. Continue only if no other Pi session or memory writer is running.';
+-      const confirmed = await ctx.ui.confirm(
+-        'Scoped memory · repair shared lock',
+-        `${legacyWarning}\n\nObserved lock state:\n${JSON.stringify(before, null, 2)}\n\nRemove only this stable lock? Live locks are never stolen automatically; memory.json files are not changed.`,
+-        { signal: combined, timeout: 120000 },
+-      );
++      const title = 'Scoped memory · repair shared lock';
++      const message = `${legacyWarning}\n\nObserved lock state:\n${JSON.stringify(before, null, 2)}\n\nRemove only this stable lock? Live locks are never stolen automatically; memory.json files are not changed.`;
++      const lockRevision = createHash('sha256').update(JSON.stringify(before)).digest('hex');
++      const decision = await interactions.interact({
++        action: 'repair-lock',
++        revision: `lock-observation-v1:${lockRevision}`,
++        classification: 'sensitive',
++        method: 'confirm',
++        schema: { kind: 'confirm' },
++        content: { title, message },
++        deadline: Date.now() + 120000,
++      }, {
++        signal: combined,
++        isCurrent: () => {
++          try { checkLegacy(); runtime.guard(b, ctx, combined); return true; }
++          catch { return false; }
++        },
++        local: async (localSignal) => ctx.ui.confirm(title, message, {
++          signal: AbortSignal.any([combined, localSignal]),
++          timeout: 120000,
++        }),
++      });
++      const confirmed = decision.state === 'allowed' && decision.answer === true;
+       runtime.guard(b, ctx, combined); checkLegacy();
+       if (!confirmed) return result({ status: 'cancelled', changed: false, lock: before });
+       const repaired = await b.service.repairLock({ allowOwnerlessLegacy: before.ownerless === true }, combined, () => { checkLegacy(); runtime.guard(b, ctx, combined); });
+@@ -316,7 +367,7 @@ export function registerScopedMemory(pi: ExtensionAPI, options: ScopedMemoryOpti
+   // Tree navigation keeps the same session/folder store but must reset the
+   // continuity mode; Runtime rebinds the new branch on the next operation.
+   pi.on('session_tree', async () => { invalidate(true); await runtime.settleCompactions(); });
+-  pi.on('session_shutdown', async () => { invalidate(); await runtime.settleCompactions(); });
++  pi.on('session_shutdown', async () => { interactions.dispose(); invalidate(); await runtime.settleCompactions(); });
+   const reportCompaction = (ctx: ExtensionContext, diagnostic: CompactionDiagnostic) => {
+     const id = diagnostic.checkpointId ?? 'none';
+     ctx.ui.setStatus('scoped-memory-continuity', `Archive: ${diagnostic.status} (${diagnostic.stage})`);
+diff --git a/src/pi/pi-web-ui-interactions-v1.d.ts b/src/pi/pi-web-ui-interactions-v1.d.ts
+new file mode 100644
+--- /dev/null
++++ b/src/pi/pi-web-ui-interactions-v1.d.ts
+@@ -0,0 +1,48 @@
++declare module '@kkkiio/pi-web-ui/interactions/v1' {
++  export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
++  export type ResponseSchema =
++    | { kind: 'confirm' }
++    | { kind: 'select'; options: string[] }
++    | { kind: 'text'; maxBytes: number };
++  export type InteractionSpec = {
++    action: string;
++    revision: string;
++    classification: 'session' | 'sensitive';
++    method: 'confirm' | 'select' | 'input' | 'editor';
++    schema: ResponseSchema;
++    purpose?: 'oauth';
++    content: Record<string, Json>;
++    deadline: number;
++  };
++  export type InteractionResult = {
++    state: 'pending' | 'delivering' | 'allowed' | 'rejected' | 'cancelled' | 'expired' | 'stale' | 'delivery_unknown';
++    winner?: 'local' | 'web';
++    answer?: boolean | string;
++  };
++  export type SourceRequestOptions = {
++    isCurrent: () => boolean;
++    signal?: AbortSignal;
++    local?: (signal: AbortSignal) => Promise<boolean | string | undefined>;
++    operationId?: string;
++  };
++  export type AdapterManifest = {
++    id: string;
++    version: string;
++    packageName: string;
++    actions: Record<string, {
++      classification: InteractionSpec['classification'];
++      method: InteractionSpec['method'];
++    }>;
++  };
++  export type InteractionEventBus = {
++    emit(channel: string, data: unknown): void;
++    on(channel: string, handler: (data: unknown) => void): () => void;
++  };
++  export type InteractionClient = {
++    status(): 'absent' | 'unsupported' | 'available';
++    interact(spec: InteractionSpec, options: SourceRequestOptions): Promise<InteractionResult>;
++    request(spec: InteractionSpec, options: SourceRequestOptions): unknown;
++    dispose(): void;
++  };
++  export function createInteractionClient(events: InteractionEventBus, manifest: AdapterManifest): InteractionClient;
++}
+diff --git a/src/pi/web-interactions.ts b/src/pi/web-interactions.ts
+new file mode 100644
+--- /dev/null
++++ b/src/pi/web-interactions.ts
+@@ -0,0 +1,146 @@
++import type {
++  AdapterManifest,
++  InteractionClient,
++  InteractionEventBus,
++  InteractionResult,
++  InteractionSpec,
++  SourceRequestOptions,
++} from '@kkkiio/pi-web-ui/interactions/v1';
++
++const PUBLIC_MODULE = '@kkkiio/pi-web-ui/interactions/v1';
++const INTERACTION_LIMITS = {
++  confirmationMs: 120_000,
++  oauthMs: 600_000,
++} as const;
++
++function missingOptionalModule(error: unknown): boolean {
++  const candidate = error as { code?: unknown; message?: unknown } | null;
++  return (candidate?.code === 'ERR_MODULE_NOT_FOUND' || candidate?.code === 'MODULE_NOT_FOUND')
++    && typeof candidate.message === 'string'
++    && candidate.message.includes('@kkkiio/pi-web-ui');
++}
++
++async function terminalFallback(
++  spec: InteractionSpec,
++  options: SourceRequestOptions,
++  fallbacks: Map<AbortController, () => void>,
++  isDisposed: () => boolean,
++): Promise<InteractionResult> {
++  if (!Number.isSafeInteger(spec.deadline)) throw new Error('Invalid interaction deadline');
++  if (spec.deadline <= Date.now()) return { state: 'expired' };
++  if (options.signal?.aborted) return { state: 'cancelled' };
++  if (!options.isCurrent()) return { state: 'stale' };
++  if (!options.local) return { state: 'cancelled' };
++  const effectiveDeadline = Math.min(
++    spec.deadline,
++    Date.now() + (spec.purpose === 'oauth' ? INTERACTION_LIMITS.oauthMs : INTERACTION_LIMITS.confirmationMs),
++  );
++  return new Promise<InteractionResult>((resolve) => {
++    const controller = new AbortController();
++    let settled = false;
++    const finish = (result: InteractionResult) => {
++      if (settled) return;
++      settled = true;
++      clearTimeout(timer);
++      fallbacks.delete(controller);
++      options.signal?.removeEventListener('abort', cancel);
++      controller.abort();
++      resolve(result);
++    };
++    const cancel = () => finish({ state: 'cancelled' });
++    const remaining = effectiveDeadline - Date.now();
++    const timer = setTimeout(() => finish({ state: 'expired' }), Math.max(1, remaining));
++    fallbacks.set(controller, cancel);
++    options.signal?.addEventListener('abort', cancel, { once: true });
++    if (options.signal?.aborted || isDisposed()) {
++      cancel();
++      return;
++    }
++    void Promise.resolve()
++      .then(() => {
++        if (settled || isDisposed() || controller.signal.aborted) return undefined;
++        if (!options.isCurrent()) {
++          finish({ state: 'stale' });
++          return undefined;
++        }
++        if (Date.now() >= effectiveDeadline) {
++          finish({ state: 'expired' });
++          return undefined;
++        }
++        return options.local?.(controller.signal);
++      })
++      .then((answer) => {
++        if (settled) return;
++        if (options.signal?.aborted || isDisposed()) {
++          cancel();
++          return;
++        }
++        if (!options.isCurrent()) {
++          finish({ state: 'stale' });
++          return;
++        }
++        if (Date.now() >= effectiveDeadline) {
++          finish({ state: 'expired' });
++          return;
++        }
++        if (answer === undefined) {
++          cancel();
++          return;
++        }
++        if (spec.schema.kind !== 'confirm' || typeof answer !== 'boolean') {
++          throw new Error('Invalid local interaction answer');
++        }
++        finish({
++          state: answer ? 'allowed' : 'rejected',
++          answer,
++          winner: 'local',
++        });
++      })
++      .catch(cancel);
++  });
++}
++
++export interface OptionalInteractionRunner {
++  interact(spec: InteractionSpec, options: SourceRequestOptions): Promise<InteractionResult>;
++  dispose(): void;
++}
++
++export function createOptionalInteractionRunner(
++  events: InteractionEventBus,
++  manifest: AdapterManifest,
++  injected?: InteractionClient,
++): OptionalInteractionRunner {
++  let client: InteractionClient | undefined = injected;
++  let loading: Promise<InteractionClient | undefined> | undefined;
++  let disposed = false;
++  const fallbacks = new Map<AbortController, () => void>();
++  const load = (): Promise<InteractionClient | undefined> => {
++    if (client) return Promise.resolve(client);
++    loading ??= import(PUBLIC_MODULE)
++      .then((module) => {
++        client = module.createInteractionClient(events, manifest);
++        return client;
++      })
++      .catch((error: unknown) => {
++        if (missingOptionalModule(error)) return undefined;
++        throw error;
++      });
++    return loading;
++  };
++  return {
++    async interact(spec, options) {
++      const available = await load();
++      if (disposed) return { state: 'cancelled' };
++      return available
++        ? available.interact(spec, options)
++        : terminalFallback(spec, options, fallbacks, () => disposed);
++    },
++    dispose() {
++      disposed = true;
++      for (const cancel of [...fallbacks.values()]) cancel();
++      if (client) client.dispose();
++      else void loading?.then((loaded) => loaded?.dispose());
++      client = undefined;
++    },
++  };
++}
+diff --git a/tests/web-interactions.test.ts b/tests/web-interactions.test.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/web-interactions.test.ts
+@@ -0,0 +1,546 @@
++import assert from 'node:assert/strict';
++import { mkdir, mkdtemp, rm, stat, utimes } from 'node:fs/promises';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import test from 'node:test';
++import { createEventBus } from '@earendil-works/pi-coding-agent';
++import type { ExtensionAPI, ExtensionContext, ToolDefinition } from '@earendil-works/pi-coding-agent';
++import type { InteractionClient, InteractionResult, InteractionSpec, SourceRequestOptions } from '@kkkiio/pi-web-ui/interactions/v1';
++import { registerScopedMemory } from '../src/pi/index.ts';
++import { FileStore } from '../src/storage/file-store.ts';
++import { createOptionalInteractionRunner } from '../src/pi/web-interactions.ts';
++
++type RegisteredTool = ToolDefinition<Record<string, unknown>, unknown>;
++
++const runnerManifest = {
++  id: 'scoped-memory-test',
++  version: '1',
++  packageName: 'scoped-memory-test',
++  actions: { confirm: { classification: 'sensitive' as const, method: 'confirm' as const } },
++};
++const runnerEvents = { emit() {}, on() { return () => {}; } };
++const pendingConfirm = (deadline: number): InteractionSpec => ({
++  action: 'confirm',
++  revision: 'runner-test-v1',
++  classification: 'sensitive',
++  method: 'confirm',
++  schema: { kind: 'confirm' },
++  content: { title: 'runner test' },
++  deadline,
++});
++
++function scriptedClient(
++  run: (spec: InteractionSpec, options: SourceRequestOptions) => Promise<InteractionResult>,
++): InteractionClient {
++  return {
++    status: () => 'available',
++    interact: run,
++    request: () => {
++      throw new Error('request() is not used by the scoped-memory adapter');
++    },
++    dispose() {},
++  };
++}
++
++function harness(
++  root: string,
++  confirm: ExtensionContext['ui']['confirm'],
++  interactions?: InteractionClient,
++) {
++  const tools = new Map<string, RegisteredTool>();
++  const handlers = new Map<string, Array<(event: unknown, ctx: ExtensionContext) => unknown>>();
++  const pi = {
++    events: createEventBus(),
++    getAllTools: () => [...tools.values()].map((tool) => ({ name: tool.name })),
++    registerTool(tool: RegisteredTool) { tools.set(tool.name, tool); },
++    registerCommand() {},
++    on(name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) {
++      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
++    },
++  } as unknown as ExtensionAPI;
++  registerScopedMemory(pi, {
++    agentDir: join(root, 'agent'),
++    configDir: 'config',
++    identity: { workspaceId: 'fixture', workspaceRoot: root, mountinfo: '' },
++    ...(interactions ? { interactions } : {}),
++  });
++  const ctx = {
++    cwd: root,
++    hasUI: true,
++    isProjectTrusted: () => true,
++    sessionManager: {
++      getSessionId: () => 'session-fixture',
++      getSessionFile: () => join(root, 'session.jsonl'),
++      getBranch: () => [],
++      getEntries: () => [],
++      getLeafId: () => null,
++    },
++    ui: { confirm, notify() {}, setStatus() {} },
++  } as unknown as ExtensionContext;
++  return {
++    tools,
++    ctx,
++    async advance(name: string) {
++      for (const handler of handlers.get(name) ?? []) await handler({}, ctx);
++    },
++  };
++}
++
++async function invoke(
++  tools: Map<string, RegisteredTool>,
++  name: string,
++  params: Record<string, unknown>,
++  ctx: ExtensionContext,
++) {
++  const tool = tools.get(name);
++  assert.ok(tool, name);
++  return tool.execute('fixture-call', params, undefined, undefined, ctx as never) as Promise<{
++    details: Record<string, unknown>;
++  }>;
++}
++
++test('Web approval aborts the local memory dialog and commits the original prepared mutation once', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  await mkdir(join(root, 'agent'), { mode: 0o700 });
++  let localStarted = false;
++  let localAborted = false;
++  let request: InteractionSpec | undefined;
++  const interactions = scriptedClient(async (spec, options) => {
++    request = structuredClone(spec);
++    assert.equal(options.isCurrent(), true);
++    assert.ok(options.local);
++    const controller = new AbortController();
++    const local = options.local(controller.signal);
++    await new Promise<void>((resolve) => setImmediate(resolve));
++    controller.abort();
++    await local;
++    return { state: 'allowed', answer: true, winner: 'web' };
++  });
++  const { tools, ctx } = harness(root, async (_title, _message, options) => {
++    localStarted = true;
++    return new Promise<boolean>((resolve) => {
++      const timer = setTimeout(() => resolve(false), 50);
++      options?.signal?.addEventListener('abort', () => {
++        clearTimeout(timer);
++        localAborted = true;
++        resolve(false);
++      }, { once: true });
++    });
++  }, interactions);
++
++  const saved = await invoke(tools, 'scoped_memory_write', { scope: 'folder', text: 'remember exact fixture' }, ctx);
++  assert.equal(saved.details.status, 'saved');
++  assert.equal(localStarted, true);
++  assert.equal(localAborted, true);
++  assert.equal(request?.action, 'write');
++  assert.equal(request?.classification, 'sensitive');
++  assert.equal(request?.method, 'confirm');
++  assert.match(String(request?.revision), /^memory-v1:/);
++  assert.match(JSON.stringify(request?.content), /remember exact fixture/);
++
++  const read = await invoke(tools, 'scoped_memory_read', { scope: 'folder' }, ctx);
++  const records = read.details.records as Array<{ text: string }>;
++  assert.deepEqual(records.map((record) => record.text), ['remember exact fixture']);
++});
++
++test('missing optional Web package fallback cancels a non-returning local prompt on source abort', async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  const source = new AbortController();
++  let localSignal: AbortSignal | undefined;
++  const pending = runner.interact(pendingConfirm(Date.now() + 1_000), {
++    signal: source.signal,
++    isCurrent: () => true,
++    local: async (signal) => {
++      localSignal = signal;
++      return new Promise<boolean>(() => {});
++    },
++  });
++  await new Promise<void>((resolve) => setImmediate(resolve));
++  source.abort();
++  const result = await Promise.race([
++    pending,
++    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('fallback cancellation hung')), 250)),
++  ]);
++  assert.equal(result.state, 'cancelled');
++  assert.equal(localSignal?.aborted, true);
++});
++
++test('missing optional Web package fallback expires and aborts a non-returning local prompt at the absolute deadline', async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  let localSignal: AbortSignal | undefined;
++  const result = await Promise.race([
++    runner.interact(pendingConfirm(Date.now() + 25), {
++      isCurrent: () => true,
++      local: async (signal) => {
++        localSignal = signal;
++        return new Promise<boolean>(() => {});
++      },
++    }),
++    new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('fallback deadline hung')), 500)),
++  ]);
++  assert.equal(result.state, 'expired');
++  assert.equal(localSignal?.aborted, true);
++});
++
++test('fallback source abort queued after currentness check prevents the local prompt from starting', async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  const source = new AbortController();
++  let localCalls = 0;
++  const result = await runner.interact(pendingConfirm(Date.now() + 1_000), {
++    signal: source.signal,
++    isCurrent: () => {
++      queueMicrotask(() => source.abort());
++      return true;
++    },
++    local: async () => {
++      localCalls++;
++      return true;
++    },
++  });
++  assert.equal(result.state, 'cancelled');
++  assert.equal(localCalls, 0);
++});
++
++test('fallback runner disposal queued after currentness check prevents the local prompt from starting', async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  let localCalls = 0;
++  const result = await runner.interact(pendingConfirm(Date.now() + 1_000), {
++    isCurrent: () => {
++      queueMicrotask(() => runner.dispose());
++      return true;
++    },
++    local: async () => {
++      localCalls++;
++      return true;
++    },
++  });
++  assert.equal(result.state, 'cancelled');
++  assert.equal(localCalls, 0);
++});
++
++test('fallback stale transition queued after the initial check prevents the local prompt from starting', async () => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  let current = true;
++  let checks = 0;
++  let localCalls = 0;
++  const result = await runner.interact(pendingConfirm(Date.now() + 1_000), {
++    isCurrent: () => {
++      checks++;
++      if (checks === 1) queueMicrotask(() => { current = false; });
++      return current;
++    },
++    local: async () => {
++      localCalls++;
++      return true;
++    },
++  });
++  assert.equal(result.state, 'stale');
++  assert.equal(localCalls, 0);
++});
++
++test('fallback effective deadline reached before the queued prompt prevents local startup', async (t) => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  const nativeNow = Date.now;
++  let now = nativeNow();
++  Date.now = () => now;
++  t.after(() => { Date.now = nativeNow; });
++  let checks = 0;
++  let localCalls = 0;
++  const result = await runner.interact(pendingConfirm(now + 600_000), {
++    isCurrent: () => {
++      checks++;
++      if (checks === 1) queueMicrotask(() => { now += 120_001; });
++      return true;
++    },
++    local: async () => {
++      localCalls++;
++      return true;
++    },
++  });
++  assert.equal(result.state, 'expired');
++  assert.equal(localCalls, 0);
++});
++
++test('fallback completion after the capped effective deadline expires even when the source deadline is later', async (t) => {
++  const runner = createOptionalInteractionRunner(runnerEvents, runnerManifest);
++  const nativeNow = Date.now;
++  let now = nativeNow();
++  Date.now = () => now;
++  t.after(() => { Date.now = nativeNow; });
++  let release!: (answer: boolean) => void;
++  const held = new Promise<boolean>((resolve) => { release = resolve; });
++  let entered!: () => void;
++  const started = new Promise<void>((resolve) => { entered = resolve; });
++  let localSignal: AbortSignal | undefined;
++  const pending = runner.interact(pendingConfirm(now + 600_000), {
++    isCurrent: () => true,
++    local: async (signal) => {
++      localSignal = signal;
++      entered();
++      return held;
++    },
++  });
++  await started;
++  now += 120_001;
++  release(true);
++  const result = await pending;
++  assert.equal(result.state, 'expired');
++  assert.equal(localSignal?.aborted, true);
++});
++
++test('Web rejection of a prepared memory mutation performs no write', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-deny-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  await mkdir(join(root, 'agent'), { mode: 0o700 });
++  const interactions = scriptedClient(async (spec) => {
++    assert.equal(spec.action, 'write');
++    return { state: 'rejected', answer: false, winner: 'web' };
++  });
++  const { tools, ctx } = harness(root, async () => {
++    assert.fail('the terminal dialog must not win a Web rejection fixture');
++  }, interactions);
++
++  const result = await invoke(tools, 'scoped_memory_write', { scope: 'folder', text: 'must not persist' }, ctx);
++  assert.deepEqual(result.details, { status: 'cancelled', changed: false });
++  const read = await invoke(tools, 'scoped_memory_read', { scope: 'folder' }, ctx);
++  assert.deepEqual(read.details.records, []);
++});
++
++test('an available interaction client error fails closed without terminal retry or memory mutation', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-error-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  await mkdir(join(root, 'agent'), { mode: 0o700 });
++  const interactions = scriptedClient(async () => {
++    throw new Error('fixture broker failure');
++  });
++  const { tools, ctx } = harness(root, async () => {
++    assert.fail('an installed client error must not retry through terminal approval');
++  }, interactions);
++
++  const failed = await invoke(tools, 'scoped_memory_write', {
++    scope: 'folder',
++    text: 'must fail closed',
++  }, ctx);
++  assert.equal(failed.details.status, 'rejected');
++  assert.doesNotMatch(String(failed.details.message), /fixture broker failure/);
++  assert.deepEqual((await invoke(tools, 'scoped_memory_read', {
++    scope: 'folder',
++  }, ctx)).details.records, []);
++});
++
++test('Web rejection of ownerless stale-lock repair leaves the observed lock untouched', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-lock-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  const lock = join(root, 'agent', 'memory', '.memory.lock');
++  await mkdir(lock, { recursive: true, mode: 0o700 });
++  const old = new Date(Date.now() - 10_000);
++  await utimes(lock, old, old);
++  await new Promise<void>((resolve) => setTimeout(resolve, 1_100));
++  let request: InteractionSpec | undefined;
++  const interactions = scriptedClient(async (spec) => {
++    request = structuredClone(spec);
++    return { state: 'rejected', answer: false, winner: 'web' };
++  });
++  const { tools, ctx } = harness(root, async () => {
++    assert.fail('the terminal dialog must not win a Web rejection fixture');
++  }, interactions);
++
++  const result = await invoke(tools, 'scoped_memory_repair_lock', {}, ctx);
++  assert.equal(result.details.status, 'cancelled');
++  assert.equal(request?.action, 'repair-lock');
++  assert.match(String(request?.revision), /^lock-observation-v1:/);
++  assert.equal((await stat(lock)).isDirectory(), true);
++});
++
++test('an approved prepared mutation cannot commit after the exact folder changes', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-folder-'));
++  const other = join(root, 'other');
++  t.after(() => rm(root, { recursive: true, force: true }));
++  await mkdir(join(root, 'agent'), { recursive: true, mode: 0o700 });
++  await mkdir(other, { mode: 0o700 });
++  let release!: () => void;
++  const held = new Promise<void>((resolve) => { release = resolve; });
++  let entered!: () => void;
++  const started = new Promise<void>((resolve) => { entered = resolve; });
++  const interactions = scriptedClient(async () => {
++    entered();
++    await held;
++    return { state: 'allowed', answer: true, winner: 'web' };
++  });
++  const registration = harness(root, async () => {
++    assert.fail('the terminal dialog must not win this Web fixture');
++  }, interactions);
++  const pending = invoke(registration.tools, 'scoped_memory_write', {
++    scope: 'folder',
++    text: 'must stay in the original exact folder',
++  }, registration.ctx);
++  await started;
++  registration.ctx.cwd = other;
++  release();
++  const result = await pending;
++  assert.notEqual(result.details.status, 'saved');
++  registration.ctx.cwd = root;
++  assert.deepEqual((await invoke(registration.tools, 'scoped_memory_read', {
++    scope: 'folder',
++  }, registration.ctx)).details.records, []);
++});
++
++test('an approved prepared mutation cannot cross its bound UTC operation day', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-date-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  await mkdir(join(root, 'agent'), { mode: 0o700 });
++  const NativeDate = globalThis.Date;
++  let now = NativeDate.parse('2026-10-24T23:59:59.000Z');
++  class FixtureDate extends NativeDate {
++    constructor(value?: string | number) { super(value ?? now); }
++    static override now() { return now; }
++  }
++  globalThis.Date = FixtureDate as DateConstructor;
++  t.after(() => { globalThis.Date = NativeDate; });
++  let release!: () => void;
++  const held = new Promise<void>((resolve) => { release = resolve; });
++  let entered!: () => void;
++  const started = new Promise<void>((resolve) => { entered = resolve; });
++  let request: InteractionSpec | undefined;
++  const interactions = scriptedClient(async (spec) => {
++    request = structuredClone(spec);
++    entered();
++    await held;
++    return { state: 'allowed', answer: true, winner: 'web' };
++  });
++  const registration = harness(root, async () => {
++    assert.fail('the terminal dialog must not win this Web fixture');
++  }, interactions);
++  const pending = invoke(registration.tools, 'scoped_memory_write', {
++    scope: 'folder',
++    text: 'must not cross midnight',
++  }, registration.ctx);
++  await started;
++  assert.match(String(request?.revision), /^memory-v1:2026-10-24:2026-10-24:/);
++  now = NativeDate.parse('2026-10-25T00:00:01.000Z');
++  release();
++  const result = await pending;
++  assert.equal(result.details.status, 'rejected');
++  assert.equal(result.details.code, 'DATE_CHANGED');
++  globalThis.Date = NativeDate;
++  assert.deepEqual((await invoke(registration.tools, 'scoped_memory_read', {
++    scope: 'folder',
++  }, registration.ctx)).details.records, []);
++});
++
++test('a concurrent committed write makes an older approved preparation stale', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-stale-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  await mkdir(join(root, 'agent'), { mode: 0o700 });
++  let release!: () => void;
++  const held = new Promise<void>((resolve) => { release = resolve; });
++  let entered!: () => void;
++  const started = new Promise<void>((resolve) => { entered = resolve; });
++  const first = harness(root, async () => {
++    assert.fail('the terminal dialog must not win this Web fixture');
++  }, scriptedClient(async () => {
++    entered();
++    await held;
++    return { state: 'allowed', answer: true, winner: 'web' };
++  }));
++  const second = harness(root, async () => {
++    assert.fail('the terminal dialog must not win this Web fixture');
++  }, scriptedClient(async () => ({ state: 'allowed', answer: true, winner: 'web' })));
++  const stale = invoke(first.tools, 'scoped_memory_write', {
++    scope: 'folder',
++    text: 'older approved preparation',
++  }, first.ctx);
++  await started;
++  const competing = await invoke(second.tools, 'scoped_memory_write', {
++    scope: 'folder',
++    text: 'newer committed preparation',
++  }, second.ctx);
++  assert.equal(competing.details.status, 'saved');
++  release();
++  const staleResult = await stale;
++  assert.equal(staleResult.details.status, 'rejected');
++  assert.equal(staleResult.details.code, 'REVISION_CONFLICT');
++  const records = (await invoke(first.tools, 'scoped_memory_read', {
++    scope: 'folder',
++  }, first.ctx)).details.records as Array<{ text: string }>;
++  assert.deepEqual(records.map((record) => record.text), ['newer committed preparation']);
++});
++
++test('an active writer lock is reported without offering Web repair or removing it', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-active-lock-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  const agent = join(root, 'agent');
++  await mkdir(agent, { mode: 0o700 });
++  const store = new FileStore(agent, ['memory'], 'global');
++  let release!: () => void;
++  const held = new Promise<void>((resolve) => { release = resolve; });
++  let entered!: () => void;
++  const started = new Promise<void>((resolve) => { entered = resolve; });
++  const holding = store.exclusive(async () => {
++    entered();
++    await held;
++  });
++  await started;
++  let requested = false;
++  const registration = harness(root, async () => {
++    assert.fail('an active lock must not reach terminal repair confirmation');
++  }, scriptedClient(async () => {
++    requested = true;
++    throw new Error('an active lock must not reach Web repair confirmation');
++  }));
++  try {
++    const result = await invoke(registration.tools, 'scoped_memory_repair_lock', {}, registration.ctx);
++    assert.equal(result.details.status, 'active');
++    assert.equal(result.details.changed, false);
++    assert.equal(requested, false);
++    assert.equal((await stat(join(agent, 'memory', '.memory.lock'))).isFile(), true);
++  } finally {
++    release();
++    await holding;
++  }
++});
++
++test('session lifecycle invalidation fences an old prepared mutation and allows a fresh binding', async (t) => {
++  const root = await mkdtemp(join(tmpdir(), 'scoped-memory-web-lifecycle-'));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  await mkdir(join(root, 'agent'), { mode: 0o700 });
++  let release!: () => void;
++  const held = new Promise<void>((resolve) => { release = resolve; });
++  let entered!: () => void;
++  const started = new Promise<void>((resolve) => { entered = resolve; });
++  let requests = 0;
++  const interactions = scriptedClient(async () => {
++    requests++;
++    if (requests === 1) {
++      entered();
++      await held;
++    }
++    return { state: 'allowed', answer: true, winner: 'web' };
++  });
++  const registration = harness(root, async () => {
++    assert.fail('the terminal dialog must not win this Web fixture');
++  }, interactions);
++  const old = invoke(registration.tools, 'scoped_memory_write', {
++    scope: 'folder',
++    text: 'old prepared mutation',
++  }, registration.ctx);
++  await started;
++  await registration.advance('session_before_switch');
++  release();
++  const oldResult = await old;
++  assert.notEqual(oldResult.details.status, 'saved');
++  assert.deepEqual((await invoke(registration.tools, 'scoped_memory_read', {
++    scope: 'folder',
++  }, registration.ctx)).details.records, []);
++
++  const fresh = await invoke(registration.tools, 'scoped_memory_write', {
++    scope: 'folder',
++    text: 'fresh binding mutation',
++  }, registration.ctx);
++  assert.equal(fresh.details.status, 'saved');
++  const records = (await invoke(registration.tools, 'scoped_memory_read', {
++    scope: 'folder',
++  }, registration.ctx)).details.records as Array<{ text: string }>;
++  assert.deepEqual(records.map((record) => record.text), ['fresh binding mutation']);
++});

@@ -27,6 +27,11 @@ import { WebSocket, WebSocketServer } from "ws";
 import { type ConnectionSettings, localWebUrl, resolveConnectionConfig } from "./connection-config.ts";
 import { listenWithFallback } from "./connection-listener.ts";
 import { attachmentDisposition, WorkspaceDownloads } from "./file-downloads.ts";
+import { InteractionBroker } from "./interactions/broker.ts";
+import { installInteractionBroker } from "./interactions/client.ts";
+import { createInteractionControlServer } from "./interactions/control.ts";
+import { announceInteractionPanels, InteractionPanels, installInteractionPanels } from "./interactions/panels.ts";
+import { INTERACTION_PROTOCOL } from "./interactions/protocol.ts";
 import { projectLiveEvent } from "./live-transport.ts";
 import { matchesRevisionDispatch, resolveMessageRevision, revisionContent } from "./message-revision.ts";
 import { resolveMessageVersions } from "./message-versions.ts";
@@ -413,6 +418,60 @@ export default function (pi: ExtensionAPI) {
   const fileDownloads = new WorkspaceDownloads();
   const workspaceUploads = new WorkspaceUploads();
   let activeExport: { controller: AbortController; done: Promise<unknown> } | null = null;
+  let interactionBroker: InteractionBroker | undefined;
+  let interactionControl: ReturnType<typeof createInteractionControlServer> | undefined;
+  let detachInteractionBroker: (() => void) | undefined;
+  const interactionPanels = new InteractionPanels(Date.now, () => {
+    if (latestCtx && runtimeActive && !runtimeStopping)
+      broadcast({ type: "event", event: "extension_interactions", payload: interactionState() });
+  });
+  const detachInteractionPanels = installInteractionPanels(pi.events, interactionPanels);
+
+  function interactionState() {
+    const current = latestCtx;
+    return {
+      sessionId: current?.sessionManager.getSessionId() ?? null,
+      runtimeId,
+      pending: interactionBroker?.pending() ?? [],
+      adapters: interactionBroker?.capabilities() ?? [],
+      panels: interactionPanels.list(),
+      generation: current
+        ? (registration?.interactionIdentity(runtimeId, current.sessionManager.getSessionId())?.generation ?? null)
+        : null,
+      managementOrigin: registration?.interactionPin?.managementOrigin ?? null,
+      authorityAvailable: !!registration?.interactionPin,
+    };
+  }
+
+  function syncInteractionIdentity() {
+    const current = latestCtx;
+    if (!current || !runtimeActive || runtimeStopping) return;
+    const identity = registration?.interactionIdentity(runtimeId, current.sessionManager.getSessionId());
+    if (!identity) return;
+    if (interactionBroker) interactionBroker.replaceIdentity(identity);
+    else {
+      interactionBroker = new InteractionBroker(identity, {
+        pin: registration?.interactionPin,
+        onChange: () => {
+          interactionControl?.notify();
+          if (latestCtx && runtimeActive && !runtimeStopping)
+            broadcast({ type: "event", event: "extension_interactions", payload: interactionState() });
+        },
+      });
+      detachInteractionBroker = installInteractionBroker(pi.events, interactionBroker);
+    }
+  }
+
+  function invalidateInteractions() {
+    interactionBroker?.invalidatePending();
+    interactionPanels.invalidate();
+  }
+  for (const event of ["session_before_switch", "session_before_fork", "session_before_tree"] as const) {
+    pi.on(event, (_event, ctx) => {
+      latestCtx = ctx;
+      invalidateInteractions();
+    });
+  }
 
   function assertBrowserWritable(scope?: ReturnType<typeof sessionScope>) {
     if (runtimeStopping || !runtimeActive || (scope && !scopeIsCurrent(scope)))
@@ -436,6 +495,11 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("Pi is preparing to restart. Nothing was sent; wait for reconnection.", "warning");
       return { action: "handled" };
     }
+    // A native before-switch hook can be cancelled by a later extension, so
+    // there may be no session_start/tree event after invalidation. Fresh input
+    // supplies authoritative context; rediscover sources, never old admissions.
+    syncInteractionIdentity();
+    announceInteractionPanels(pi.events);
     return { action: "continue" };
   });
   pi.on("user_bash", (_event, ctx) => {
@@ -916,6 +980,12 @@ export default function (pi: ExtensionAPI) {
     terminalPrompt.clear();
     const closingRegistration = registration;
     registration = null;
+    interactionControl?.close();
+    interactionControl = undefined;
+    detachInteractionBroker?.();
+    detachInteractionBroker = undefined;
+    interactionBroker?.close();
+    interactionBroker = undefined;
     const unregistered = closingRegistration?.stop();
     exportGeneration++;
     const closingExport = activeExport;
@@ -1304,6 +1374,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_tree", async (event: unknown, ctx: ExtensionContext) => {
     latestCtx = ctx;
+    syncInteractionIdentity();
+    announceInteractionPanels(pi.events);
     revisionTreeVersion++;
     const payload = typeof event === "object" && event !== null ? (event as Record<string, unknown>) : {};
     broadcast({ type: "event", event: "session_tree", payload });
@@ -1371,7 +1443,9 @@ export default function (pi: ExtensionAPI) {
               revisionDispatchUnknown ||
               activeExport ||
               activeBrowserMutations ||
-              activeHttpMutations
+              activeHttpMutations ||
+              interactionPanels.hasActiveActions() ||
+              (interactionBroker?.pending().length ?? 0) > 0
             ),
             provider: current.model?.provider ?? null,
             model: current.model?.id ?? null,
@@ -1383,6 +1457,8 @@ export default function (pi: ExtensionAPI) {
       }
     }
     lifecycleEpoch++;
+    syncInteractionIdentity();
+    announceInteractionPanels(pi.events);
     revisionAttempt = null;
     revisionPreviews = new WeakMap();
     revisionDispatch = null;
@@ -1578,6 +1654,7 @@ export default function (pi: ExtensionAPI) {
         sessionId: ctx.sessionManager.getSessionId(),
         runtimeId,
         terminalPrompt: terminalPrompt.snapshot(),
+        extensionInteractions: interactionState(),
         isStreaming: !ctx.isIdle(),
         contextUsage,
       },
@@ -1853,6 +1930,64 @@ export default function (pi: ExtensionAPI) {
         ownsMutation = true;
       }
       switch (request.method) {
+        case "get_extension_interactions": {
+          requireRevisionIdentity(params);
+          sendTo(ws, success(interactionState()));
+          break;
+        }
+        case "respond_extension_interaction": {
+          requireRevisionIdentity(params);
+          if (!interactionBroker) throw new Error("Extension interaction unavailable");
+          sendTo(ws, success({ state: interactionBroker.decideSession(params.decision) }));
+          break;
+        }
+        case "get_extension_panels": {
+          requireRevisionIdentity(params);
+          sendTo(ws, success(interactionPanels.list()));
+          break;
+        }
+        case "get_extension_panel": {
+          requireRevisionIdentity(params);
+          const current = latestCtx;
+          if (!current || typeof params.panelId !== "string") throw new Error("Extension panel unavailable");
+          const scope = sessionScope(current);
+          const snapshot = await interactionPanels.snapshot(
+            params.panelId,
+            typeof params.cursor === "string" ? params.cursor : undefined,
+          );
+          assertBrowserWritable(scope);
+          sendTo(ws, success(snapshot));
+          break;
+        }
+        case "prepare_extension_panel_action": {
+          requireRevisionIdentity(params);
+          if (typeof params.panelId !== "string") throw new Error("Extension panel unavailable");
+          sendTo(
+            ws,
+            success(
+              interactionPanels.prepare(params.panelId, params.action as Parameters<InteractionPanels["prepare"]>[1]),
+            ),
+          );
+          break;
+        }
+        case "start_extension_panel_action": {
+          requireRevisionIdentity(params);
+          if (typeof params.panelId !== "string") throw new Error("Extension panel unavailable");
+          sendTo(
+            ws,
+            success(
+              interactionPanels.start(params.panelId, params.action as Parameters<InteractionPanels["start"]>[1]),
+            ),
+          );
+          break;
+        }
+        case "get_extension_panel_action": {
+          requireRevisionIdentity(params);
+          if (typeof params.panelId !== "string" || typeof params.actionId !== "string")
+            throw new Error("Extension action unavailable");
+          sendTo(ws, success(interactionPanels.actionStatus(params.panelId, params.actionId)));
+          break;
+        }
         case "prompt": {
           // Plain queued prompts may also carry a source identity. Enforce it
           // server-side as well as in the browser before any dispatch/command.
@@ -3225,6 +3360,14 @@ export default function (pi: ExtensionAPI) {
       }
     }
     registration = activeRegistration;
+    interactionControl = createInteractionControlServer({
+      broker: () => interactionBroker,
+      authorize: (request) =>
+        registration === activeRegistration &&
+        !!activeRegistration &&
+        typeof request.headers["x-pi-web-proof"] === "string" &&
+        guardSessionRequest(activeRegistration, request),
+    });
     const controller = new AbortController();
     listenController = controller;
     const activeServer = http.createServer((request, response) => {
@@ -3234,6 +3377,7 @@ export default function (pi: ExtensionAPI) {
     wss = new WebSocketServer({ noServer: true });
 
     activeServer.on("upgrade", (request, socket, head) => {
+      if (interactionControl?.upgrade(request, socket, head)) return;
       if (!guardSessionRequest(activeRegistration, request)) {
         socket.end("HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n");
         return;
@@ -3360,6 +3504,8 @@ export default function (pi: ExtensionAPI) {
             if (server !== activeServer || controller.signal.aborted) return;
             const previousUrl = mirrorUrl;
             mirrorUrl = url || SETTINGS.publicUrl || localUrl;
+            if (url) syncInteractionIdentity();
+            else interactionBroker?.invalidatePending();
             mirrorStatusBase = `pi-web-ui: ${mirrorUrl}${url ? "" : " • registration unavailable"}`;
             updateMirrorStatus();
             if (url && url !== previousUrl) latestCtx?.ui.notify(`pi-web-ui public: ${url}`, "info");
@@ -3371,6 +3517,10 @@ export default function (pi: ExtensionAPI) {
           () => (latestCtx ? pi.getSessionName() : null),
           runtimeMetadata,
           softwareMetadata,
+          () =>
+            latestCtx
+              ? { protocol: INTERACTION_PROTOCOL, runtimeId, sessionId: latestCtx.sessionManager.getSessionId() }
+              : undefined,
         );
       }
     };
@@ -3403,6 +3553,9 @@ export default function (pi: ExtensionAPI) {
   // Cleanup on shutdown
   // ═══════════════════════════════════════
   pi.on("session_shutdown", async (event) => {
+    invalidateInteractions();
+    interactionPanels.close();
+    detachInteractionPanels();
     terminalPrompt.clear();
     runtimeStopping = true;
     if (event.reason !== "quit" && runtimeControl?.prepared) taintRuntimeInput();

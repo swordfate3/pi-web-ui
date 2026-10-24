@@ -2,6 +2,12 @@
   "extends": "./tsconfig.json",
   "compilerOptions": { "allowImportingTsExtensions": true, "types": ["node", "vite/client"] },
   "include": [
+    "extensions/interactions/**/*.ts",
+    "tests/web-interactions-*.test.ts",
+    "tests/interaction-*.test.ts",
+    "tests/hub-interactions.test.ts",
+    "e2e/fixtures/web-interaction-extension.ts",
+    "e2e/web-interactions.browser.ts",
     "hub/**/*.ts",
     "tests/session-hub.test.ts",
     "tests/hub-bounded-registry.test.ts",

@@ -2,8 +2,8 @@
 
 Date: 2026-10-24 (Asia/Shanghai)
 
-Status: conversational scope and interaction boundary approved; written spec
-awaits user review. No implementation or production activation is claimed.
+Status: written design and implementation approved by the user on 2026-10-24.
+Development is in progress; no production activation is claimed.
 
 Source baseline: `428511e4743251883153a9a8cb15b8910b480240`.
 Development branch: `codex/web-extension-interactions`.

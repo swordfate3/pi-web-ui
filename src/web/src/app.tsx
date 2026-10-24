@@ -19,6 +19,7 @@ import {
 } from "./components/pi-web-ui";
 import { ChatList } from "./components/pi-web-ui/chat-list";
 import { HistoryControls } from "./components/pi-web-ui/history-controls";
+import { InteractionCenter } from "./components/pi-web-ui/interaction-panel";
 import { MessageRevisionDialog } from "./components/pi-web-ui/message-revision-dialog";
 import { RemoteAccessPanel } from "./components/pi-web-ui/remote-access-panel";
 import { ResumeSessionPicker } from "./components/pi-web-ui/resume-session-picker";
@@ -945,6 +946,11 @@ export function App() {
       const name = match?.[1]?.toLowerCase();
       const args = match?.[2]?.trim() ?? "";
       if (!name) return false;
+      const panel = usePiWebUiStore.getState().panelForCommand(name);
+      if (panel && !args) {
+        await usePiWebUiStore.getState().openInteractionPanel(panel);
+        return true;
+      }
       if (commands.some((command) => command.name.toLowerCase() === name && command.source !== "builtin")) {
         await compactSend("prompt", { message: text, executePiCommand: true });
         return true;
@@ -2002,6 +2008,7 @@ export function App() {
           />
         )}
         {sessionDetails && <SessionDetails stats={sessionDetails} onClose={() => setSessionDetails(null)} />}
+        <InteractionCenter />
         {dialog && (
           <ExtensionDialogView
             dialog={dialog}

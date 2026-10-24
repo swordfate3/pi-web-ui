@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
 import path from "node:path";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import net, { isIP } from "node:net";
 import http from "node:http";
@@ -91,153 +91,248 @@ function localWebUrl(host, port) {
 }
 var init_connection_config = __esmMin((() => {}));
 //#endregion
-//#region hub/lifecycle.ts
-function lifecycleConfig(value) {
-	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid lifecycle provider");
-	const v = value;
-	if (Object.keys(v).sort().join(",") !== "credentialFile,endpoint" || typeof v.endpoint !== "string" || typeof v.credentialFile !== "string" || !path.isAbsolute(v.credentialFile) || v.credentialFile.includes("\0")) throw new Error("Invalid lifecycle provider");
-	const endpoint = new URL(v.endpoint);
-	if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash || !endpoint.port) throw new Error("Invalid lifecycle provider");
+//#region extensions/hub-generation.ts
+var BOUNDED_PROTOCOL, BOUNDED_GENERATION_SOURCE, HUB_GENERATION_SOURCE, bounded, generation, sessionPath, isBoundedGeneration, isHubGeneration, isHubSessionPath;
+var init_hub_generation = __esmMin((() => {
+	BOUNDED_PROTOCOL = "bounded-v2";
+	BOUNDED_GENERATION_SOURCE = "b2-[a-f0-9]{32}-[a-f0-9]{16}-[a-f0-9]{32}";
+	HUB_GENERATION_SOURCE = `(?:[a-f0-9]{32}|${BOUNDED_GENERATION_SOURCE})`;
+	bounded = new RegExp(`^${BOUNDED_GENERATION_SOURCE}$`);
+	generation = new RegExp(`^${HUB_GENERATION_SOURCE}$`);
+	sessionPath = new RegExp(`^/s/${HUB_GENERATION_SOURCE}/$`);
+	isBoundedGeneration = (value) => typeof value === "string" && bounded.test(value);
+	isHubGeneration = (value) => typeof value === "string" && generation.test(value);
+	isHubSessionPath = (value) => typeof value === "string" && sessionPath.test(value);
+}));
+//#endregion
+//#region extensions/interactions/protocol.ts
+function invalidInteraction() {
+	throw new Error("Invalid interaction");
+}
+function plainRecord(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+}
+function exactKeys(value, required, optional = []) {
+	if (required.some((key) => !Object.hasOwn(value, key)) || Object.keys(value).some((key) => !required.includes(key) && !optional.includes(key))) invalidInteraction();
+}
+function safeLabel(value, max = 256) {
+	return typeof value === "string" && value.length > 0 && value.length <= max && !/\p{Cc}/u.test(value);
+}
+function opaqueId(value, length = 32) {
+	return typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+}
+function validateIdentity(value) {
+	if (!plainRecord(value)) invalidInteraction();
+	exactKeys(value, [
+		"runId",
+		"generation",
+		"runtimeId",
+		"sessionId"
+	]);
+	if (!opaqueId(value.runId) || !isHubGeneration(value.generation) || !safeLabel(value.runtimeId) || !safeLabel(value.sessionId)) invalidInteraction();
+}
+function readInteractionRegistration(value) {
+	if (value === void 0) return void 0;
+	canonicalJson(value);
+	if (!plainRecord(value)) invalidInteraction();
+	exactKeys(value, [
+		"protocol",
+		"runtimeId",
+		"sessionId"
+	]);
+	if (value.protocol !== "pi-web-interactions-v1" || !safeLabel(value.runtimeId) || !safeLabel(value.sessionId)) invalidInteraction();
 	return {
-		endpoint: endpoint.origin,
-		credentialFile: v.credentialFile
+		protocol: INTERACTION_PROTOCOL,
+		runtimeId: value.runtimeId,
+		sessionId: value.sessionId
 	};
 }
-var hex$4, text$1, GateLifecycle;
-var init_lifecycle = __esmMin((() => {
-	init_config();
-	hex$4 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
-	text$1 = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
-	GateLifecycle = class {
-		config;
-		constructor(config) {
-			this.config = lifecycleConfig(config);
-		}
-		async request(method, route, value) {
-			const credential = readPrivateJson(this.config.credentialFile);
-			if (!credential || typeof credential.token !== "string" || !/^[a-f0-9]{64}$/.test(credential.token)) throw new Error("Lifecycle provider unavailable");
-			const body = value ? JSON.stringify(value) : void 0;
-			return new Promise((resolve, reject) => {
-				let done = false;
-				const finish = (result) => {
-					if (done) return;
-					done = true;
-					clearTimeout(timer);
-					request.destroy();
-					if (result) resolve(result);
-					else reject(/* @__PURE__ */ new Error("Lifecycle provider rejected or unavailable"));
-				};
-				const request = http.request(new URL(route, this.config.endpoint), {
-					method,
-					agent: false,
-					headers: {
-						Authorization: `Bearer ${credential.token}`,
-						"Content-Type": "application/json",
-						...body ? { "Content-Length": Buffer.byteLength(body) } : {}
-					}
-				}, (response) => {
-					if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
-						finish();
-						return;
-					}
-					let raw = Buffer.alloc(0);
-					response.on("data", (chunk) => {
-						raw = Buffer.concat([raw, chunk]);
-						if (raw.length > 16384) finish();
-					});
-					response.on("error", () => finish());
-					response.on("end", () => {
-						try {
-							const result = JSON.parse(raw.toString("utf8"));
-							if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error();
-							finish(result);
-						} catch {
-							finish();
-						}
-					});
-				});
-				const timer = setTimeout(() => finish(), 5e3);
-				request.on("error", () => finish());
-				request.end(body);
-			});
-		}
-		async target(runId) {
-			if (!hex$4(runId)) throw new Error("Invalid lifecycle identity");
-			const value = await this.request("GET", `/v1/pi-lifecycle/runs/${runId}`);
-			if (value.managed === false) return {
-				managed: false,
-				...value.reason === "source_evidence_unavailable" ? { reason: "source_evidence_unavailable" } : {}
-			};
-			if (value.managed !== true || value.run_id !== runId || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id) || !text$1(value.version) || typeof value.idle !== "boolean" || typeof value.pending !== "boolean" || typeof value.busy !== "boolean" || ![
-				"auto",
-				"manual",
-				"disabled"
-			].includes(value.mode)) throw new Error("Invalid lifecycle target");
-			return {
-				managed: true,
-				run_id: runId,
-				runtime_id: value.runtime_id,
-				session_id: value.session_id,
-				leaf_id: value.leaf_id,
-				version: value.version,
-				idle: value.idle,
-				pending: value.pending,
-				busy: value.busy,
-				mode: value.mode
-			};
-		}
-		job(value) {
-			if (!hex$4(value.id) || !hex$4(value.run_id) || typeof value.status !== "string" || ![
-				"pending",
-				"queued",
-				"running",
-				"succeeded",
-				"failed",
-				"recovery_required",
-				"rejected",
-				"stale"
-			].includes(value.status) || typeof value.stage !== "string" || !/^[a-z_]{1,64}$/.test(value.stage)) throw new Error("Invalid lifecycle result");
-			const result = {
-				id: value.id,
-				run_id: value.run_id,
-				status: value.status,
-				stage: value.stage
-			};
-			if (value.started_at !== void 0) {
-				if (!Number.isSafeInteger(value.started_at) || Number(value.started_at) <= 0 || Number(value.started_at) > Date.now() + 5e3) throw new Error("Invalid lifecycle start time");
-				result.started_at = Number(value.started_at);
-			} else if (value.status === "running" || value.status === "succeeded") throw new Error("Missing lifecycle start time");
-			for (const key of [
-				"runtime_id",
-				"session_id",
-				"old_runtime_id",
-				"new_runtime_id",
-				"old_version",
-				"expected_version",
-				"new_version"
-			]) if (value[key] !== void 0) {
-				if (!text$1(value[key])) throw new Error("Invalid lifecycle result");
-				result[key] = value[key];
-			}
-			if (value.leaf_id !== void 0) {
-				if (value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle result");
-				result.leaf_id = value.leaf_id;
-			}
-			return result;
-		}
-		async restart(value) {
-			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$4(value.run_id) || !hex$4(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
-			const result = this.job(await this.request("POST", "/v1/pi-lifecycle/restarts", value));
-			if (result.run_id !== value.run_id) throw new Error("Lifecycle target changed");
-			return result;
-		}
-		async operation(id) {
-			if (!hex$4(id)) throw new Error("Invalid lifecycle identity");
-			const job = this.job(await this.request("GET", `/v1/pi-lifecycle/restarts/${id}`));
-			if (job.id !== id) throw new Error("Lifecycle operation changed");
-			return job;
-		}
+function validateAdapter(value) {
+	if (!plainRecord(value)) invalidInteraction();
+	exactKeys(value, [
+		"id",
+		"version",
+		"packageName"
+	]);
+	if (typeof value.id !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(value.id) || !safeLabel(value.version, 64) || !safeLabel(value.packageName, 128)) invalidInteraction();
+}
+/** Strict JSON only. Never invoke toJSON/getters or silently omit undefined fields. */
+function canonicalJson(value) {
+	const seen = /* @__PURE__ */ new Set();
+	let budget = INTERACTION_LIMITS.requestBytes;
+	const consume = (text) => {
+		budget -= Buffer.byteLength(text);
+		if (budget < 0) invalidInteraction();
+		return text;
 	};
+	const visit = (item, depth) => {
+		if (depth > 32) invalidInteraction();
+		if (item === null || typeof item === "boolean") return consume(String(item));
+		if (typeof item === "string") return consume(JSON.stringify(item));
+		if (typeof item === "number" && Number.isFinite(item)) return consume(JSON.stringify(item));
+		if (typeof item !== "object" || item === null || seen.has(item)) invalidInteraction();
+		seen.add(item);
+		let result;
+		if (Array.isArray(item)) {
+			if (Object.keys(item).length !== item.length || Object.getOwnPropertySymbols(item).length) invalidInteraction();
+			const parts = Array.from({ length: item.length }, (_, i) => {
+				const property = Object.getOwnPropertyDescriptor(item, String(i));
+				if (!property || !("value" in property)) invalidInteraction();
+				return visit(property.value, depth + 1);
+			});
+			budget -= Math.max(0, parts.length - 1);
+			result = consume("[") + parts.join(",") + consume("]");
+		} else {
+			if (!plainRecord(item) || Object.getOwnPropertySymbols(item).length) invalidInteraction();
+			const parts = Object.keys(item).sort().map((key) => {
+				if ([
+					"__proto__",
+					"constructor",
+					"prototype"
+				].includes(key)) invalidInteraction();
+				const property = Object.getOwnPropertyDescriptor(item, key);
+				if (!property || !("value" in property)) invalidInteraction();
+				return consume(JSON.stringify(key)) + consume(":") + visit(property.value, depth + 1);
+			});
+			budget -= Math.max(0, parts.length - 1);
+			result = consume("{") + parts.join(",") + consume("}");
+		}
+		seen.delete(item);
+		if (budget < 0) invalidInteraction();
+		return result;
+	};
+	return visit(value, 0);
+}
+function validateSchema(value) {
+	if (!plainRecord(value)) invalidInteraction();
+	if (value.kind === "confirm") exactKeys(value, ["kind"]);
+	else if (value.kind === "select") {
+		exactKeys(value, ["kind", "options"]);
+		if (!Array.isArray(value.options) || value.options.length < 1 || value.options.length > 100 || value.options.some((option) => !safeLabel(option, 512)) || new Set(value.options).size !== value.options.length) invalidInteraction();
+	} else if (value.kind === "text") {
+		exactKeys(value, ["kind", "maxBytes"]);
+		if (!Number.isSafeInteger(value.maxBytes) || Number(value.maxBytes) < 1 || Number(value.maxBytes) > 32 * 1024) invalidInteraction();
+	} else invalidInteraction();
+}
+function validateAnswer(schema, answer) {
+	validateSchema(schema);
+	if (schema.kind === "confirm" && typeof answer === "boolean") return answer;
+	if (schema.kind === "select" && typeof answer === "string" && schema.options.includes(answer)) return answer;
+	if (schema.kind === "text" && typeof answer === "string" && Buffer.byteLength(answer) <= schema.maxBytes) return answer;
+	return invalidInteraction();
+}
+function validateSpec(spec, createdAt) {
+	if (!safeLabel(spec.action, 64) || !/^[a-z][a-z0-9_.-]*$/.test(spec.action) || !safeLabel(spec.revision, 256) || !["session", "sensitive"].includes(spec.classification) || ![
+		"confirm",
+		"select",
+		"input",
+		"editor"
+	].includes(spec.method)) invalidInteraction();
+	validateSchema(spec.schema);
+	if (spec.method === "confirm" !== (spec.schema.kind === "confirm") || spec.method === "select" !== (spec.schema.kind === "select")) invalidInteraction();
+	if (!plainRecord(spec.content) || !Number.isSafeInteger(createdAt) || createdAt < 0 || !Number.isSafeInteger(spec.deadline) || spec.deadline <= createdAt || spec.purpose !== void 0 && spec.purpose !== "oauth") invalidInteraction();
+	if (spec.deadline - createdAt > (spec.purpose === "oauth" ? INTERACTION_LIMITS.oauthMs : INTERACTION_LIMITS.confirmationMs)) invalidInteraction();
+}
+function validateInteractionRequest(value) {
+	const serialized = canonicalJson(value);
+	if (!plainRecord(value)) invalidInteraction();
+	exactKeys(value, [
+		"protocol",
+		"schemaVersion",
+		"requestId",
+		"operationId",
+		"identity",
+		"adapter",
+		"createdAt",
+		"digest",
+		"action",
+		"revision",
+		"classification",
+		"method",
+		"schema",
+		"content",
+		"deadline"
+	], ["purpose"]);
+	if (value.protocol !== "pi-web-interactions-v1" || value.schemaVersion !== 1 || !opaqueId(value.requestId) || !opaqueId(value.operationId) || !opaqueId(value.digest, 64)) invalidInteraction();
+	validateIdentity(value.identity);
+	validateAdapter(value.adapter);
+	validateSpec(value, value.createdAt);
+	const { digest, ...body } = value;
+	if (contentDigest(body) !== digest) invalidInteraction();
+	return JSON.parse(serialized);
+}
+var INTERACTION_PROTOCOL, INTERACTION_LIMITS, contentDigest;
+var init_protocol = __esmMin((() => {
+	init_hub_generation();
+	INTERACTION_PROTOCOL = "pi-web-interactions-v1";
+	INTERACTION_LIMITS = Object.freeze({
+		requestBytes: 64 * 1024,
+		pendingPerPi: 8,
+		pendingPerHub: 64,
+		hubBytes: 4 * 1024 * 1024,
+		confirmationMs: 12e4,
+		oauthMs: 6e5,
+		completedCount: 128,
+		completedMs: 3e5,
+		completedBytes: 256 * 1024,
+		panelItems: 100
+	});
+	contentDigest = (value) => createHash("sha256").update(canonicalJson(value)).digest("hex");
+}));
+//#endregion
+//#region extensions/interactions/enrollment.ts
+/** Public authority only. This value must come from host-owned per-run enrollment. */
+function validateInteractionPin(value) {
+	try {
+		if (!plainRecord(value)) throw new Error();
+		exactKeys(value, [
+			"protocol",
+			"issuer",
+			"publicKey"
+		], ["managementOrigin"]);
+		if (value.protocol !== "pi-web-interactions-v1" || !opaqueId(value.issuer, 64) || typeof value.publicKey !== "string" || value.publicKey.length > 1024) throw new Error();
+		const key = createPublicKey(value.publicKey);
+		const encoded = key.export({
+			format: "der",
+			type: "spki"
+		});
+		if (key.asymmetricKeyType !== "ed25519" || createHash("sha256").update(encoded).digest("hex") !== value.issuer) throw new Error();
+		if (value.managementOrigin !== void 0) {
+			if (typeof value.managementOrigin !== "string") throw new Error();
+			const url = new URL(value.managementOrigin);
+			if (url.origin !== value.managementOrigin || url.username || url.password || url.protocol !== "https:" && !(url.protocol === "http:" && [
+				"127.0.0.1",
+				"[::1]",
+				"localhost"
+			].includes(url.hostname))) throw new Error();
+		}
+		return {
+			protocol: INTERACTION_PROTOCOL,
+			issuer: value.issuer,
+			publicKey: key.export({
+				type: "spki",
+				format: "pem"
+			}).toString(),
+			...value.managementOrigin === void 0 ? {} : { managementOrigin: value.managementOrigin }
+		};
+	} catch {
+		throw new Error("Invalid interaction authority enrollment");
+	}
+}
+var init_enrollment = __esmMin((() => {
+	init_protocol();
+}));
+//#endregion
+//#region extensions/interactions/proof.ts
+function signInteractionEvidence(privateKey, claim) {
+	const serialized = canonicalJson(claim);
+	return {
+		claim: JSON.parse(serialized),
+		signature: sign(null, Buffer.from(serialized), privateKey).toString("base64url")
+	};
+}
+var init_proof = __esmMin((() => {
+	init_protocol();
 }));
 //#endregion
 //#region hub/state-budget.ts
@@ -401,7 +496,7 @@ var init_state_budget = __esmMin((() => {
 			if (this.totals.activeGrants > 512 || this.totals.logicalBytes > 8388608) throw new StateBudgetError();
 		}
 		destination(relative) {
-			if (!/^(?:grants\/[a-f0-9]{32}\.json|generations\/[a-f0-9]{32}\.json|bounded\/[a-f0-9]{32}\.json|restarts\/[a-f0-9]{32}(?:\.started|\.verified)?\.json|management\.json|registry\.json)$/.test(relative)) throw new Error("Invalid Hub state destination");
+			if (!/^(?:grants\/[a-f0-9]{32}\.json|generations\/[a-f0-9]{32}\.json|bounded\/[a-f0-9]{32}\.json|restarts\/[a-f0-9]{32}(?:\.started|\.verified)?\.json|management\.json|interaction-signing\.json|registry\.json)$/.test(relative)) throw new Error("Invalid Hub state destination");
 			const file = path.join(this.root, relative);
 			privateStateDirectory(path.dirname(file));
 			return file;
@@ -466,6 +561,212 @@ var init_state_budget = __esmMin((() => {
 		}
 	};
 	storageDiagnostics = (config) => withStateWriter(config, (writer) => writer.diagnostics());
+}));
+//#endregion
+//#region hub/interaction-signing.ts
+function interactionSigning(config) {
+	if (!config.management) throw new Error("Interaction management is not configured");
+	const stored = withStateWriter(config, (writer) => {
+		const file = path.join(config.stateDir, "interaction-signing.json");
+		if (!existsSync(file)) {
+			const pair = generateKeyPairSync("ed25519");
+			writer.write("interaction-signing.json", {
+				schema: 1,
+				privateKey: pair.privateKey.export({
+					type: "pkcs8",
+					format: "pem"
+				}).toString(),
+				publicKey: pair.publicKey.export({
+					type: "spki",
+					format: "pem"
+				}).toString()
+			}, { exclusive: true });
+		}
+		return readStateJson(file);
+	});
+	if (stored.schema !== 1 || Object.keys(stored).sort().join(",") !== "privateKey,publicKey,schema") throw new Error("Interaction signing unavailable");
+	const privateKey = createPrivateKey(stored.privateKey);
+	const publicKey = createPublicKey(privateKey);
+	if (privateKey.asymmetricKeyType !== "ed25519" || publicKey.export({
+		type: "spki",
+		format: "pem"
+	}).toString() !== stored.publicKey) throw new Error("Interaction signing unavailable");
+	const pin = validateInteractionPin({
+		protocol: INTERACTION_PROTOCOL,
+		issuer: createHash("sha256").update(publicKey.export({
+			type: "spki",
+			format: "der"
+		})).digest("hex"),
+		publicKey: stored.publicKey,
+		...config.management.publicUrl ? { managementOrigin: new URL(config.management.publicUrl).origin } : {}
+	});
+	const epoch = randomBytes(16).toString("hex");
+	return {
+		pin,
+		epoch,
+		sign: (claim) => signInteractionEvidence(privateKey, {
+			...claim,
+			protocol: INTERACTION_PROTOCOL,
+			audience: "pi-interaction-broker",
+			issuer: pin.issuer,
+			epoch
+		})
+	};
+}
+var init_interaction_signing = __esmMin((() => {
+	init_enrollment();
+	init_proof();
+	init_protocol();
+	init_state_budget();
+}));
+//#endregion
+//#region hub/lifecycle.ts
+function lifecycleConfig(value) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid lifecycle provider");
+	const v = value;
+	if (Object.keys(v).sort().join(",") !== "credentialFile,endpoint" || typeof v.endpoint !== "string" || typeof v.credentialFile !== "string" || !path.isAbsolute(v.credentialFile) || v.credentialFile.includes("\0")) throw new Error("Invalid lifecycle provider");
+	const endpoint = new URL(v.endpoint);
+	if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash || !endpoint.port) throw new Error("Invalid lifecycle provider");
+	return {
+		endpoint: endpoint.origin,
+		credentialFile: v.credentialFile
+	};
+}
+var hex$4, text$1, GateLifecycle;
+var init_lifecycle = __esmMin((() => {
+	init_config();
+	hex$4 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+	text$1 = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
+	GateLifecycle = class {
+		config;
+		constructor(config) {
+			this.config = lifecycleConfig(config);
+		}
+		async request(method, route, value) {
+			const credential = readPrivateJson(this.config.credentialFile);
+			if (!credential || typeof credential.token !== "string" || !/^[a-f0-9]{64}$/.test(credential.token)) throw new Error("Lifecycle provider unavailable");
+			const body = value ? JSON.stringify(value) : void 0;
+			return new Promise((resolve, reject) => {
+				let done = false;
+				const finish = (result) => {
+					if (done) return;
+					done = true;
+					clearTimeout(timer);
+					request.destroy();
+					if (result) resolve(result);
+					else reject(/* @__PURE__ */ new Error("Lifecycle provider rejected or unavailable"));
+				};
+				const request = http.request(new URL(route, this.config.endpoint), {
+					method,
+					agent: false,
+					headers: {
+						Authorization: `Bearer ${credential.token}`,
+						"Content-Type": "application/json",
+						...body ? { "Content-Length": Buffer.byteLength(body) } : {}
+					}
+				}, (response) => {
+					if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+						finish();
+						return;
+					}
+					let raw = Buffer.alloc(0);
+					response.on("data", (chunk) => {
+						raw = Buffer.concat([raw, chunk]);
+						if (raw.length > 16384) finish();
+					});
+					response.on("error", () => finish());
+					response.on("end", () => {
+						try {
+							const result = JSON.parse(raw.toString("utf8"));
+							if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error();
+							finish(result);
+						} catch {
+							finish();
+						}
+					});
+				});
+				const timer = setTimeout(() => finish(), 5e3);
+				request.on("error", () => finish());
+				request.end(body);
+			});
+		}
+		async target(runId) {
+			if (!hex$4(runId)) throw new Error("Invalid lifecycle identity");
+			const value = await this.request("GET", `/v1/pi-lifecycle/runs/${runId}`);
+			if (value.managed === false) return {
+				managed: false,
+				...value.reason === "source_evidence_unavailable" ? { reason: "source_evidence_unavailable" } : {}
+			};
+			if (value.managed !== true || value.run_id !== runId || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id) || !text$1(value.version) || typeof value.idle !== "boolean" || typeof value.pending !== "boolean" || typeof value.busy !== "boolean" || ![
+				"auto",
+				"manual",
+				"disabled"
+			].includes(value.mode)) throw new Error("Invalid lifecycle target");
+			return {
+				managed: true,
+				run_id: runId,
+				runtime_id: value.runtime_id,
+				session_id: value.session_id,
+				leaf_id: value.leaf_id,
+				version: value.version,
+				idle: value.idle,
+				pending: value.pending,
+				busy: value.busy,
+				mode: value.mode
+			};
+		}
+		job(value) {
+			if (!hex$4(value.id) || !hex$4(value.run_id) || typeof value.status !== "string" || ![
+				"pending",
+				"queued",
+				"running",
+				"succeeded",
+				"failed",
+				"recovery_required",
+				"rejected",
+				"stale"
+			].includes(value.status) || typeof value.stage !== "string" || !/^[a-z_]{1,64}$/.test(value.stage)) throw new Error("Invalid lifecycle result");
+			const result = {
+				id: value.id,
+				run_id: value.run_id,
+				status: value.status,
+				stage: value.stage
+			};
+			if (value.started_at !== void 0) {
+				if (!Number.isSafeInteger(value.started_at) || Number(value.started_at) <= 0 || Number(value.started_at) > Date.now() + 5e3) throw new Error("Invalid lifecycle start time");
+				result.started_at = Number(value.started_at);
+			} else if (value.status === "running" || value.status === "succeeded") throw new Error("Missing lifecycle start time");
+			for (const key of [
+				"runtime_id",
+				"session_id",
+				"old_runtime_id",
+				"new_runtime_id",
+				"old_version",
+				"expected_version",
+				"new_version"
+			]) if (value[key] !== void 0) {
+				if (!text$1(value[key])) throw new Error("Invalid lifecycle result");
+				result[key] = value[key];
+			}
+			if (value.leaf_id !== void 0) {
+				if (value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle result");
+				result.leaf_id = value.leaf_id;
+			}
+			return result;
+		}
+		async restart(value) {
+			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$4(value.run_id) || !hex$4(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
+			const result = this.job(await this.request("POST", "/v1/pi-lifecycle/restarts", value));
+			if (result.run_id !== value.run_id) throw new Error("Lifecycle target changed");
+			return result;
+		}
+		async operation(id) {
+			if (!hex$4(id)) throw new Error("Invalid lifecycle identity");
+			const job = this.job(await this.request("GET", `/v1/pi-lifecycle/restarts/${id}`));
+			if (job.id !== id) throw new Error("Lifecycle operation changed");
+			return job;
+		}
+	};
 }));
 //#endregion
 //#region hub/config.ts
@@ -573,7 +874,8 @@ function issueSession(config, output, options) {
 	if (!validHost(backendHost) || !options.label.trim() || options.label.length > 120 || hasControls(options.label)) throw new Error("Invalid session label or backend host");
 	const credential = {
 		run_id: randomBytes(16).toString("hex"),
-		token: randomBytes(32).toString("hex")
+		token: randomBytes(32).toString("hex"),
+		...config.management ? { interactions: interactionSigning(config).pin } : {}
 	};
 	const grant = {
 		...credential,
@@ -608,6 +910,7 @@ function revokeSession(config, runId) {
 }
 var init_config = __esmMin((() => {
 	init_connection_config();
+	init_interaction_signing();
 	init_lifecycle();
 	init_state_budget();
 }));
@@ -791,17 +1094,6 @@ var HubManagement = class {
 	}
 };
 //#endregion
-//#region extensions/hub-generation.ts
-var BOUNDED_PROTOCOL = "bounded-v2";
-var BOUNDED_GENERATION_SOURCE = "b2-[a-f0-9]{32}-[a-f0-9]{16}-[a-f0-9]{32}";
-var HUB_GENERATION_SOURCE = `(?:[a-f0-9]{32}|${BOUNDED_GENERATION_SOURCE})`;
-var bounded = new RegExp(`^${BOUNDED_GENERATION_SOURCE}$`);
-var generation = new RegExp(`^${HUB_GENERATION_SOURCE}$`);
-var sessionPath = new RegExp(`^/s/${HUB_GENERATION_SOURCE}/$`);
-var isBoundedGeneration = (value) => typeof value === "string" && bounded.test(value);
-var isHubGeneration = (value) => typeof value === "string" && generation.test(value);
-var isHubSessionPath = (value) => typeof value === "string" && sessionPath.test(value);
-//#endregion
 //#region extensions/runtime-metadata.ts
 /** Display/identity metadata, never proof that a container is authorized for control. */
 function readRuntimeMetadata(value) {
@@ -935,6 +1227,7 @@ function proxySessionResponse(request, response, upstream, resource) {
 }
 //#endregion
 //#region hub/bounded-registry.ts
+init_hub_generation();
 init_config();
 var ZERO = "0000000000000000";
 var hex$2 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
@@ -1123,6 +1416,672 @@ var ForwardQueue = class {
 		this.deadline = void 0;
 	}
 };
+//#endregion
+//#region hub/interaction-page.ts
+init_hub_generation();
+/** Static trusted shell. Serve only on the management listener, never through Pi. */
+function renderInteractionPageHtml() {
+	return `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer"><title>Pi · 可信交互审核</title>
+<link rel="stylesheet" href="/interaction-page.css"><script src="/interaction-page.js" defer><\/script></head>
+<body><main><header><span class="brand">π · Pi Web</span><span class="badge">可信管理页面</span></header>
+<h1>审核原始操作</h1><p>请核对来源、范围和全部预览后明确决定。登录不等于批准；授权送达也不代表操作已经执行成功。</p>
+<p id="review-status" role="status" aria-live="polite">正在读取管理状态…</p>
+<p id="review-outcome" role="status" aria-live="polite"></p>
+<section aria-labelledby="management-title"><h2 id="management-title">管理身份</h2>
+<p id="management-help">复用现有管理登录，不创建新密码。</p>
+<button id="management-gateway" type="button" hidden disabled>使用网页登录解锁</button>
+<form id="management-unlock" hidden autocomplete="off"><label for="management-code">既有一次性管理码</label>
+<input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" required disabled>
+<button id="management-submit" type="submit" disabled>解锁管理</button></form></section>
+<p id="review-notice" role="status" aria-live="polite"></p>
+<section aria-labelledby="preview-title"><h2 id="preview-title">完整操作预览</h2>
+<pre id="review-preview" tabindex="0"></pre>
+<h3>完整请求（含来源、范围、期限和绑定摘要）</h3><pre id="review-request" tabindex="0"></pre>
+<h3>允许的回答格式</h3><pre id="review-schema" tabindex="0"></pre></section>
+<section id="review-oauth" hidden aria-labelledby="oauth-title"><h2 id="oauth-title">提供方登录</h2>
+<p>请检查下面的真实 HTTPS 地址。只有点击按钮才会打开提供方；本页不会代替你同意提供方授权。若手机流程不受支持，请使用原终端流程。</p>
+<p id="review-oauth-url" class="identity"></p><button id="review-oauth-open" type="button" disabled>打开提供方登录 ↗</button></section>
+<section aria-labelledby="decision-title"><h2 id="decision-title">你的决定</h2>
+<div id="review-confirm" class="actions" hidden><button id="review-reject" type="button" disabled>拒绝此操作</button><button id="review-allow" type="button" disabled>允许此操作</button></div>
+<form id="review-answer-form" hidden autocomplete="off"><label id="review-answer-label" for="review-text">回答</label>
+<select id="review-options" aria-label="明确选择一个源操作选项" hidden disabled></select>
+<textarea id="review-text" rows="5" autocomplete="off" autocapitalize="off" spellcheck="false" hidden disabled></textarea>
+<button id="review-answer-submit" type="submit" disabled>提交此回答</button></form>
+<p id="review-decision" class="identity"></p><div class="actions"><button id="review-refresh" type="button" disabled>查询当前状态（不重新提交）</button>
+<button id="review-cancel" type="button">结束本页审核（不提交）</button></div></section>
+<footer>内容与输入仅保留在本页内存中。网络结果不明时只查询原请求，不创建新决定；请先核对源操作，勿通过重开页面重复批准。</footer>
+</main></body></html>`;
+}
+/** No backend text enters markup, navigation, storage, logs, or an opener. */
+var interactionPageJs = String.raw`(() => {
+  'use strict';
+  const get = (id) => document.getElementById(id);
+  const encoder = new TextEncoder();
+  const route = new RegExp('^/interactions/(${HUB_GENERATION_SOURCE})/([a-f0-9]{32})/$').exec(window.location.pathname);
+  const labels = {
+    pending: '等待你的明确决定；尚未授权。', delivering: '正在核对并送达决定，尚无执行结果。',
+    allowed: '授权已送达；不代表源操作执行成功，请查看源操作的独立结果。',
+    rejected: '决定已拒绝；本页不声称源操作已执行。', cancelled: '请求已取消；不能从本页继续授权。',
+    expired: '请求已过期；不能再批准。', stale: '请求或身份已变化，旧审核已失效；请回到源操作检查。',
+    delivery_unknown: '决定送达结果不明；仅查询原请求，不会重新提交。请核对源操作后再发起新操作。',
+  };
+  const terminal = (value) => ['allowed', 'rejected', 'cancelled', 'expired', 'stale'].includes(value);
+  const hex = (value, length) => typeof value === 'string' && new RegExp('^[a-f0-9]{' + length + '}$').test(value);
+  const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const label = (value, max = 256) => typeof value === 'string' && value.length > 0 && value.length <= max && !/\p{Cc}/u.test(value);
+  const exact = (value, required, optional = []) => record(value) && required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
+  const stable = (value) => JSON.stringify(value, function(_key, item) {
+    if (!record(item)) return item;
+    return Object.fromEntries(Object.keys(item).sort().map((key) => [key, item[key]]));
+  });
+  const fail = (status = 0) => Object.assign(new Error('Review unavailable'), { status });
+  let auth = { authorized: false };
+  let request, fingerprint, oauthUrl, decision;
+  let state = 'loading', deadline = 0, working = false, closed = false, epoch = 0, fatal = false, readOnly = false;
+  let pollTimer, expiryTimer;
+  const api = route ? '/api/management/interactions/' + route[1] + '/' + route[2] : '';
+  const notice = (text) => { get('review-notice').textContent = text; };
+  function clearTimers() { clearTimeout(pollTimer); clearTimeout(expiryTimer); pollTimer = expiryTimer = undefined; }
+  function clearPrivate() {
+    request = undefined; oauthUrl = undefined;
+    for (const id of ['review-preview', 'review-request', 'review-schema', 'review-oauth-url', 'review-outcome']) get(id).textContent = '';
+    get('review-options').replaceChildren(); get('review-options').value = '';
+    get('review-text').value = ''; get('management-code').value = '';
+  }
+  function eligible() {
+    return !closed && !fatal && !readOnly && !working && !decision && auth.authorized && state === 'pending' && request && deadline > Date.now();
+  }
+  function paint() {
+    const enabled = !!eligible();
+    for (const id of ['review-allow', 'review-reject', 'review-options', 'review-text', 'review-answer-submit']) get(id).disabled = !enabled;
+    get('review-oauth-open').disabled = !enabled || !oauthUrl;
+    get('review-refresh').disabled = working;
+    get('review-cancel').disabled = working || closed;
+    const locked = !auth.authorized && !closed && !fatal;
+    get('management-gateway').hidden = !locked || auth.authMode !== 'gateway';
+    get('management-unlock').hidden = !locked || auth.authMode === 'gateway';
+    for (const id of ['management-gateway', 'management-code', 'management-submit']) get(id).disabled = !locked || working;
+    get('management-help').textContent = auth.authorized ? '管理已解锁；登录没有批准此操作。' :
+      auth.authMode === 'gateway' ? '请使用已验证的网页登录身份解锁；若登录已失效，请重新登录管理入口。' : '复用既有一次性管理码；请向管理员获取，不创建新密码。';
+    get('review-confirm').hidden = request?.schema.kind !== 'confirm';
+    get('review-answer-form').hidden = !request || request.schema.kind === 'confirm';
+    get('review-options').hidden = request?.schema.kind !== 'select';
+    get('review-text').hidden = request?.schema.kind !== 'text';
+    get('review-oauth').hidden = request?.purpose !== 'oauth';
+    get('review-status').textContent = labels[state] || (state === 'closed' ? '本页审核已结束；未提交新决定。原操作是否仍待处理，请在源端核对。' :
+      state === 'locked' ? '管理未解锁；尚未读取或批准操作。' : '正在读取管理状态…');
+    get('review-decision').textContent = decision ? '原决定编号：' + decision.id + '（本页不会另建或重发决定）' : '';
+  }
+  function settle(next) {
+    state = next;
+    if (terminal(next)) { readOnly = true; clearTimers(); clearPrivate(); }
+    paint();
+  }
+  function receipt(value) {
+    if (!exact(value, ['state'], ['outcome']) || !Object.hasOwn(labels, value.state) ||
+        (value.outcome !== undefined && (value.state !== 'allowed' || !['succeeded', 'failed', 'cancelled'].includes(value.outcome)))) throw fail();
+    // Hub has already discarded sensitive bodies. A completion is a read-only
+    // observation of this fixed request, never another actionable preview.
+    readOnly = true;
+    clearPrivate();
+    settle(value.state);
+    const outcomes = { succeeded: '源操作报告：已执行成功。', failed: '源操作报告：执行失败。', cancelled: '源操作报告：执行已取消。' };
+    get('review-outcome').textContent = value.outcome ? outcomes[value.outcome] : value.state === 'allowed' ? '源操作尚未报告执行结果。' : '';
+  }
+  function schedule() {
+    clearTimers();
+    if (closed || fatal || terminal(state) || !auth.authorized || !deadline) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      clearPrivate(); state = decision ? 'delivery_unknown' : 'expired'; paint(); return;
+    }
+    expiryTimer = setTimeout(() => {
+      clearTimers(); clearPrivate(); state = decision ? 'delivery_unknown' : 'expired'; paint();
+    }, remaining);
+    if (!document.hidden && !working) pollTimer = setTimeout(() => { void refresh(); }, Math.min(2000, remaining));
+  }
+  async function call(path, body) {
+    const before = epoch;
+    const response = await fetch(path, {
+      method: body === undefined ? 'GET' : 'POST', mode: 'same-origin', credentials: 'same-origin',
+      cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(7000),
+      headers: { 'Content-Type': 'application/json', ...(auth.authorized ? { 'X-Pi-Hub-Csrf': auth.csrf } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (closed || before !== epoch) { await response.body?.cancel(); throw fail(); }
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 401) { auth = { ...auth, authorized: false }; clearPrivate(); }
+      throw fail(response.status);
+    }
+    if (response.headers.get('content-type')?.split(';')[0].trim() !== 'application/json') { await response.body?.cancel(); throw fail(); }
+    // Do not turn a truncated preview into an actionable review.
+    const reader = response.body.getReader();
+    const chunks = []; let size = 0;
+    try {
+      for (;;) {
+        const part = await reader.read(); if (part.done) break;
+        size += part.value.byteLength;
+        if (size > 65536 || closed || before !== epoch) throw fail();
+        chunks.push(part.value);
+      }
+    } finally { await reader.cancel(); reader.releaseLock(); }
+    if (closed || before !== epoch) throw fail();
+    const bytes = new Uint8Array(size); let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  }
+  async function checkAuth() {
+    const value = await call('/api/management/status');
+    if (!record(value) || typeof value.authorized !== 'boolean') throw fail();
+    auth = { authorized: value.authorized, authMode: value.authMode === 'gateway' ? 'gateway' : 'code' };
+    if (value.authorized) {
+      if (!hex(value.csrf, 64) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now()) { auth.authorized = false; clearPrivate(); throw fail(401); }
+      auth.csrf = value.csrf;
+    } else { clearPrivate(); if (!decision) state = 'locked'; }
+    return auth.authorized;
+  }
+  function checked(value) {
+    const keys = ['protocol', 'schemaVersion', 'requestId', 'operationId', 'identity', 'adapter', 'createdAt', 'digest', 'action', 'revision', 'classification', 'method', 'schema', 'content', 'deadline'];
+    if (!exact(value, keys, ['purpose', 'state']) || value.protocol !== 'pi-web-interactions-v1' || value.schemaVersion !== 1 ||
+        value.requestId !== route[2] || !hex(value.operationId, 32) || !hex(value.digest, 64) ||
+        !exact(value.identity, ['runId', 'generation', 'runtimeId', 'sessionId']) || value.identity.generation !== route[1] || !hex(value.identity.runId, 32) ||
+        !label(value.identity.runtimeId) || !label(value.identity.sessionId) || !exact(value.adapter, ['id', 'version', 'packageName']) ||
+        !/^[a-z][a-z0-9-]{0,63}$/.test(value.adapter.id) || !label(value.adapter.version, 64) || !label(value.adapter.packageName, 128) ||
+        value.classification !== 'sensitive' || !label(value.action, 64) || !/^[a-z][a-z0-9_.-]*$/.test(value.action) || !label(value.revision) ||
+        !record(value.content) || !Number.isSafeInteger(value.createdAt) || value.createdAt < 0 || !Number.isSafeInteger(value.deadline) || value.deadline <= value.createdAt ||
+        value.deadline - value.createdAt > (value.purpose === 'oauth' ? 600000 : 120000) || (value.purpose !== undefined && value.purpose !== 'oauth') ||
+        (value.state !== undefined && !Object.hasOwn(labels, value.state))) throw fail();
+    const schema = value.schema;
+    if (!record(schema)) throw fail();
+    if (schema.kind === 'confirm') { if (value.method !== 'confirm' || !exact(schema, ['kind'])) throw fail(); }
+    else if (schema.kind === 'select') {
+      if (value.method !== 'select' || !exact(schema, ['kind', 'options']) || !Array.isArray(schema.options) || schema.options.length < 1 || schema.options.length > 100 ||
+          schema.options.some((option) => !label(option, 512)) || new Set(schema.options).size !== schema.options.length) throw fail();
+    } else if (schema.kind === 'text') {
+      if (!['input', 'editor'].includes(value.method) || !exact(schema, ['kind', 'maxBytes']) || !Number.isSafeInteger(schema.maxBytes) || schema.maxBytes < 1 || schema.maxBytes > 32768) throw fail();
+    } else throw fail();
+    return value;
+  }
+  function providerUrl(value) {
+    if (typeof value !== 'string' || !/^https:\/\//i.test(value) || /[\s\p{Cc}]/u.test(value)) return;
+    try { const url = new URL(value); if (url.protocol === 'https:' && !url.username && !url.password) return url.href; } catch {}
+  }
+  function accept(value) {
+    if (record(value) && !Object.hasOwn(value, 'protocol')) { receipt(value); return; }
+    const live = checked(value);
+    const { state: observed = 'pending', ...body } = live;
+    if (terminal(observed)) { settle(observed); return; }
+    if (readOnly) { settle('stale'); return; }
+    if (deadline && live.deadline !== deadline || fingerprint && stable(body) !== fingerprint) { settle('stale'); return; }
+    if (live.deadline <= Date.now()) { settle(decision ? 'delivery_unknown' : 'expired'); return; }
+    deadline = live.deadline;
+    if (decision) { state = 'delivery_unknown'; return; } // A live GET never proves a prior POST failed.
+    state = observed;
+    if (fingerprint && request) return; // Preserve drafts, but restore the view after reauthentication.
+    fingerprint = stable(body); request = body;
+    get('review-preview').textContent = typeof body.content.preview === 'string' ? body.content.preview : JSON.stringify(body.content, null, 2);
+    get('review-request').textContent = JSON.stringify(body, null, 2);
+    get('review-schema').textContent = JSON.stringify(body.schema, null, 2);
+    if (body.schema.kind === 'select') {
+      const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = '请选择，不默认批准';
+      get('review-options').replaceChildren(placeholder);
+      for (const choice of body.schema.options) { const option = document.createElement('option'); option.value = choice; option.textContent = choice; get('review-options').append(option); }
+      get('review-options').value = '';
+    }
+    get('review-answer-label').textContent = body.purpose === 'oauth' ? '粘贴此提供方流程的回调（仅本页内存，不自动打开回调）' : body.schema.kind === 'select' ? '选择源操作提供的选项' : '输入回答';
+    if (body.purpose === 'oauth') {
+      oauthUrl = providerUrl(body.content.authorizationUrl);
+      get('review-oauth-url').textContent = typeof body.content.authorizationUrl === 'string' ? body.content.authorizationUrl : '未提供支持的 HTTPS 登录地址';
+      if (!oauthUrl) notice('提供方登录链接不可用或不安全；请保留原终端流程，不会自动打开任何地址。');
+    }
+    get('review-preview').focus();
+  }
+  async function refresh(explicit = false) {
+    if (closed || fatal || working || (!explicit && terminal(state))) return;
+    working = true; clearTimers(); paint();
+    try { if (await checkAuth()) accept(await call(api)); }
+    catch (error) {
+      if (!closed) {
+        clearPrivate();
+        state = decision ? 'delivery_unknown' : error.status === 401 ? 'locked' : 'stale';
+        notice('无法读取完整且当前有效的请求；未重新提交决定。请检查管理登录与源操作。');
+      }
+    } finally { working = false; paint(); schedule(); }
+  }
+  async function unlock(gateway) {
+    if (closed || fatal || working || auth.authorized || (auth.authMode === 'gateway') !== gateway) return;
+    const code = get('management-code').value.trim(); get('management-code').value = '';
+    if (!gateway && !hex(code, 32)) { notice('请输入既有的 32 位一次性管理码。'); return; }
+    working = true; paint();
+    try {
+      await call('/api/management/' + (gateway ? 'gateway' : 'unlock'), gateway ? {} : { code });
+      if (await checkAuth()) { notice('管理已解锁；尚未批准任何操作。'); accept(await call(api)); }
+    } catch { if (!closed) { auth.authorized = false; clearPrivate(); state = decision ? 'delivery_unknown' : 'locked'; notice('管理登录或请求读取未完成，请核对既有登录入口；不会自动批准。'); } }
+    finally { working = false; paint(); schedule(); }
+  }
+  async function decide(answer) {
+    if (!eligible()) { if (deadline && deadline <= Date.now() && !decision) settle('expired'); return; }
+    const original = request;
+    const schema = original.schema;
+    if (!(schema.kind === 'confirm' && typeof answer === 'boolean' || schema.kind === 'select' && schema.options.includes(answer) ||
+          schema.kind === 'text' && typeof answer === 'string' && encoder.encode(answer).byteLength <= schema.maxBytes)) {
+      notice('回答必须符合上方完整格式与 UTF-8 字节上限；请明确选择。'); return;
+    }
+    working = true; clearTimers();
+    decision = { id: [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, '0')).join('') };
+    state = 'delivering'; get('review-text').value = ''; paint();
+    try {
+      if (!await checkAuth()) throw fail(401);
+      const observation = await call(api);
+      if (record(observation) && !Object.hasOwn(observation, 'protocol')) { receipt(observation); return; }
+      const live = checked(observation);
+      const { state: observed = 'pending', ...body } = live;
+      if (observed !== 'pending') { settle(observed); return; }
+      if (stable(body) !== fingerprint) { settle('stale'); return; }
+      if (live.deadline <= Date.now()) { settle('expired'); return; }
+      const response = await call(api, { decisionId: decision.id, digest: original.digest, revision: original.revision, answer });
+      receipt(response);
+    } catch { if (!closed) settle('delivery_unknown'); }
+    finally { answer = undefined; working = false; get('review-text').value = ''; paint(); schedule(); }
+  }
+  get('management-gateway').addEventListener('click', () => unlock(true));
+  get('management-unlock').addEventListener('submit', (event) => { event.preventDefault(); return unlock(false); });
+  get('review-refresh').addEventListener('click', () => refresh(true));
+  get('review-allow').addEventListener('click', () => decide(true));
+  get('review-reject').addEventListener('click', () => decide(false));
+  get('review-answer-form').addEventListener('submit', (event) => {
+    event.preventDefault(); return decide(request?.schema.kind === 'select' ? get('review-options').value : get('review-text').value);
+  });
+  get('review-oauth-open').addEventListener('click', () => {
+    if (!eligible() || !oauthUrl) return;
+    window.open(oauthUrl, '_blank', 'noopener,noreferrer');
+    notice('已请求打开提供方页面；如弹窗被阻止，请允许本管理页弹出后再次点击，或使用终端流程。此动作不是批准。');
+  });
+  get('review-cancel').addEventListener('click', () => {
+    if (working) return;
+    closed = true; epoch++; state = 'closed'; clearTimers(); clearPrivate(); paint();
+  });
+  document.addEventListener('visibilitychange', () => {
+    clearTimeout(pollTimer);
+    if (!document.hidden) return refresh();
+  });
+  window.addEventListener('pagehide', () => { closed = true; epoch++; auth = { authorized: false }; clearTimers(); clearPrivate(); paint(); });
+  window.addEventListener('pageshow', (event) => { if (event.persisted) { fatal = true; settle('stale'); notice('旧页面已失效，请从源操作重新打开；不要重复批准结果不明的操作。'); } });
+  if (!route || window.location.search || window.location.hash || window.top !== window.self) {
+    fatal = true; state = 'stale'; notice('只允许顶层管理页与完整固定请求路径；不接受查询参数、回调片段或跳转地址。'); paint();
+  } else { void refresh(); }
+})();`;
+var interactionPageCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;color:#21382e;background:#f4f7f2}*{box-sizing:border-box}body{margin:0}main{max-width:880px;margin:auto;padding:32px 24px 48px}header,.actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header{justify-content:space-between}.brand{font-size:22px;font-weight:650}.badge{font-size:12px;padding:6px 10px;border:1px solid #adc5b1;border-radius:20px}h1{font-size:30px;line-height:1.3;margin-top:32px}h2{font-size:18px}h3{font-size:14px}p,footer{line-height:1.8;overflow-wrap:anywhere}section{padding:20px;margin:18px 0;background:#fff;border:1px solid #dce5d8;border-radius:12px;min-width:0}pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;max-width:100%;margin:12px 0 22px;padding:14px;background:#f5f7f4;border:1px solid #e0e7dc;border-radius:8px;font:13px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;unicode-bidi:plaintext}label{display:block;margin:12px 0 8px}input,select,textarea,button{font:inherit;border:1px solid #bbcdbb;border-radius:8px;padding:11px 13px;max-width:100%;min-height:44px}input,select,textarea{display:block;width:100%;margin:8px 0 12px;background:#fff;color:inherit}textarea{resize:vertical}button{background:#edf4e9;color:#244a32;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,pre:focus-visible{outline:3px solid #6c926a;outline-offset:3px}#review-allow,#review-answer-submit{background:#28553b;color:#fff}#review-status{padding:14px;border-left:4px solid #7a9a70;background:#e9f0e5}#review-notice{color:#855122}.identity{font:12px/1.8 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;unicode-bidi:plaintext}footer{font-size:12px;color:#607360;margin-top:28px}[hidden]{display:none!important}@media(max-width:600px){main{padding:22px 14px 36px}h1{font-size:26px}section{padding:15px}.actions{align-items:stretch;flex-direction:column}.actions button{width:100%}pre{padding:10px;font-size:12px}header{align-items:flex-start}}`;
+//#endregion
+//#region extensions/interactions/control.ts
+init_protocol();
+var INTERACTION_CONTROL_PATH = "/.pi-web-interactions";
+var INTERACTION_FRAME_BYTES = 72 * 1024;
+//#endregion
+//#region hub/interaction-control.ts
+init_protocol();
+var unavailable = () => /* @__PURE__ */ new Error("Private interaction channel unavailable or changed");
+function openInteractionControl(target, signing, isCurrent, onPending) {
+	validateIdentity(target.identity);
+	return new Promise((resolve, reject) => {
+		const socket = new WebSocket(`ws://${isIP(target.backendHost) === 6 ? `[${target.backendHost}]` : target.backendHost}:${target.port}${INTERACTION_CONTROL_PATH}`, {
+			headers: {
+				"x-pi-web-generation": target.identity.generation,
+				"x-pi-web-proof": createHmac("sha256", target.token).update(target.identity.generation).digest("hex")
+			},
+			maxPayload: INTERACTION_FRAME_BYTES,
+			perMessageDeflate: false,
+			handshakeTimeout: 5e3
+		});
+		let challenge;
+		let ready = false;
+		let closed = false;
+		const pending = /* @__PURE__ */ new Map();
+		const fail = () => {
+			if (closed) return;
+			closed = true;
+			clearTimeout(handshake);
+			socket.terminate();
+			for (const request of pending.values()) {
+				clearTimeout(request.timer);
+				request.reject(unavailable());
+			}
+			pending.clear();
+			reject(unavailable());
+		};
+		const handshake = setTimeout(fail, 5e3);
+		const send = (frame) => {
+			if (!isCurrent() || closed || socket.readyState !== WebSocket.OPEN) {
+				fail();
+				throw unavailable();
+			}
+			const bytes = JSON.stringify(frame);
+			if (Buffer.byteLength(bytes) > 73728 || socket.bufferedAmount > 256 * 1024) {
+				fail();
+				throw unavailable();
+			}
+			socket.send(bytes);
+		};
+		const rpc = (type, args = {}) => new Promise((done, failed) => {
+			if (!ready || pending.size >= 8) {
+				failed(unavailable());
+				return;
+			}
+			const id = randomBytes(16).toString("hex");
+			const timer = setTimeout(() => {
+				pending.delete(id);
+				failed(unavailable());
+			}, 5e3);
+			pending.set(id, {
+				resolve: done,
+				reject: failed,
+				timer
+			});
+			try {
+				send({
+					type,
+					id,
+					...args
+				});
+			} catch {
+				pending.delete(id);
+				clearTimeout(timer);
+				failed(unavailable());
+			}
+		});
+		const evidence = (kind, payload, deadline = Date.now() + 1e4) => {
+			if (!challenge || !isCurrent() || closed) throw unavailable();
+			const now = Date.now();
+			return signing.sign({
+				kind,
+				identity: target.identity,
+				challenge,
+				issuedAt: now,
+				expiresAt: Math.min(now + 1e4, deadline),
+				payload
+			});
+		};
+		socket.on("error", fail);
+		socket.on("close", fail);
+		socket.on("message", (raw, binary) => {
+			try {
+				if (binary || !isCurrent() || closed) throw unavailable();
+				const frame = JSON.parse(raw.toString());
+				if (!plainRecord(frame)) throw unavailable();
+				if (!ready) {
+					if (frame.type === "challenge" && !challenge) {
+						if (!opaqueId(frame.challenge, 64) || canonicalJson(frame.identity) !== canonicalJson(target.identity)) throw unavailable();
+						challenge = frame.challenge;
+						send({
+							type: "authenticate",
+							evidence: evidence("control", {})
+						});
+						return;
+					}
+					if (frame.type !== "ready" || !challenge) throw unavailable();
+					ready = true;
+					clearTimeout(handshake);
+					resolve({
+						active: () => !closed && isCurrent(),
+						read: async (requestId) => {
+							if (!opaqueId(requestId)) throw unavailable();
+							const request = validateInteractionRequest(await rpc("read", {
+								requestId,
+								evidence: evidence("read", { requestId })
+							}));
+							if (!isCurrent() || request.requestId !== requestId || canonicalJson(request.identity) !== canonicalJson(target.identity) || request.deadline <= Date.now()) throw unavailable();
+							return request;
+						},
+						decide: async (request, answer, decisionId) => {
+							if (!opaqueId(decisionId) || canonicalJson(request.identity) !== canonicalJson(target.identity)) throw unavailable();
+							const valid = validateInteractionRequest(request);
+							const value = validateAnswer(valid.schema, answer);
+							const result = await rpc("decision", { evidence: evidence("decision", {
+								requestId: valid.requestId,
+								operationId: valid.operationId,
+								adapterId: valid.adapter.id,
+								adapterVersion: valid.adapter.version,
+								revision: valid.revision,
+								digest: valid.digest,
+								decisionId,
+								answer: value
+							}, valid.deadline) });
+							if (!isCurrent() || ![
+								"allowed",
+								"rejected",
+								"cancelled",
+								"expired",
+								"stale",
+								"delivery_unknown"
+							].includes(String(result))) throw unavailable();
+							return result;
+						},
+						status: (requestId) => rpc("status", requestId === void 0 ? {} : { requestId }),
+						close: fail
+					});
+					return;
+				}
+				if (frame.type === "pending") {
+					if (!Array.isArray(frame.items) || frame.items.length > INTERACTION_LIMITS.pendingPerPi || !onPending?.(frame.items) && onPending !== void 0) throw unavailable();
+					return;
+				}
+				if (frame.type !== "result" || !opaqueId(frame.id)) throw unavailable();
+				const request = pending.get(frame.id);
+				if (!request) return;
+				clearTimeout(request.timer);
+				pending.delete(frame.id);
+				if (frame.ok === true) request.resolve(frame.result);
+				else request.reject(unavailable());
+			} catch {
+				fail();
+			}
+		});
+	});
+}
+//#endregion
+//#region hub/interactions.ts
+init_hub_generation();
+init_protocol();
+init_interaction_signing();
+var sameTarget = (a, b) => canonicalJson(a.identity) === canonicalJson(b.identity) && a.backendHost === b.backendHost && a.port === b.port && a.token === b.token;
+async function readBody(request) {
+	if (request.headers["content-type"]?.split(";")[0].trim() !== "application/json") throw new Error();
+	const bytes = await new Promise((resolve, reject) => {
+		const chunks = [];
+		let length = 0;
+		let done = false;
+		const finish = (error) => {
+			if (done) return;
+			done = true;
+			clearTimeout(timer);
+			request.off("data", data);
+			request.off("end", end);
+			request.off("error", errorHandler);
+			request.off("aborted", errorHandler);
+			if (error) {
+				request.resume();
+				reject(error);
+			} else resolve(Buffer.concat(chunks));
+		};
+		const data = (chunk) => {
+			length += chunk.length;
+			if (length > INTERACTION_LIMITS.requestBytes) finish(/* @__PURE__ */ new Error());
+			else chunks.push(chunk);
+		};
+		const end = () => finish();
+		const errorHandler = () => finish(/* @__PURE__ */ new Error());
+		const timer = setTimeout(errorHandler, 5e3);
+		request.on("data", data);
+		request.once("end", end);
+		request.once("error", errorHandler);
+		request.once("aborted", errorHandler);
+	});
+	const value = JSON.parse(bytes.toString("utf8"));
+	canonicalJson(value);
+	if (!plainRecord(value)) throw new Error();
+	return value;
+}
+/** Transient only: private bodies are never written to Hub state or session history. */
+function createInteractionApi(config, management, hooks) {
+	const signing = config.management ? interactionSigning(config) : void 0;
+	const channels = /* @__PURE__ */ new Map();
+	let closed = false;
+	const retire = (generation) => {
+		const record = channels.get(generation);
+		if (!record) return;
+		channels.delete(generation);
+		record.channel?.close();
+		record.promise.then((channel) => channel.close()).catch(() => {});
+	};
+	const timer = setInterval(() => {
+		for (const [generation, record] of channels) if (!hooks.current(record.target) || record.channel && !record.channel.active()) retire(generation);
+	}, 1e3);
+	timer.unref();
+	const channelFor = async (generation, revalidate) => {
+		if (!signing || closed) throw new Error();
+		const target = await hooks.lookup(generation);
+		revalidate();
+		if (!target || !hooks.current(target)) throw new Error();
+		let record = channels.get(generation);
+		if (record && (!sameTarget(record.target, target) || record.channel && !record.channel.active())) {
+			retire(generation);
+			record = void 0;
+		}
+		if (!record) {
+			if (channels.size >= 64) throw new Error();
+			const created = {
+				target,
+				count: 0
+			};
+			channels.set(generation, created);
+			created.promise = openInteractionControl(target, signing, () => !closed && channels.get(generation) === created && hooks.current(target), (items) => {
+				for (const item of items) {
+					if (!plainRecord(item)) return false;
+					exactKeys(item, [
+						"requestId",
+						"adapterId",
+						"action",
+						"classification",
+						"state",
+						"deadline"
+					]);
+					if (!opaqueId(item.requestId) || !safeLabel(item.adapterId, 64) || !safeLabel(item.action, 64) || !["session", "sensitive"].includes(String(item.classification)) || item.state !== "pending" || !Number.isSafeInteger(item.deadline)) return false;
+				}
+				if ([...channels.values()].reduce((sum, peer) => sum + (peer === created ? 0 : peer.count), items.length) > INTERACTION_LIMITS.pendingPerHub) return false;
+				created.count = items.length;
+				return true;
+			}).then((channel) => {
+				if (closed || channels.get(generation) !== created || !hooks.current(target)) {
+					channel.close();
+					throw new Error();
+				}
+				created.channel = channel;
+				return channel;
+			}).catch(() => {
+				if (channels.get(generation) === created) channels.delete(generation);
+				throw new Error("Interaction channel unavailable");
+			});
+			record = created;
+		}
+		const channel = await record.promise;
+		revalidate();
+		if (!hooks.current(target)) throw new Error();
+		return channel;
+	};
+	const pattern = new RegExp(`^/api/management/interactions/(${HUB_GENERATION_SOURCE})/([a-f0-9]{32})$`);
+	return {
+		retire,
+		close() {
+			closed = true;
+			clearInterval(timer);
+			for (const generation of [...channels.keys()]) retire(generation);
+		},
+		async handle(request, response, sameOrigin) {
+			const url = new URL(request.url ?? "/", "http://hub.invalid");
+			if (!url.pathname.startsWith("/api/management/interactions/")) return false;
+			const reply = (status, body) => response.writeHead(status, {
+				"Content-Type": "application/json",
+				"Cache-Control": "no-store",
+				"Referrer-Policy": "no-referrer",
+				"X-Content-Type-Options": "nosniff",
+				"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'"
+			}).end(JSON.stringify(body));
+			const match = pattern.exec(url.pathname);
+			if (!match || url.search || !signing) {
+				reply(404, { error: "Interaction route unavailable" });
+				return true;
+			}
+			if (request.method !== "GET" && request.method !== "POST") {
+				reply(405, { error: "Method not allowed" });
+				return true;
+			}
+			if (!sameOrigin) {
+				reply(403, { error: "Trusted management origin required" });
+				return true;
+			}
+			let authorized = false;
+			try {
+				const write = request.method === "POST";
+				const auth = management.authorize(request, write);
+				const revalidate = () => {
+					authorized = false;
+					management.revalidate(request, auth, write);
+					authorized = true;
+				};
+				authorized = true;
+				const channel = await channelFor(match[1], revalidate);
+				if (!write) {
+					const status = await channel.status(match[2]);
+					revalidate();
+					const receipt = status.completed?.[0];
+					if (receipt) {
+						reply(200, {
+							state: receipt.state,
+							...receipt.outcome ? { outcome: receipt.outcome } : {}
+						});
+						return true;
+					}
+					const live = await channel.read(match[2]);
+					revalidate();
+					reply(200, live);
+					return true;
+				}
+				const value = await readBody(request);
+				revalidate();
+				exactKeys(value, [
+					"decisionId",
+					"digest",
+					"revision",
+					"answer"
+				]);
+				if (!opaqueId(value.decisionId) || !opaqueId(value.digest, 64) || !safeLabel(value.revision)) throw new Error();
+				const status = await channel.status(match[2]);
+				revalidate();
+				const receipt = status.completed?.[0];
+				if (receipt) {
+					if (receipt.decisionId !== value.decisionId || receipt.digest !== value.digest || receipt.revision !== value.revision || receipt.responseDigest !== contentDigest(value.answer)) throw new Error();
+					reply(200, {
+						state: receipt.state,
+						...receipt.outcome ? { outcome: receipt.outcome } : {}
+					});
+					return true;
+				}
+				const live = await channel.read(match[2]);
+				revalidate();
+				if (live.digest !== value.digest || live.revision !== value.revision) throw new Error();
+				const state = await channel.decide(live, value.answer, value.decisionId);
+				revalidate();
+				reply(200, { state });
+			} catch {
+				reply(authorized ? 409 : 401, { error: authorized ? "Interaction changed or delivery unknown; check the original operation before retrying" : "Management authorization required" });
+			}
+			return true;
+		}
+	};
+}
 //#endregion
 //#region hub/runtime-portal.ts
 /** Browser source injected into the trusted management portal script. */
@@ -1462,6 +2421,7 @@ var runtimePortalJs = String.raw`
 `;
 //#endregion
 //#region hub/portal.ts
+init_hub_generation();
 var portalHtml = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pi · 会话总览</title><link rel="stylesheet" href="/hub.css"><script src="/hub-management.js" defer><\/script><script src="/hub.js" defer><\/script></head>
@@ -1988,6 +2948,7 @@ var GateRuntimeUpdates = class {
 };
 //#endregion
 //#region hub/restart-api.ts
+init_hub_generation();
 init_config();
 init_lifecycle();
 init_state_budget();
@@ -2025,8 +2986,7 @@ async function body(request) {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
 	return value;
 }
-function createRestartApi(config, hooks) {
-	const management = new HubManagement(config);
+function createRestartApi(config, hooks, management = new HubManagement(config)) {
 	const provider = config.lifecycle ? new GateLifecycle(config.lifecycle) : void 0;
 	const runtimeProvider = config.runtimeUpdates ? new GateRuntimeUpdates(config.runtimeUpdates) : void 0;
 	const receipts = path.join(config.stateDir, "restarts");
@@ -2641,7 +3601,7 @@ function captureHubMetadata(moduleUrl = import.meta.url) {
 	{
 		const embedded = {
 			"version": "1.0.1",
-			"build": "ca8cd7acc50f5b4e4481feef83982b6f2c71df4db4071eda4a06f43ef212f782"
+			"build": "91592c40737daf3ad74e9896197e8759d72244d0d5db9471438b285ee83a4e79"
 		};
 		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
 			version: embedded.version,
@@ -2791,6 +3751,8 @@ function createVersionStatus(options = {}) {
 }
 //#endregion
 //#region hub/server.ts
+init_hub_generation();
+init_protocol();
 init_config();
 init_state_budget();
 var mac = (token, value) => createHmac("sha256", token).update(value).digest("hex");
@@ -2987,6 +3949,7 @@ async function startLockedHub(config, options) {
 	const versionStatus = createVersionStatus(options.versions);
 	let url = "";
 	let managementUrl;
+	let interactionApi;
 	const restarting = /* @__PURE__ */ new Map();
 	const activateRestart = (generation) => {
 		const restart = restarting.get(generation);
@@ -2998,6 +3961,7 @@ async function startLockedHub(config, options) {
 		activateRestart(generation);
 		const session = sessions.get(generation);
 		sessions.delete(generation);
+		interactionApi?.retire(generation);
 		for (const [ws, id] of webSockets) if (id === generation) ws.terminate();
 		if (session && isBoundedGeneration(generation)) {
 			const clear = (transaction) => {
@@ -3040,6 +4004,29 @@ async function startLockedHub(config, options) {
 		if (!session || !await proof(session.grant, generation, session.port) || stopped || current(generation) !== session) return void 0;
 		return session;
 	};
+	const management = new HubManagement(config);
+	const interactionTarget = (session) => {
+		const descriptor = session?.interaction ?? session?.runtime;
+		if (!session || !descriptor) return void 0;
+		return {
+			identity: {
+				runId: session.grant.run_id,
+				generation: session.generation,
+				runtimeId: descriptor.runtimeId,
+				sessionId: descriptor.sessionId
+			},
+			backendHost: session.grant.backendHost,
+			port: session.port,
+			token: session.grant.token
+		};
+	};
+	interactionApi = createInteractionApi(config, management, {
+		lookup: async (generation) => interactionTarget(await verified(generation)),
+		current: (target) => {
+			const fresh = interactionTarget(current(target.identity.generation));
+			return !!fresh && !stopped && fresh.identity.runId === target.identity.runId && fresh.identity.runtimeId === target.identity.runtimeId && fresh.identity.sessionId === target.identity.sessionId && fresh.backendHost === target.backendHost && fresh.port === target.port && fresh.token === target.token;
+		}
+	});
 	const restartApi = createRestartApi(config, {
 		clearHandoff: (id) => {
 			for (const [generation, item] of restarting) if (item.id === id) restarting.delete(generation);
@@ -3110,7 +4097,7 @@ async function startLockedHub(config, options) {
 				}));
 			}
 		}
-	});
+	}, management);
 	const register = async (value) => {
 		const authenticate = () => {
 			if (stopped || typeof value.run_id !== "string") throw new RegistryError("AUTH_FAILED");
@@ -3187,6 +4174,7 @@ async function startLockedHub(config, options) {
 		const sessionName = typeof value.sessionName === "string" ? value.sessionName.replace(/\p{Cc}/gu, " ").trim() || null : null;
 		const runtime = value.runtime === void 0 ? void 0 : readRuntimeMetadata(value.runtime);
 		const software = value.software === void 0 ? void 0 : readSoftwareMetadata(value.software);
+		const interaction = readInteractionRegistration(value.interaction);
 		const port = Number(value.port);
 		const prepared = withStateWriter(config, (writer) => {
 			const grant = authenticate();
@@ -3241,6 +4229,7 @@ async function startLockedHub(config, options) {
 				session.sessionName = sessionName;
 				session.runtime = runtime;
 				session.software = software;
+				session.interaction = interaction;
 			} else sessions.set(generation, {
 				grant,
 				generation,
@@ -3249,7 +4238,8 @@ async function startLockedHub(config, options) {
 				since: Date.now(),
 				sessionName,
 				runtime,
-				software
+				software,
+				interaction
 			});
 			pruneHandoffs();
 			if (!session) {
@@ -3352,6 +4342,7 @@ async function startLockedHub(config, options) {
 					fail(response, 401);
 					return;
 				}
+				if (await interactionApi?.handle(request, response, allowedBrowser(request, request.method !== "GET", true))) return;
 				if (await restartApi.handle(request, response, allowedBrowser(request, true, true))) return;
 				if (![
 					"/",
@@ -3359,8 +4350,10 @@ async function startLockedHub(config, options) {
 					"/api/sessions",
 					"/hub.js",
 					"/hub-management.js",
-					"/hub.css"
-				].includes(pathname ?? "") || request.headers["service-worker"] !== void 0) {
+					"/hub.css",
+					"/interaction-page.js",
+					"/interaction-page.css"
+				].includes(pathname ?? "") && !new RegExp(`^/interactions/${HUB_GENERATION_SOURCE}/[a-f0-9]{32}/$`).test(pathname ?? "") || request.headers["service-worker"] !== void 0) {
 					fail(response, 404);
 					return;
 				}
@@ -3522,7 +4515,7 @@ async function startLockedHub(config, options) {
 				}));
 				return;
 			}
-			const asset = pathname === "/sessions/" ? ["text/html", renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl)] : pathname === "/hub.js" ? ["text/javascript", portalJs] : admin && pathname === "/hub-management.js" ? ["text/javascript", portalManagementJs] : pathname === "/hub.css" ? ["text/css", portalCss + portalManagementCss] : void 0;
+			const asset = admin && new RegExp(`^/interactions/${HUB_GENERATION_SOURCE}/[a-f0-9]{32}/$`).test(pathname ?? "") ? ["text/html", renderInteractionPageHtml()] : admin && pathname === "/interaction-page.js" ? ["text/javascript", interactionPageJs] : admin && pathname === "/interaction-page.css" ? ["text/css", interactionPageCss] : pathname === "/sessions/" ? ["text/html", renderPortalHtml(admin, config.publicUrl ?? url, config.management?.publicUrl ?? managementUrl)] : pathname === "/hub.js" ? ["text/javascript", portalJs] : admin && pathname === "/hub-management.js" ? ["text/javascript", portalManagementJs] : pathname === "/hub.css" ? ["text/css", portalCss + portalManagementCss] : void 0;
 			if (!asset) {
 				fail(response, pathname?.startsWith("/s/") ? 410 : 404);
 				return;
@@ -3751,6 +4744,7 @@ async function startLockedHub(config, options) {
 		}
 	} catch (error) {
 		stopped = true;
+		interactionApi?.close();
 		versionStatus.close();
 		for (const peer of peers) peer.destroy();
 		for (const connection of connections) connection.destroy();
@@ -3775,6 +4769,7 @@ async function startLockedHub(config, options) {
 		close() {
 			if (closing) return closing;
 			stopped = true;
+			interactionApi?.close();
 			handoffs.clear();
 			versionStatus.close();
 			clearInterval(sweep);

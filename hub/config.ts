@@ -3,6 +3,7 @@ import { lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 import { validatedPublicUrl } from "../extensions/connection-config.ts";
+import { interactionSigning } from "./interaction-signing.ts";
 import { type LifecycleConfig, lifecycleConfig } from "./lifecycle.ts";
 import { privateStateDirectory, publishCredential, readStateJson, withStateWriter } from "./state-budget.ts";
 
@@ -168,7 +169,11 @@ export function issueSession(config: HubConfig, output: string, options: { label
   const backendHost = options.backendHost ?? "127.0.0.1";
   if (!validHost(backendHost) || !options.label.trim() || options.label.length > 120 || hasControls(options.label))
     throw new Error("Invalid session label or backend host");
-  const credential = { run_id: randomBytes(16).toString("hex"), token: randomBytes(32).toString("hex") };
+  const credential = {
+    run_id: randomBytes(16).toString("hex"),
+    token: randomBytes(32).toString("hex"),
+    ...(config.management ? { interactions: interactionSigning(config).pin } : {}),
+  };
   const grant = {
     ...credential,
     label: options.label,

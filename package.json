@@ -25,7 +25,12 @@
   "bin": {
     "pi-web-hub": "dist/hub/pi-web-hub.mjs"
   },
+  "exports": {
+    "./interactions/v1": "./extensions/interactions/client.ts",
+    "./package.json": "./package.json"
+  },
   "scripts": {
+    "test:interactions:browser": "node --import ./tests/register-ts.mjs --test e2e/web-interactions.browser.ts",
     "dev:web": "vite --host 127.0.0.1",
     "build:web": "tsc --noEmit && vite build && vite build --config vite.hub.config.ts && node scripts/web-dist.mjs --write",
     "verify:dist": "node scripts/web-dist.mjs",
@@ -102,6 +107,9 @@
     "bin/",
     "hub/",
     "extensions/",
+    "integrations/adapters/",
+    "integrations/check-adapter.mjs",
+    "docs/web-interactions.md",
     "dist/",
     "public/",
     "docs/remote-access.md",

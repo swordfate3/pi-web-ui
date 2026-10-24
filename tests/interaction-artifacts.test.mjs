@@ -1,0 +1,54 @@
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+
+test("release patches round-trip exact baselines and refuse changed files, tampering and symlinks", (t) => {
+  const temp = mkdtempSync(path.join(tmpdir(), "interaction-artifacts-"));
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  const scripts = path.join(temp, "integrations");
+  mkdirSync(scripts);
+  for (const name of ["export-adapters.mjs", "check-adapter.mjs"]) copyFileSync(fileURLToPath(new URL(`../integrations/${name}`, import.meta.url)), path.join(scripts, name));
+  const sourceRoot = path.join(temp, "sources");
+  for (const id of ["memory", "knowledge", "mcp", "agents"]) {
+    const root = path.join(sourceRoot, id);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: `fixture-${id}`, version: "1.0.0" }));
+    writeFileSync(path.join(root, "index.ts"), "export const answer = 1;\n");
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["add", "package.json", "index.ts"], { cwd: root });
+    writeFileSync(path.join(root, "index.ts"), "export const answer = 2;\n");
+    writeFileSync(path.join(root, "adapter.ts"), "export const source = 'fixture';\n");
+    writeFileSync(path.join(root, "WEB-INTERACTIONS-REPORT.md"), "Not a distributable source artifact\n");
+  }
+  const exported = spawnSync(process.execPath, [path.join(scripts, "export-adapters.mjs"), sourceRoot], { encoding: "utf8" });
+  assert.equal(exported.status, 0, exported.stderr);
+  const target = path.join(temp, "clean-source");
+  mkdirSync(target);
+  writeFileSync(path.join(target, "package.json"), JSON.stringify({ name: "fixture-memory", version: "1.0.0" }));
+  writeFileSync(path.join(target, "index.ts"), "export const answer = 1;\n");
+  execFileSync("git", ["init", "--quiet"], { cwd: target });
+  const check = (...extra) => spawnSync(process.execPath, [path.join(scripts, "check-adapter.mjs"), "memory", target, ...extra], { encoding: "utf8" });
+  assert.equal(check().status, 0);
+  assert.equal(readFileSync(path.join(target, "index.ts"), "utf8"), "export const answer = 1;\n");
+  writeFileSync(path.join(target, "index.ts"), "unrelated changes\n");
+  assert.notEqual(check("--apply").status, 0);
+  assert.equal(readFileSync(path.join(target, "index.ts"), "utf8"), "unrelated changes\n");
+  rmSync(path.join(target, "index.ts"));
+  const outside = path.join(temp, "outside.ts");
+  writeFileSync(outside, "export const answer = 1;\n");
+  symlinkSync(outside, path.join(target, "index.ts"));
+  assert.notEqual(check("--apply").status, 0);
+  rmSync(path.join(target, "index.ts"));
+  writeFileSync(path.join(target, "index.ts"), "export const answer = 1;\n");
+  assert.equal(check("--apply").status, 0);
+  assert.equal(readFileSync(path.join(target, "index.ts"), "utf8"), "export const answer = 2;\n");
+  assert.equal(readFileSync(path.join(target, "adapter.ts"), "utf8"), "export const source = 'fixture';\n");
+  assert.notEqual(check("--apply").status, 0, "never apply twice");
+  const patch = path.join(scripts, "adapters/memory.patch");
+  writeFileSync(patch, `${readFileSync(patch, "utf8")}\nTAMPERED\n`);
+  assert.notEqual(check().status, 0);
+});

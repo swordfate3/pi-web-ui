@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
 import { type RawData, WebSocket } from "ws";
 
 test("Git diff and file previews reject oversized complete WebSocket results with targeted errors", async (t) => {
@@ -56,6 +57,7 @@ test("Git diff and file previews reject oversized complete WebSocket results wit
   const events = new Map<string, Array<(...args: unknown[]) => unknown>>();
   const commands = new Map<string, { handler: (...args: unknown[]) => unknown }>();
   const pi = {
+    events: createEventBus(),
     on(event: string, handler: (...args: unknown[]) => unknown) {
       const listeners = events.get(event) ?? [];
       listeners.push(handler);

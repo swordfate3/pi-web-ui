@@ -105,12 +105,17 @@
       "packageName": "pi-mcp-adapter",
       "version": "6.0.0",
       "file": "mcp.patch",
-      "sha256": "82292345097a80d6702980c9d1ad728040615ecf2498e31dfa768ac8dd30c231",
+      "sha256": "e7679b25e2911256f2100ea28284bb0310bc87582d95508e08d006c2b7b1fb38",
       "changes": [
         {
           "path": "index.ts",
           "before": "7c58bd3c8af3b860f9f515be9963d00a5317adb25cdcc25c2ab0856e3fef6d60",
-          "after": "2edc46af8d7d59a67de60459fc64e3a3ded016949c954541946846af75b009f7"
+          "after": "ff6983bb829e4fd0b36b751f8389f151c65454d809095bce0fed704391e367f5"
+        },
+        {
+          "path": "init.ts",
+          "before": "8b6017f3c815fc57b84747d81ea990cf811550946441dc269f2037d09dac406a",
+          "after": "0f210d0d372c9d7103484444acacf46d2dd97a79890af5b3d1752eab7c90dbfb"
         },
         {
           "path": "package.json",
@@ -120,7 +125,7 @@
         {
           "path": "mcp-index-load.test.ts",
           "before": null,
-          "after": "80c84a98bca951b92af28ac8e932614bea1bffe695729dceb82ee53940eac91d"
+          "after": "8c1968e08c68b51c81cf36bd723b4e16126d1bb72d056a70f6c875c5a5a4333a"
         },
         {
           "path": "mcp-oauth-acceptance.test.ts",
@@ -135,7 +140,7 @@
         {
           "path": "web-interactions.ts",
           "before": null,
-          "after": "410e9ff09e7b1e2619756f150f4a2cede0732f120a0b5c752579301fad1331e9"
+          "after": "6ba246ba809e927c40c1aaa3874b679ed7011297fb2b44566878d92849e3fcc7"
         }
       ]
     },
@@ -144,7 +149,7 @@
       "packageName": "pi-subagents-lite",
       "version": "1.17.0-thinking.1",
       "file": "agents.patch",
-      "sha256": "a77cad0e6c7dc6222bb16343542ec1b0915222cc15ed881f9f37925dbae9e0d4",
+      "sha256": "ebb1f4b8b4ddc513bbfd5995aa57355e403457fc0d736592cabadb0b39dbc9a2",
       "changes": [
         {
           "path": "package.json",
@@ -164,7 +169,7 @@
         {
           "path": "src/web-interactions.ts",
           "before": null,
-          "after": "90f44f49530021d071b1a8df16f21644e8e8d405ba808c560546ea72bd8fde29"
+          "after": "00b9924b94e80256e88859bb017a406acddaecacef165470bc3eb9a70c9972f4"
         },
         {
           "path": "test/web-interactions-acceptance.test.ts",

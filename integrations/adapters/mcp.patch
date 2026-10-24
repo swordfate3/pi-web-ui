@@ -1,5 +1,5 @@
 diff --git a/index.ts b/index.ts
-index ef934b3..b960150 100644
+index ef934b3..98e23a3 100644
 --- a/index.ts
 +++ b/index.ts
 @@ -10,6 +10,7 @@ import type { NestedCallHandOff } from "./proxy-modes.ts";
@@ -28,7 +28,7 @@ index ef934b3..b960150 100644
  import { toToolParameters } from "./tool-parameters.ts";
  import { readPanelOpenKeys } from "./panel-keys.ts";
  import { getAgentPath } from "./agent-dir.ts";
-+import { installMcpInteractionPanel, type McpExecutionPreview, type McpInteractionBinding } from "./web-interactions.ts";
++import { hasMcpInteractionApi, installMcpInteractionPanel, type McpExecutionPreview, type McpInteractionBinding } from "./web-interactions.ts";
  
  export type { McpAdapterOptions } from "./types.ts";
  export type { ServerEntry } from "./types.ts";
@@ -40,7 +40,23 @@ index ef934b3..b960150 100644
  
  /** Pi 0.99+ has its own MCP config; on Pi 0.84–0.87, `mcp.json` is an old adapter config. */
  function piSupportsMcp(pi: ExtensionAPI): boolean {
-@@ -1533,6 +1536,157 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+@@ -1407,6 +1410,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+     generation: number,
+     staleReason: string,
+     excludeProjectServers = false,
++    deferLazyDiscovery = false,
+   ): Promise<void> {
+     let oauthRuntime: McpOAuthRuntime | null = null;
+     let markStarted!: () => void;
+@@ -1446,6 +1450,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+           : {}),
+         oauthRuntime,
+         excludeProjectServers,
++        deferLazyDiscovery,
+         // Pi awaits session_start handlers in order. Returning before the approval
+         // dialog settles lets /reload or a later extension replace the editor and
+         // orphan the dialog, leaving initialization pending forever.
+@@ -1533,6 +1538,157 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
          statusPublicationAttempted = true;
          callReentrant(() => loadedCoreRuntime.updateStatusBar(nextState));
          guard();
@@ -198,7 +214,36 @@ index ef934b3..b960150 100644
          clearRetainedInitFailure();
          guard();
          if (earlyConfig.settings?.freezeDirectTools === true) {
-@@ -1786,6 +1940,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+@@ -1721,8 +1877,15 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+     if (state) return;
+ 
+     if (!initPromise) {
+-      const deferredSnapshot = getDeferredSessionSnapshot(ctx.cwd);
+-      if (deferredSnapshot) {
++      // Construct the source state for the optional management panel, but leave
++      // each server's configured lazy/eager connection policy unchanged.
++      const webInteractionsAvailable = await hasMcpInteractionApi();
++      if (generation !== lifecycleGeneration || !owner.isActive() || currentOwner !== owner) return;
++      // A runtime operation can start or complete initialization during the API
++      // probe. Join its promise instead of replacing it under the same owner.
++      if (state) return;
++      const deferredSnapshot = initPromise ? undefined : getDeferredSessionSnapshot(ctx.cwd);
++      if (deferredSnapshot && !webInteractionsAvailable) {
+         const { config, cache, enabledServerCount } = deferredSnapshot;
+         sessionScriptToolIssues = deferredSnapshot.scriptToolIssues;
+         const directResult = syncDirectTools(config, cache);
+@@ -1751,7 +1914,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
+         ctx.ui?.setStatus("mcp", styledStatus);
+         return;
+       }
+-      startInitialization(ctx, owner, generation, "stale_session_start");
++      if (!initPromise) {
++        startInitialization(ctx, owner, generation, "stale_session_start", false, deferredSnapshot !== undefined);
++      }
+     }
+ 
+     const initialization = initPromise as Promise<McpExtensionState> | null;
+@@ -1786,6 +1951,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
      }
      if (sessionManager !== currentState.sessionManager) return;
  
@@ -209,6 +254,37 @@ index ef934b3..b960150 100644
      restoreCurrentSessionApprovals(currentState);
    });
  
+diff --git a/init.ts b/init.ts
+index e846ef3..1c267ff 100644
+--- a/init.ts
++++ b/init.ts
+@@ -113,6 +113,8 @@ type McpInitializationOptions = McpAdapterOptions & {
+   onProjectTrustResolved?: () => void;
+   /** Load-time runs have no Pi context, so project trust is unknown; session_start decides later. */
+   excludeProjectServers?: boolean;
++  /** Panel-only initialization of a session that would otherwise stay deferred. */
++  deferLazyDiscovery?: boolean;
+ };
+ 
+ export async function initializeMcp(
+@@ -372,7 +374,7 @@ export async function initializeMcp(
+   const startupServers = serverEntries
+     .filter(([name, definition]) => {
+       const mode = definition.lifecycle ?? "lazy";
+-      return mode === "keep-alive" || mode === "eager" || needsDiscovery.has(name);
++      return mode === "keep-alive" || mode === "eager" || (!options.deferLazyDiscovery && needsDiscovery.has(name));
+     })
+     // Load-time runs have no model registry for auth.provider; session_start connects those servers.
+     .filter(([, definition]) => !(options.excludeProjectServers && typeof definition.auth === "object"));
+@@ -517,7 +519,7 @@ export async function initializeMcp(
+   }
+ 
+   const envDirect = process.env.MCP_DIRECT_TOOLS;
+-  if (envDirect !== "__none__") {
++  if (envDirect !== "__none__" && !options.deferLazyDiscovery) {
+     const currentCache = loadMetadataCache();
+     const envDirectToolOverride = envDirect?.split(",").map(selector => selector.trim()).filter(Boolean);
+     const missingCacheServers = getMissingConfiguredDirectToolServers(config, currentCache, envDirectToolOverride);
 diff --git a/package.json b/package.json
 index a62b1ce..6abf2d2 100644
 --- a/package.json
@@ -234,7 +310,7 @@ diff --git a/mcp-index-load.test.ts b/mcp-index-load.test.ts
 new file mode 100644
 --- /dev/null
 +++ b/mcp-index-load.test.ts
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,208 @@
 +import assert from "node:assert/strict";
 +import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 +import { tmpdir } from "node:os";
@@ -250,30 +326,40 @@ new file mode 100644
 +  assert.fail(message);
 +}
 +
-+test("the real MCP index factory registers a source panel through the actual SDK event bus", async (t) => {
++for (const scenario of ["disabled", "lazy", "direct-lazy", "concurrent"] as const) {
++test(`the real MCP index factory registers a source panel with ${scenario} startup through the actual SDK event bus`, async (t) => {
 +  const root = await mkdtemp(join(tmpdir(), "pi-mcp-index-acceptance-"));
 +  const agentDir = join(root, "agent");
 +  const projectDir = join(root, "project");
 +  await mkdir(agentDir, { recursive: true });
 +  await mkdir(projectDir, { recursive: true });
 +  await writeFile(join(agentDir, "mcp-adapter.json"), JSON.stringify({
++    settings: { deferWithMissingMetadata: true, ...(scenario === "direct-lazy" ? { directTools: true } : {}) },
 +    mcpServers: {
 +      "disabled-acceptance": {
 +        command: "this-command-must-never-run",
 +        disabled: true,
 +      },
++      ...(scenario === "lazy" || scenario === "direct-lazy" ? {
++        "enabled-lazy": { command: "this-command-must-never-run", lifecycle: "lazy" },
++      } : {}),
 +    },
 +  }));
 +
 +  const priorHome = process.env.HOME;
 +  const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
++  const priorDirectTools = process.env.MCP_DIRECT_TOOLS;
 +  process.env.HOME = root;
 +  process.env.PI_CODING_AGENT_DIR = agentDir;
++  if (scenario === "direct-lazy") delete process.env.MCP_DIRECT_TOOLS;
++  else process.env.MCP_DIRECT_TOOLS = "__none__";
 +  t.after(async () => {
 +    if (priorHome === undefined) delete process.env.HOME;
 +    else process.env.HOME = priorHome;
 +    if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 +    else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
++    if (priorDirectTools === undefined) delete process.env.MCP_DIRECT_TOOLS;
++    else process.env.MCP_DIRECT_TOOLS = priorDirectTools;
 +    await rm(root, { recursive: true, force: true });
 +  });
 +
@@ -287,11 +373,28 @@ new file mode 100644
 +    import(sdkLoader),
 +    import(panelsModule),
 +  ]);
++  const { McpServerManager } = await import("./server-manager.ts");
++  let connectionAttempts = 0;
++  t.mock.method(McpServerManager.prototype, "connect", async () => {
++    connectionAttempts++;
++    throw new Error("A deferred server must not be connected during panel startup");
++  });
++  const managers = new Set<unknown>();
++  const setMetadataListener = McpServerManager.prototype.setMetadataListChangedListener;
++  t.mock.method(McpServerManager.prototype, "setMetadataListChangedListener", function (this: any, ...args: any[]) {
++    managers.add(this);
++    return setMetadataListener.apply(this, args as any);
++  });
 +
 +  const events = sdk.createEventBus();
 +  const panels = new panelApi.InteractionPanels();
 +  const uninstallPanels = panelApi.installInteractionPanels(events, panels);
 +  const runtime = loader.createExtensionRuntime();
++  // The factory loader leaves runner actions unbound; this isolated session
++  // has an empty Pi tool catalog and never submits model work.
++  runtime.getAllTools = () => [];
++  runtime.getActiveTools = () => [];
++  runtime.setActiveTools = () => {};
 +  const extension = await loader.loadExtensionFromFactory(
 +    index.default,
 +    projectDir,
@@ -341,7 +444,19 @@ new file mode 100644
 +  } as any;
 +
 +  for (const handler of extension.handlers.get("session_start") ?? []) {
-+    await handler({ type: "session_start" }, context);
++    const started = handler({ type: "session_start" }, context);
++    if (scenario === "concurrent") {
++      // The session cleanup yields before exposing sessionCtx; the optional
++      // API import then yields again. An ordinary runtime event can arrive here.
++      for (let step = 0; step < 8; step++) await Promise.resolve();
++      const request: any = { version: 1, tool: "missing-acceptance-tool", args: {} };
++      events.emit(index.MCP_RUNTIME_TOOL_CALL_EVENT, request);
++      assert.ok(request.result, "the runtime request must be handled");
++      const result = await request.result;
++      assert.equal(result.ok, false);
++      assert.doesNotMatch(result.error.message, /stale_first_operation|active Pi session|not initialized/i);
++    }
++    await started;
 +  }
 +  await waitFor(
 +    () => panels.list().some((manifest) => manifest.id === "pi-mcp-adapter"),
@@ -356,7 +471,15 @@ new file mode 100644
 +    methods: ["reconnect", "enable", "disable", "oauth"],
 +  }]);
 +  const snapshot = await panels.snapshot("pi-mcp-adapter");
-+  assert.deepEqual(snapshot.items, [{
++  assert.equal(connectionAttempts, 0, "panel startup must preserve deferred lazy discovery");
++  assert.equal(managers.size, 1, "concurrent startup must share one runtime initialization");
++  const enabled = snapshot.items.filter((item: any) => item.name === "enabled-lazy");
++  if (scenario === "lazy" || scenario === "direct-lazy") {
++    assert.equal(enabled.length, 1);
++    assert.equal(enabled[0].disabled, false);
++    assert.equal(enabled[0].listenState, "disconnected");
++  }
++  assert.deepEqual(snapshot.items.filter((item: any) => item.name !== "enabled-lazy"), [{
 +    name: "disabled-acceptance",
 +    status: "disabled",
 +    listenState: "disconnected",
@@ -395,6 +518,7 @@ new file mode 100644
 +  }
 +  assert.deepEqual(panels.list(), []);
 +});
++}
 diff --git a/mcp-oauth-acceptance.test.ts b/mcp-oauth-acceptance.test.ts
 new file mode 100644
 --- /dev/null
@@ -920,7 +1044,7 @@ diff --git a/web-interactions.ts b/web-interactions.ts
 new file mode 100644
 --- /dev/null
 +++ b/web-interactions.ts
-@@ -0,0 +1,376 @@
+@@ -0,0 +1,386 @@
 +import { randomBytes } from "node:crypto";
 +
 +export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -1244,13 +1368,23 @@ new file mode 100644
 +
 +async function importPublicInteractions(): Promise<PublicInteractionModule | undefined> {
 +  try {
-+    const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<PublicInteractionModule>;
-+    return await dynamicImport("@kkkiio/pi-web-ui/interactions/v1");
++    // Keep import visible to Pi's Jiti evaluator; Function-created imports have
++    // no dynamic-import callback inside its VM context.
++    const specifier = "@kkkiio/pi-web-ui/interactions/v1";
++    return await import(specifier);
 +  } catch (error) {
 +    const code = (error as { code?: unknown })?.code;
 +    if (code === "ERR_MODULE_NOT_FOUND" || code === "ERR_PACKAGE_PATH_NOT_EXPORTED") return undefined;
++    if (code === "MODULE_NOT_FOUND" && error instanceof Error &&
++        error.message.split("\n")[0] === "Cannot find module '@kkkiio/pi-web-ui/interactions/v1'") return undefined;
 +    throw error;
 +  }
++}
++
++/** An installed cooperative API needs source state even when all servers stay lazy. */
++export async function hasMcpInteractionApi(): Promise<boolean> {
++  const api = await importPublicInteractions();
++  return typeof api?.createInteractionClient === "function" && typeof api.registerInteractionPanel === "function";
 +}
 +
 +export async function installMcpInteractionPanel(

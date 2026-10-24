@@ -1,6 +1,6 @@
-# Cooperative extension interactions (development)
+# Cooperative extension interactions
 
-This feature is developed on `codex/web-extension-interactions`. It is not a generic terminal-dialog renderer, and these source changes do not install or activate adapters in existing Pi processes.
+This feature is available on `main`; the original development branch is retained as `codex/web-extension-interactions`. It is not a generic terminal-dialog renderer, and these source changes do not install or activate adapters in existing Pi processes. The [2026-10-24 host rollout record](validation/2026-10-24-web-extension-interactions-rollout.md) documents this host's separate adapter installation and the adoption boundary for existing sessions.
 
 ## What appears where
 

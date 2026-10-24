@@ -233,7 +233,7 @@ diff --git a/src/web-interactions.ts b/src/web-interactions.ts
 new file mode 100644
 --- /dev/null
 +++ b/src/web-interactions.ts
-@@ -0,0 +1,490 @@
+@@ -0,0 +1,494 @@
 +import { randomBytes } from "node:crypto";
 +
 +export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -672,11 +672,15 @@ new file mode 100644
 +
 +async function importPublicInteractions(): Promise<PublicInteractionModule | undefined> {
 +  try {
-+    const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<PublicInteractionModule>;
-+    return await dynamicImport("@kkkiio/pi-web-ui/interactions/v1");
++    // Keep import visible to Pi's Jiti evaluator; Function-created imports have
++    // no dynamic-import callback inside its VM context.
++    const specifier = "@kkkiio/pi-web-ui/interactions/v1";
++    return await import(specifier);
 +  } catch (error) {
 +    const code = (error as { code?: unknown })?.code;
 +    if (code === "ERR_MODULE_NOT_FOUND" || code === "ERR_PACKAGE_PATH_NOT_EXPORTED") return undefined;
++    if (code === "MODULE_NOT_FOUND" && error instanceof Error &&
++        error.message.split("\n")[0] === "Cannot find module '@kkkiio/pi-web-ui/interactions/v1'") return undefined;
 +    throw error;
 +  }
 +}

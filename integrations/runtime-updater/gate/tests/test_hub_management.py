@@ -403,6 +403,88 @@ class HubManagementTest(unittest.TestCase):
         decision = self.decision(self.task('deployment', job['id']), 'reject', body['decision_id'])
         self.assertEqual(self.post('decisions', decision)[0], 409)
 
+    def test_delayed_resume_cannot_clear_a_later_pause_incident(self):
+        store = self.gate.store
+        store.set_mode('pi-web-hub', 'auto')
+        execution_policy_hash = store.service('pi-web-hub')['policy_hash']
+
+        def fail_automatic_jobs(first):
+            for number in range(first, first + 3):
+                job = store.request_version('pi-web-hub', {'commit': '%040x' % number}, automatic=True)
+                store.update(job['id'], status='failed', stage='worker_failed')
+                store.account_job_result(job['id'])
+                # Duplicate accounting must not advance the incident or affect fences.
+                before = store.service('pi-web-hub')
+                store.account_job_result(job['id'])
+                self.assertEqual(store.service('pi-web-hub'), before)
+
+        fail_automatic_jobs(10)
+        first = next(p for p in self.listing()['policies'] if p['kind'] == 'service')
+        self.assertTrue(first['paused'])
+        first_resume = dict(id=first['id'], revision=first['revision'], decision_id='a' * 32)
+        code, original_receipt = self.post('resume', first_resume)
+        self.assertEqual(code, 200, original_receipt)
+        self.assertEqual(original_receipt['status'], 'recorded')
+        fail_automatic_jobs(20)
+        second = next(p for p in self.listing()['policies'] if p['kind'] == 'service')
+        self.assertTrue(second['paused'])
+        self.assertEqual(store.service('pi-web-hub')['failures'], 3)
+        self.assertNotEqual(first['revision'], second['revision'])
+        self.assertEqual(store.service('pi-web-hub')['policy_hash'], execution_policy_hash)
+
+        # Persist the new incident across reopening the real Gate/SQLite store.
+        self.gate.close()
+        self.gate = Gate(self.directory, self.boundary, policy=POLICY)
+        self.boundary.store = self.gate.store
+        self.http.gate = self.admin.gate = self.gate
+        reopened = next(p for p in self.listing()['policies'] if p['kind'] == 'service')
+        self.assertEqual(reopened['revision'], second['revision'])
+        delayed = {**first_resume, 'decision_id': 'b' * 32}
+        self.assertEqual(self.post('resume', delayed)[0], 409)
+        self.assertEqual(self.post('resume', first_resume), (200, original_receipt))
+        self.assertEqual(self.gate.store.service('pi-web-hub')['failures'], 3)
+        self.assertTrue(self.gate.store.service('pi-web-hub')['paused'])
+        self.assertEqual(self.gate.store.service('pi-web-hub')['policy_hash'], execution_policy_hash)
+        fresh = dict(id=reopened['id'], revision=reopened['revision'], decision_id='c' * 32)
+        self.assertEqual(self.post('resume', fresh)[1]['status'], 'recorded')
+        self.assertFalse(self.gate.store.service('pi-web-hub')['paused'])
+
+    def test_long_pinned_image_identity_survives_lookup_overview_and_receipt(self):
+        for repository_length in (198, 255):
+            with self.subTest(repository_length=repository_length):
+                repository = 'ghcr.io/' + 'a' * (repository_length - len('ghcr.io/'))
+                image = repository + '@sha256:' + 'b' * 64
+                identifier = 'image-' + str(repository_length)
+                self.gate.store.register_service(image_service(identifier=identifier, target=identifier,
+                                                               repository=repository, mode='manual'))
+                job = self.gate.submit({'service': identifier, 'image': image})
+                self.assertEqual(len(image), 270 if repository_length == 198 else 327)
+                task = self.task('deployment', job['id'])
+                self.assertEqual(task.get('image'), image)
+                self.assertIn('approve', task['actions'])
+                overview = next(t for t in self.listing()['tasks'] if t['id'] == job['id'])
+                self.assertEqual(overview['image'], image)
+                body = self.decision(task, 'approve')
+                code, receipt = self.post('decisions', body)
+                self.assertEqual(code, 200, receipt)
+                self.assertEqual(receipt['status'], 'recorded')
+                self.assertEqual(receipt['task']['image'], image)
+                self.finish()
+                self.assertEqual(self.gate.store.get(job['id'])['status'], 'deployed')
+                self.assertEqual(self.task('deployment', job['id'])['image'], image)
+                self.assertEqual(self.post('decisions', body), (200, receipt))
+
+    def test_redacted_image_identity_does_not_advertise_execution(self):
+        self.gate.store.register_service(image_service(mode='manual'))
+        # A digest matching a credential must remain redacted, even with the larger bound.
+        image = 'ghcr.io/acme/widget@sha256:' + self.gate.hub_management_token
+        job = self.gate.submit({'service': 'widget', 'image': image})
+        task = self.task('deployment', job['id'])
+        self.assertNotIn('image', task)
+        self.assertEqual(task['actions'], ['reject'])
+        self.assertNotIn(self.gate.hub_management_token, json.dumps(task))
+        self.assertEqual(self.post('decisions', self.decision(task, 'approve'))[0], 409)
+
     def test_full_runtime_release_fence_is_kept(self):
         job = self.runtime()
         manager = self.gate.runtime_updates

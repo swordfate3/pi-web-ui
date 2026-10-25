@@ -222,6 +222,7 @@ class Store:
                     service = _copy(normalized)
                     service.update(
                         revision=revision,
+                        management_generation=(existing.get('management_generation', 0) if existing else 0) + 1,
                         policy_hash=_service_hash(normalized, revision),
                         paused=bool(existing.get('paused', False)) if existing else False,
                         failures=int(existing.get('failures', 0)) if existing else 0,
@@ -253,6 +254,7 @@ class Store:
                     service = _copy(definition)
                     service.update(
                         revision=1,
+                        management_generation=1,
                         policy_hash=_service_hash(definition, 1),
                         paused=False,
                         failures=0,
@@ -291,6 +293,7 @@ class Store:
                 previous = service['mode']
                 service['mode'] = mode
                 service['revision'] += 1
+                service['management_generation'] = service.get('management_generation', 0) + 1
                 service['policy_hash'] = _service_hash(service, service['revision'])
                 self._save_service(service)
                 self._append_event(
@@ -308,6 +311,7 @@ class Store:
                 was_paused = bool(service.get('paused', False))
                 service['failures'] = 0
                 service['paused'] = False
+                service['management_generation'] = service.get('management_generation', 0) + 1
                 self._save_service(service)
                 self._append_event(
                     'service_resumed', identifier, previous_failures=previous_failures,
@@ -327,6 +331,10 @@ class Store:
     def _record_result(self, identifier, success, **metadata):
         # Caller owns the write transaction, including any per-job marker.
         service = self._service(identifier)
+        # Management revisions must distinguish repeated pause/resume incidents.
+        # Keep this out of _service_hash/_service_snapshot so result accounting
+        # does not revoke an otherwise unchanged executor policy or pinned plan.
+        service['management_generation'] = service.get('management_generation', 0) + 1
         if success:
             service['failures'] = 0
         else:

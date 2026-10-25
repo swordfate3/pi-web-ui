@@ -21,6 +21,7 @@ TASK_LIMIT = 512
 POLICY_LIMIT = 128
 RECEIPT_LIMIT = 2048
 RESPONSE_LIMIT = 1024 * 1024
+IMAGE_LIMIT = 512  # Coordinated Hub field bound; valid repository+digest is at most 327.
 
 
 def credential(directory, other_tokens):
@@ -140,8 +141,13 @@ class HubManagement:
                   'target': self._label(target, 'unavailable'), 'actions': actions}
         for field in ('version', 'commit', 'image', 'plan_hash'):
             value = raw.get(field)
-            if isinstance(value, str) and self._label(value, ''):
+            maximum = IMAGE_LIMIT if field == 'image' else 256
+            if isinstance(value, str) and self._label(value, '', maximum):
                 result[field] = value
+        if kind == 'deployment' and 'image' in raw and 'image' not in result:
+            # A hash cannot replace the human-reviewable pinned image identity.
+            # Redaction must not leave an executable decision advertised.
+            result['actions'] = [action for action in actions if action == 'reject']
         # Deployment's historical timestamp is seconds; wire timestamps are ms.
         created = raw.get('created_at', raw.get('created', 0) * 1000)
         if type(created) is int and 0 <= created <= 2 ** 53 - 1:

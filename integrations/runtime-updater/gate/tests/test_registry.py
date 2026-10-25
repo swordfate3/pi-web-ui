@@ -416,6 +416,28 @@ class StoreRegistryTest(unittest.TestCase):
         self.assertFalse(resumed['paused'])
         self.assertEqual(resumed['policy_hash'], stable_hash)
 
+    def test_management_generation_is_durable_without_changing_execution_policy(self):
+        service = self.register_image()
+        policy_hash = service['policy_hash']
+        last_generation = service.get('management_generation', 0)
+        operations = (
+            lambda: self.store.record_result('widget', False),
+            lambda: self.store.record_result('widget', True),
+            lambda: self.store.resume_service('widget'),
+        )
+        for operation in operations:
+            service = operation()
+            self.assertGreater(service.get('management_generation', 0), last_generation)
+            last_generation = service['management_generation']
+            self.assertEqual(service['policy_hash'], policy_hash)
+        # Re-registering a trusted definition must not reset its private generation.
+        service = self.register_image()
+        self.assertGreaterEqual(service['management_generation'], last_generation)
+        self.store.close()
+        self.store = Store(Path(self.tmp.name))
+        self.addCleanup(self.store.close)
+        self.assertEqual(self.store.service('widget')['management_generation'], service['management_generation'])
+
     def test_service_id_is_validated_before_registry_sql(self):
         self.register_image()
         operations = (

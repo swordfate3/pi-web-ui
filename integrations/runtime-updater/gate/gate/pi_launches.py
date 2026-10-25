@@ -320,6 +320,8 @@ class PiLaunches:
     def _update(self, key, **fields):
         with self.store.lock, self.store._write_transaction():
             job = self._get(key)
+            if all(name in job and job[name] == value for name, value in fields.items()):
+                return job
             job.update(fields, updated_at=int(time.time() * 1000))
             self.store.db.execute('UPDATE pi_launch_jobs SET data=? WHERE id=?', (_json(job), key))
             return job

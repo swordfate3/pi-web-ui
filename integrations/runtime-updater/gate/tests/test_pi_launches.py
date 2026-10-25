@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -130,6 +131,31 @@ class LaunchesTest(unittest.TestCase):
         self.gate = Gate(self.base / 'state', launch_policy=self.policy)
         self.assertEqual(self.gate.pi_launches.get(first['id']), first)
         self.assertEqual(self.gate.pi_launches.jobs(), {'jobs': [first]})
+
+    def test_repeated_running_observations_preserve_transition_time_beyond_one_minute(self):
+        m = self.enable()
+        with patch('gate.pi_launches.time.time', return_value=1000):
+            job = m.submit(self.request_value(m))
+        with patch('gate.pi_launches.time.time', return_value=1001):
+            m._update(job['id'], status='running', stage='running', container_id='c' * 64)
+        observed = {'Id': 'c' * 64, 'State': {'Running': True, 'Status': 'running'}}
+        engine = SimpleNamespace(observe=lambda _: observed)
+        with patch.object(m, '_engine', return_value=engine):
+            for now in range(1006, 1072, 5):
+                with patch('gate.pi_launches.time.time', return_value=now):
+                    m._poll(m._get(job['id']))
+                self.assertEqual(m.get(job['id'])['updated_at'], 1001000)
+        self.assertGreater(1071000 - m.get(job['id'])['updated_at'], 60000)
+        with patch('gate.pi_launches.time.time', return_value=1072):
+            m._update(job['id'], status='recovery_required')
+        self.assertEqual(m.get(job['id'])['updated_at'], 1072000)
+        with patch.object(m, '_engine', return_value=engine), patch('gate.pi_launches.time.time', return_value=1080):
+            m._poll(m._get(job['id']))
+        self.assertEqual(m.get(job['id'])['updated_at'], 1080000)
+        self.assertEqual(m.get(job['id'])['status'], 'running')
+        self.gate.close()
+        self.gate = Gate(self.base / 'state', launch_policy=self.policy)
+        self.assertEqual(self.gate.pi_launches.get(job['id'])['updated_at'], 1080000)
 
     def test_changed_directory_or_policy_revision_refused(self):
         m = self.enable()

@@ -27,7 +27,13 @@ class Element {
   }
 }
 function fixture(
-  options: { lose?: boolean; storageFails?: boolean; confirm?: boolean; storage?: Map<string, string> } = {},
+  options: {
+    lose?: boolean;
+    storageFails?: boolean;
+    confirm?: boolean;
+    storage?: Map<string, string>;
+    now?: () => number;
+  } = {},
 ) {
   const elements = new Map<string, Element>();
   const get = (id: string) => {
@@ -45,7 +51,7 @@ function fixture(
     URL,
     URLSearchParams,
     Uint8Array,
-    Date,
+    Date: options.now ? { now: options.now } : Date,
     document: { createElement: () => new Element(), querySelector: () => ({ content: "https://chat.example/" }) },
     auth: { authorized: true, gateManagementAvailable: true },
     authGeneration: 0,
@@ -337,4 +343,37 @@ test("only exact chat-origin session routes become clickable launch links", asyn
   f.setJob({ ...base, sessionUrl });
   await f.launchPi.poll();
   assert.equal(f.get("launch-jobs").children[0].children.at(-1)?.href, sessionUrl);
+});
+
+test("repeated running observations age registration help and an exact registered link wins", async () => {
+  let now = 1001000;
+  const f = fixture({ now: () => now });
+  const job = {
+    id: "c".repeat(32),
+    run_id: "d".repeat(32),
+    path: "pi_projects",
+    label: "等待登记",
+    status: "running",
+    stage: "running",
+    created_at: 1000000,
+    updated_at: 1001000,
+  };
+  const text = () =>
+    f
+      .get("launch-jobs")
+      .children[0].children.map((node) => node.textContent)
+      .join(" ");
+  for (now = 1001000; now <= 1071000; now += 5000) {
+    f.setJob({ ...job });
+    await f.launchPi.poll();
+    assert.equal(text().includes("登记等待较久"), now - job.updated_at > 60000);
+    assert.ok(text().includes(job.id));
+  }
+  const sessionUrl = `https://chat.example/s/${"a".repeat(32)}/`;
+  f.setJob({ ...job, sessionUrl });
+  await f.launchPi.poll();
+  assert.equal(text().includes("登记等待较久"), false);
+  assert.match(text(), /会话已登记，可以进入/);
+  assert.equal(f.get("launch-jobs").children[0].children.at(-1)?.href, sessionUrl);
+  assert.equal(f.calls.filter((call) => call.body).length, 0);
 });

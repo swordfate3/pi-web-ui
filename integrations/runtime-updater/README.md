@@ -116,6 +116,147 @@ the validation report. Recovery/fault-injection coverage is scheduler/transport 
 coverage, not a real daemon-crash or power-loss experiment.
 Cleanup must use recorded exact test resource identities; do not use broad prune commands.
 
+## Restricted Hub Pi launches
+
+This opt-in capability lets the trusted Hub management page request a new detached
+Pi using an existing directory below one administrator-selected root. Gate owns
+Docker execution; Hub and Pi receive neither the Docker socket nor the Gate admin
+socket. No host shell, `.bashrc`, `.env`, browser-specified command, image, environment
+or arbitrary mount is evaluated. Updating the extension alone does not enable it.
+
+### One-time administrator setup
+
+1. Keep the existing dedicated `gateManagement` credential and management-origin
+   authentication. The ordinary request/lifecycle token cannot browse or launch.
+2. Choose the deployment root `$HOME/gitproject` and initial `pi_projects`.
+   Existing directories only; do not expose the entire home or host filesystem.
+3. Under the private pi-docker runtime/config area, create **separate** profile and
+   per-launch credential directories, outside the selectable project root and Gate
+   state, mode0700, owned by Gate's effective UID. Install the JSON policy directly
+   inside the profile directory, mode0600, same owner, no symlinks or hardlinks.
+4. Gate must see the selectable root read-only **at the same absolute path as the
+   Docker daemon**, plus the private per-launch credential directory read/write at
+   its same absolute path. The profile and optional model source are read-only.
+   Gate writes only the exact per-launch credential; Docker binds that file into Pi.
+5. Provide an existing dedicated export directory inside the Hub, separate from
+   the config parent, mode0700 owned by UID1000. Do not put exports in the shared Pi
+   home or project. Keep Hub config/state private and its registry volume separate.
+6. Resolve the **full immutable image IDs** for the normal Pi image and running
+   Hub image, and the **full running Hub container ID**. Fill the policy below with
+   those identities and existing local volume names. The engine does not create or
+   populate runtime/home volumes; use the normal prepared runtime volumes.
+7. Start the upgraded Gate with its existing arguments plus
+   `--launch-policy /absolute/private/profile/launch.json`. Persist that option and
+   the narrowly scoped mounts in the administrator's Compose configuration. No
+   production Compose configuration is changed by installing this package.
+8. Confirm `launch-config.enabled=true` through the authenticated management page,
+   then test a noncritical directory. Pi runs as1000:1000 with cap-dropALL and
+   no-new-privileges. Existing active sessions do not need to be stopped.
+
+The example is a schema template, **not a runnable configuration**: replace path,
+image and container placeholders using trusted host values. Do not include secrets
+in screenshots, chat or tracked policy files.
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "root": "/absolute/home/gitproject",
+  "root_label": "gitproject",
+  "default_path": "pi_projects",
+  "profile_root": "/absolute/private/profile",
+  "credential_root": "/absolute/private/launch-credentials",
+  "pi_image": "sha256:<64 lowercase hex>",
+  "hub_image": "sha256:<64 lowercase hex>",
+  "hub_container": "<64 lowercase hex>",
+  "gate_provenance": {
+    "mode": "container",
+    "container": "<full running Gate container ID>",
+    "image": "sha256:<immutable Gate image ID>"
+  },
+  "hub_config": "/hub/private/config.json",
+  "hub_export_root": "/hub/exports",
+  "volumes": {
+    "home": "pi-user-home",
+    "runtime": "pi-runtime",
+    "config": "pi-home",
+    "credentials": "pi-credentials",
+    "cache": "pi-huggingface-cache",
+    "hub_runtime": "pi-web-hub-runtime"
+  },
+  "environment": {},
+  "auxiliary_binds": []
+}
+```
+
+All fields except `auxiliary_binds` are required. Unknown fields fail closed.
+For a containerized Gate, `gate_provenance` pins its own running container and
+image. The engine resolves Gate's mounted private state/profile back to daemon
+volume/bind sources and excludes those entire backing mounts from every Pi mount.
+Unmapped/writable-layer private state and ambiguous backing paths fail closed.
+For a Gate genuinely running directly on the Docker host, use only
+`{"mode":"host"}` instead: this is an explicit trusted-administrator assertion
+that Gate state/profile and the daemon share absolute path coordinates, not a
+workaround for container path translation. Never use host mode for a Gate container.
+`environment` allows only the documented proxy names, `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `HF_TOKEN`, and the fixed model-sync path; no shell/loader/runtime
+identity overrides. Prefer the existing credential mechanisms over new secret values.
+An optional single readonly bind with exact keys
+`{"source":"/absolute/model-config","target":"/run/cc-switch-pi-models","read_only":true}`
+enables host-backed model configuration; the engine supplies
+`PI_CC_SWITCH_MODELS_DIR=/run/cc-switch-pi-models`. Its source is no-follow,
+revision-bound, outside project/private/system roots, and cannot alias Hub mounts.
+No SSH, Docker or arbitrary auxiliary bind is supported in this first profile.
+
+Recreating/upgrading Hub or Gate changes its immutable container/image identity: update
+the private profile from the trusted host before permitting new launches. A stale
+profile fails closed. Preserve old matching policy/credentials for recovery; do
+not blindly edit a profile while it has unresolved side effects. A running Pi does
+not monopolize Gate admission: ordinary deployments/runtime updates/restarts retain
+priority over background launch status polling.
+
+### Recovery and boundaries
+
+`queued`, `starting`, `running`, `exited`, `failed`, `recovery_required` are separate
+states. An unknown grant/create/start/delete result is never automatically retried.
+Use the original job ID and trusted Gate state to inspect before intervening; this
+release does not provide a general arbitrary recovery/delete endpoint. Grant
+history is retained. Exited owned containers and verified temporary credentials
+are cleaned without deleting volumes or projects. Stable Pi lifetime is independent
+of Hub/Gate/browser lifetime; no auto-restart after host/Docker restart is promised.
+
+Limits:16live/unresolved jobs,256retained jobs,200directories per page and4096scanned
+entries. At the conservative scan ceiling the request fails409, not an incomplete
+page. Full job storage refuses new work; no eviction or hidden cleanup. Shared
+writable home/runtime/config volumes retain existing shared-state implications.
+Path checks are an HTTP selection boundary, not protection against a malicious host,
+daemon or same-UID concurrent filesystem attacker; Docker later resolves bind paths.
+
+### Disposable launch verification
+
+Focused Gate tests use real filesystem/SQLite/HTTP and a recording Unix Docker
+boundary; `tests/hub-launch-live.test.ts` verifies real temporary Hub→Gate protocol.
+`e2e/hub-launches.visual.ts` is synthetic rendered desktop/phone validation, not E2E.
+The separate real launch harness requires explicit opt-in and immutable **test**
+images. It creates unique `pi-launch-test-<random>-*` resources only, seeds a synthetic
+Pi configuration with an image-owned faux provider, launches detached, checks real
+Hub registration, duplicate submission and owned exit cleanup, then removes only
+its exact created resources. No model/API request or production mount is used.
+
+```sh
+PI_REAL_DOCKER_TEST=1 \
+PI_LAUNCH_TEST_IMAGE=sha256:<dedicated-Pi-test-image-id> \
+PI_LAUNCH_TEST_HUB_IMAGE=sha256:<compatible-Hub-test-image-id> \
+PYTHONDONTWRITEBYTECODE=1 \
+python3 integrations/runtime-updater/tests/real_launch_acceptance.py
+```
+
+The test Pi image must contain the image-owned mirror extension and
+`e2e/fixtures/runtime-update-provider.ts`, as in `tests/Dockerfile.acceptance`.
+Evidence is under `.tmp/launch-acceptance/<namespace>/`; a failed daemon call is
+not proof that its resource was never created. Check deterministic names before
+cleanup and never use a global prune command.
+
 Offline bootstrap regressions (no Docker resources are created):
 
 ```sh

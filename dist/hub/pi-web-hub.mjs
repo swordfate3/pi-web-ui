@@ -632,11 +632,11 @@ function lifecycleConfig(value) {
 		credentialFile: v.credentialFile
 	};
 }
-var hex$5, text$1, GateLifecycle;
+var hex$6, text$2, GateLifecycle;
 var init_lifecycle = __esmMin((() => {
 	init_config();
-	hex$5 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
-	text$1 = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
+	hex$6 = (v) => typeof v === "string" && /^[a-f0-9]{32}$/.test(v);
+	text$2 = (v) => typeof v === "string" && v.length > 0 && v.length <= 256 && !/\p{Cc}/u.test(v);
 	GateLifecycle = class {
 		config;
 		constructor(config) {
@@ -691,13 +691,13 @@ var init_lifecycle = __esmMin((() => {
 			});
 		}
 		async target(runId) {
-			if (!hex$5(runId)) throw new Error("Invalid lifecycle identity");
+			if (!hex$6(runId)) throw new Error("Invalid lifecycle identity");
 			const value = await this.request("GET", `/v1/pi-lifecycle/runs/${runId}`);
 			if (value.managed === false) return {
 				managed: false,
 				...value.reason === "source_evidence_unavailable" ? { reason: "source_evidence_unavailable" } : {}
 			};
-			if (value.managed !== true || value.run_id !== runId || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id) || !text$1(value.version) || typeof value.idle !== "boolean" || typeof value.pending !== "boolean" || typeof value.busy !== "boolean" || ![
+			if (value.managed !== true || value.run_id !== runId || !text$2(value.runtime_id) || !text$2(value.session_id) || value.leaf_id !== null && !text$2(value.leaf_id) || !text$2(value.version) || typeof value.idle !== "boolean" || typeof value.pending !== "boolean" || typeof value.busy !== "boolean" || ![
 				"auto",
 				"manual",
 				"disabled"
@@ -716,7 +716,7 @@ var init_lifecycle = __esmMin((() => {
 			};
 		}
 		job(value) {
-			if (!hex$5(value.id) || !hex$5(value.run_id) || typeof value.status !== "string" || ![
+			if (!hex$6(value.id) || !hex$6(value.run_id) || typeof value.status !== "string" || ![
 				"pending",
 				"queued",
 				"running",
@@ -745,23 +745,23 @@ var init_lifecycle = __esmMin((() => {
 				"expected_version",
 				"new_version"
 			]) if (value[key] !== void 0) {
-				if (!text$1(value[key])) throw new Error("Invalid lifecycle result");
+				if (!text$2(value[key])) throw new Error("Invalid lifecycle result");
 				result[key] = value[key];
 			}
 			if (value.leaf_id !== void 0) {
-				if (value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle result");
+				if (value.leaf_id !== null && !text$2(value.leaf_id)) throw new Error("Invalid lifecycle result");
 				result.leaf_id = value.leaf_id;
 			}
 			return result;
 		}
 		async restart(value) {
-			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$5(value.run_id) || !hex$5(value.idempotency_key) || !text$1(value.runtime_id) || !text$1(value.session_id) || value.leaf_id !== null && !text$1(value.leaf_id)) throw new Error("Invalid lifecycle request");
+			if (Object.keys(value).sort().join(",") !== "idempotency_key,leaf_id,run_id,runtime_id,session_id" || !hex$6(value.run_id) || !hex$6(value.idempotency_key) || !text$2(value.runtime_id) || !text$2(value.session_id) || value.leaf_id !== null && !text$2(value.leaf_id)) throw new Error("Invalid lifecycle request");
 			const result = this.job(await this.request("POST", "/v1/pi-lifecycle/restarts", value));
 			if (result.run_id !== value.run_id) throw new Error("Lifecycle target changed");
 			return result;
 		}
 		async operation(id) {
-			if (!hex$5(id)) throw new Error("Invalid lifecycle identity");
+			if (!hex$6(id)) throw new Error("Invalid lifecycle identity");
 			const job = this.job(await this.request("GET", `/v1/pi-lifecycle/restarts/${id}`));
 			if (job.id !== id) throw new Error("Lifecycle operation changed");
 			return job;
@@ -938,14 +938,14 @@ function gatewayIdentity(config, request) {
 init_config();
 init_state_budget();
 var digest = (value) => createHash("sha256").update(value).digest("hex");
-var hex$4 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var hex$5 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
 var equal$1 = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 var stateFile = (config) => path.join(config.stateDir, "management.json");
 function readState(config) {
 	const file = stateFile(config);
 	if (!existsSync(file)) return void 0;
 	const value = readPrivateJson(file);
-	if (!hex$4(value.epoch, 64) || value.pairHash !== null && !hex$4(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
+	if (!hex$5(value.epoch, 64) || value.pairHash !== null && !hex$5(value.pairHash, 64) || !Number.isSafeInteger(value.expires) || !Number.isInteger(value.failures) || value.failures < 0 || value.failures > 10) throw new Error("Management state unavailable");
 	return value;
 }
 function saveState(writer, value, security = false) {
@@ -995,7 +995,7 @@ var HubManagement = class {
 		const values = (request.headers.cookie ?? "").split(";").map((item) => item.trim()).filter((item) => item.startsWith(`${this.cookieName}=`));
 		if (values.length !== 1) return void 0;
 		const token = values[0].slice(this.cookieName.length + 1);
-		if (!hex$4(token, 64)) return void 0;
+		if (!hex$5(token, 64)) return void 0;
 		const key = digest(token);
 		const session = this.sessions.get(key);
 		let state;
@@ -1024,7 +1024,7 @@ var HubManagement = class {
 	authorize(request, write = false) {
 		const session = this.session(request);
 		const csrf = request.headers["x-pi-hub-csrf"];
-		if (!session || write && (typeof csrf !== "string" || !hex$4(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Management authorization required");
+		if (!session || write && (typeof csrf !== "string" || !hex$5(csrf, 64) || !equal$1(csrf, session.csrf))) throw new Error("Management authorization required");
 		return session;
 	}
 	revalidate(request, expected, write = false) {
@@ -1036,7 +1036,7 @@ var HubManagement = class {
 		return withStateWriter(this.config, (writer) => {
 			const state = readState(this.config);
 			if (!state || !state.pairHash || state.expires <= this.now() || state.failures >= 10) throw new Error("Management unlock rejected");
-			if (!hex$4(code, 32) || !equal$1(digest(code), state.pairHash)) {
+			if (!hex$5(code, 32) || !equal$1(digest(code), state.pairHash)) {
 				saveState(writer, {
 					...state,
 					failures: state.failures + 1
@@ -1232,7 +1232,7 @@ function proxySessionResponse(request, response, upstream, resource) {
 init_hub_generation();
 init_config();
 var ZERO = "0000000000000000";
-var hex$3 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
+var hex$4 = (value, length) => typeof value === "string" && new RegExp(`^[a-f0-9]{${length}}$`).test(value);
 var RegistryError = class extends Error {
 	code;
 	constructor(code = "ENDED_GENERATION") {
@@ -1241,7 +1241,7 @@ var RegistryError = class extends Error {
 	}
 };
 var relative = (runId) => {
-	if (!hex$3(runId, 32)) throw new RegistryError("AUTH_FAILED");
+	if (!hex$4(runId, 32)) throw new RegistryError("AUTH_FAILED");
 	return `bounded/${runId}.json`;
 };
 var hasBoundedRecord = (config, runId) => existsSync(path.join(config.stateDir, relative(runId)));
@@ -1255,10 +1255,10 @@ function boundedRecord(config, runId, boot) {
 		revision: 0
 	};
 	const value = readPrivateJson(file);
-	if (value.schema !== 2 || value.run_id !== runId || !hex$3(value.boot, 32) || !hex$3(value.slot, 16) || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new RegistryError("STATE_UNAVAILABLE");
+	if (value.schema !== 2 || value.run_id !== runId || !hex$4(value.boot, 32) || !hex$4(value.slot, 16) || !Number.isSafeInteger(value.revision) || value.revision < 0) throw new RegistryError("STATE_UNAVAILABLE");
 	for (const tuple of [value.current, value.pending]) {
 		if (tuple === void 0) continue;
-		if (!isBoundedGeneration(tuple.generation) || !tuple.generation.startsWith(`b2-${value.boot}-`) || tuple.generation.split("-")[2] > value.slot || !hex$3(tuple.request_id, 32) || !Number.isInteger(tuple.port) || tuple.port < 1 || tuple.port > 65535 || !Number.isSafeInteger(tuple.expires)) throw new RegistryError("STATE_UNAVAILABLE");
+		if (!isBoundedGeneration(tuple.generation) || !tuple.generation.startsWith(`b2-${value.boot}-`) || tuple.generation.split("-")[2] > value.slot || !hex$4(tuple.request_id, 32) || !Number.isInteger(tuple.port) || tuple.port < 1 || tuple.port > 65535 || !Number.isSafeInteger(tuple.expires)) throw new RegistryError("STATE_UNAVAILABLE");
 	}
 	return value.boot === boot ? value : {
 		schema: 2,
@@ -1274,7 +1274,7 @@ function saveBounded(writer, record, security = false) {
 	writer.write(relative(record.run_id), record, { security });
 }
 function issueBounded(writer, record, value, live) {
-	if (value.boot !== record.boot || !hex$3(value.slot, 16) || !hex$3(value.request_id, 32) || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new RegistryError("ISSUANCE_STALE");
+	if (value.boot !== record.boot || !hex$4(value.slot, 16) || !hex$4(value.request_id, 32) || !Number.isInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535) throw new RegistryError("ISSUANCE_STALE");
 	const now = Date.now();
 	const result = (tuple) => ({
 		generation: tuple.generation,
@@ -1418,6 +1418,106 @@ var ForwardQueue = class {
 		this.deadline = void 0;
 	}
 };
+//#endregion
+//#region hub/pi-launches.ts
+var hex$3 = (v, n) => typeof v === "string" && new RegExp(`^[a-f0-9]{${n}}$`).test(v);
+var object$2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var text$1 = (v, limit) => typeof v === "string" && v.length > 0 && v.length <= limit && !/[\p{Cc}\p{Cs}]/u.test(v);
+var workspacePath = (v) => typeof v === "string" && v.length <= 1024 && !/[\\\p{Cc}\p{Cs}]/u.test(v) && (v === "" || v.split("/").every((part) => !!part && part !== "." && part !== ".."));
+var basename = (v) => text$1(v, 255) && v !== "." && v !== ".." && !/[\\/]/u.test(v);
+function workspaceQuery(query) {
+	if ([...query.keys()].some((key) => !["path", "cursor"].includes(key)) || query.getAll("path").length > 1 || query.getAll("cursor").length > 1) throw new Error("Invalid workspace query");
+	const path = query.get("path") ?? "";
+	const cursor = query.get("cursor");
+	if (!workspacePath(path) || cursor !== null && !basename(cursor)) throw new Error("Invalid workspace path");
+	const safe = new URLSearchParams({ path });
+	if (cursor !== null) safe.set("cursor", cursor);
+	return `?${safe}`;
+}
+function launchRequest(value) {
+	if (Object.keys(value).sort().join(",") !== "id,label,path,policy_revision,workspace_revision" || !hex$3(value.id, 32) || !hex$3(value.policy_revision, 64) || !hex$3(value.workspace_revision, 64) || !workspacePath(value.path) || !text$1(value.label, 80) || value.label.trim() !== value.label) throw new Error("Invalid exact launch request");
+}
+function job$1(value) {
+	if (!object$2(value) || !hex$3(value.id, 32) || !workspacePath(value.path) || !text$1(value.label, 80) || ![
+		"queued",
+		"starting",
+		"running",
+		"exited",
+		"failed",
+		"recovery_required"
+	].includes(String(value.status)) || typeof value.stage !== "string" || !/^[a-z][a-z0-9_]{0,95}$/.test(value.stage) || !Number.isSafeInteger(value.created_at) || Number(value.created_at) < 0 || !Number.isSafeInteger(value.updated_at) || Number(value.updated_at) < 0 || value.run_id !== void 0 && !hex$3(value.run_id, 32)) throw new Error("Invalid launch response");
+	return {
+		id: value.id,
+		path: value.path,
+		label: value.label,
+		status: String(value.status),
+		stage: value.stage,
+		created_at: Number(value.created_at),
+		updated_at: Number(value.updated_at),
+		...value.run_id === void 0 ? {} : { run_id: value.run_id }
+	};
+}
+function compareNames(a, b) {
+	const left = Array.from(a, (char) => char.codePointAt(0));
+	const right = Array.from(b, (char) => char.codePointAt(0));
+	for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i] - right[i];
+	return left.length - right.length;
+}
+function launchResponse(suffix, value, method = "GET") {
+	if (suffix === "/launch-config") {
+		if (!object$2(value) || typeof value.enabled !== "boolean" || !text$1(value.rootLabel, 80) || !workspacePath(value.defaultPath) || !hex$3(value.revision, 64) || !Number.isSafeInteger(value.maxActive) || Number(value.maxActive) < 1 || Number(value.maxActive) > 16) throw new Error("Invalid launch configuration");
+		return {
+			enabled: value.enabled,
+			rootLabel: value.rootLabel,
+			defaultPath: value.defaultPath,
+			revision: value.revision,
+			maxActive: value.maxActive
+		};
+	}
+	if (suffix.startsWith("/workspaces?")) {
+		const query = new URLSearchParams(suffix.split("?")[1]);
+		const selected = query.get("path") ?? "";
+		const cursor = query.get("cursor");
+		const expectedParent = selected === "" ? null : selected.split("/").slice(0, -1).join("/");
+		if (!object$2(value) || value.path !== selected || value.parent !== expectedParent || !hex$3(value.revision, 64) || !Array.isArray(value.entries) || value.entries.length > 200 || typeof value.truncated !== "boolean" || value.nextCursor !== void 0 && !basename(value.nextCursor)) throw new Error("Invalid workspace listing");
+		const entries = value.entries.map((entry) => {
+			if (!object$2(entry) || !basename(entry.name) || entry.path !== `${selected ? `${selected}/` : ""}${entry.name}`) throw new Error("Invalid directory child");
+			return {
+				name: entry.name,
+				path: entry.path
+			};
+		});
+		if (entries.some((entry, index) => cursor !== null && compareNames(entry.name, cursor) <= 0 || index > 0 && compareNames(entry.name, entries[index - 1].name) <= 0) || value.truncated && (!entries.length || value.nextCursor !== entries.at(-1)?.name) || !value.truncated && value.nextCursor !== void 0) throw new Error("Invalid directory pagination");
+		return {
+			path: selected,
+			parent: expectedParent,
+			revision: value.revision,
+			entries,
+			truncated: value.truncated,
+			...value.nextCursor === void 0 ? {} : { nextCursor: value.nextCursor }
+		};
+	}
+	if (suffix === "/launches" && method === "GET") {
+		if (!object$2(value) || !Array.isArray(value.jobs)) throw new Error("Invalid launch list");
+		if (value.jobs.length > 256) throw new Error("Too many launch records");
+		const jobs = value.jobs.map(job$1);
+		if (new Set(jobs.map((row) => row.id)).size !== jobs.length) throw new Error("Duplicate launch record");
+		return { jobs };
+	}
+	const result = job$1(value);
+	if (suffix.startsWith("/launches/") && suffix !== `/launches/${result.id}`) throw new Error("Wrong launch identity");
+	return result;
+}
+function attachLaunchSessions(value, resolve) {
+	if (!object$2(value)) return value;
+	if (Array.isArray(value.jobs)) return { jobs: value.jobs.map((row) => attachLaunchSessions(row, resolve)) };
+	if (!hex$3(value.run_id, 32) || value.status !== "running") return value;
+	const sessionUrl = resolve(value.run_id);
+	return {
+		...value,
+		...sessionUrl ? { sessionUrl } : {}
+	};
+}
 //#endregion
 //#region hub/gate-management.ts
 init_config();
@@ -1596,6 +1696,13 @@ var GateManagementProvider = class {
 			request.on("error", () => finish(new GateManagementError()));
 			request.end(payload);
 		});
+		if (suffix === "/launch-config" || suffix.startsWith("/workspaces?") || suffix === "/launches" || suffix.startsWith("/launches/")) try {
+			const safe = launchResponse(suffix, data, method);
+			if (value && safe.id !== value.id) throw new Error();
+			return safe;
+		} catch {
+			throw new GateManagementError();
+		}
 		if (suffix === "") {
 			if (!object$1(data) || !Array.isArray(data.tasks) || data.tasks.length > 512 || !Array.isArray(data.policies) || data.policies.length > 128) throw new GateManagementError();
 			return {
@@ -1650,7 +1757,7 @@ async function body$1(request) {
 	if (!object$1(value)) throw new Error();
 	return value;
 }
-function createGateManagementApi(config, management) {
+function createGateManagementApi(config, management, resolveSession = () => void 0) {
 	const provider = config.gateManagement ? new GateManagementProvider(config.gateManagement) : void 0;
 	const prefix = "/api/management/gate";
 	return { async handle(request, response, sameOrigin) {
@@ -1663,14 +1770,16 @@ function createGateManagementApi(config, management) {
 			"X-Content-Type-Options": "nosniff",
 			"Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'"
 		}).end(JSON.stringify(value));
-		const suffix = url.pathname.slice(20);
-		const read = suffix === "" || /^\/tasks\/(deployment|runtime|restart|intent)\/[a-f0-9]{32}$/.test(suffix) || /^\/decisions\/[a-f0-9]{32}$/.test(suffix);
+		let suffix = url.pathname.slice(20);
+		const launchRead = suffix === "/launch-config" || suffix === "/workspaces" || suffix === "/launches" || /^\/launches\/[a-f0-9]{32}$/.test(suffix);
+		const read = launchRead || suffix === "" || /^\/tasks\/(deployment|runtime|restart|intent)\/[a-f0-9]{32}$/.test(suffix) || /^\/decisions\/[a-f0-9]{32}$/.test(suffix);
 		const write = [
 			"/decisions",
 			"/policies",
-			"/resume"
+			"/resume",
+			"/launches"
 		].includes(suffix);
-		if (url.search || !read && !write) {
+		if (url.search && suffix !== "/workspaces" || !read && !write) {
 			reply(404, { error: "Management route not found" });
 			return true;
 		}
@@ -1694,34 +1803,41 @@ function createGateManagementApi(config, management) {
 				reply(503, { error: "Hub approvals are not configured" });
 				return true;
 			}
+			if (suffix === "/workspaces") {
+				phase = "body";
+				suffix += workspaceQuery(url.searchParams);
+			}
 			let value;
 			if (request.method === "POST") {
 				phase = "body";
 				value = await body$1(request);
 				revalidate();
 				phase = "body";
-				if (!hex$2(value.decision_id, 32) || !hex$2(value.revision, 64)) throw new Error();
-				if (suffix === "/decisions") {
-					if (!exact(value, [
-						"kind",
+				if (suffix === "/launches") launchRequest(value);
+				else {
+					if (!hex$2(value.decision_id, 32) || !hex$2(value.revision, 64)) throw new Error();
+					if (suffix === "/decisions") {
+						if (!exact(value, [
+							"kind",
+							"id",
+							"revision",
+							"action",
+							"decision_id"
+						]) || !kinds.includes(String(value.kind)) || !hex$2(value.id, 32) || !actions.includes(String(value.action))) throw new Error();
+					} else if (suffix === "/policies") {
+						if (!exact(value, [
+							"kind",
+							"id",
+							"revision",
+							"mode",
+							"decision_id"
+						]) || !policyKinds.includes(String(value.kind)) || !service(value.id) || !modes.includes(String(value.mode))) throw new Error();
+					} else if (!exact(value, [
 						"id",
 						"revision",
-						"action",
 						"decision_id"
-					]) || !kinds.includes(String(value.kind)) || !hex$2(value.id, 32) || !actions.includes(String(value.action))) throw new Error();
-				} else if (suffix === "/policies") {
-					if (!exact(value, [
-						"kind",
-						"id",
-						"revision",
-						"mode",
-						"decision_id"
-					]) || !policyKinds.includes(String(value.kind)) || !service(value.id) || !modes.includes(String(value.mode))) throw new Error();
-				} else if (!exact(value, [
-					"id",
-					"revision",
-					"decision_id"
-				]) || !service(value.id)) throw new Error();
+					]) || !service(value.id)) throw new Error();
+				}
 			}
 			revalidate();
 			let result;
@@ -1732,7 +1848,7 @@ function createGateManagementApi(config, management) {
 				throw error;
 			}
 			revalidate();
-			reply(200, result);
+			reply(200, launchRead ? attachLaunchSessions(result, resolveSession) : result);
 		} catch (error) {
 			const status = phase === "authorization" ? 401 : phase === "body" ? 400 : error instanceof GateManagementError ? error.status : 503;
 			reply(status, { error: status === 401 ? "Management login expired" : status === 400 ? "Exact bounded management request required" : status === 409 ? "Task or policy changed; review current state" : status === 404 ? "Original task or receipt not found" : "Gate unavailable or outcome unknown; query the original decision before retrying" });
@@ -2655,6 +2771,135 @@ var approvalsPortalJs = `
   })();
 `;
 //#endregion
+//#region hub/launch-portal.ts
+init_hub_generation();
+var launchPortalHtml = `<section id="new-pi" class="launch-section" aria-labelledby="launch-title"><div class="runtime-update-heading"><h3 id="launch-title">新建 Pi</h3><button id="launch-refresh" type="button">刷新启动状态</button></div><p>在允许的项目目录中新建独立 Pi。关闭网页不结束会话；不会创建或删除宿主文件夹。</p><p id="launch-status" role="status">解锁管理后可新建 Pi</p><div id="launch-picker" hidden><div class="controls"><button id="launch-root" type="button">gitproject 根目录</button><button id="launch-parent" type="button">上一级</button><button id="launch-more" type="button" hidden>更多文件夹</button></div><p id="launch-current" class="launch-path"></p><div id="launch-directories" class="launch-directories" aria-label="可选项目文件夹"></div><form id="launch-form"><label for="launch-name">会话名称</label><div class="controls"><input id="launch-name" type="text" autocomplete="off" maxlength="80" required><button id="launch-start" type="submit" disabled>在此目录启动 Pi</button></div></form></div><p id="launch-result" role="status" aria-live="polite"></p><button id="launch-again" type="button" hidden>再新建一个 Pi</button><div id="launch-jobs" aria-live="polite"></div></section>`;
+var launchPortalCss = `.launch-section{border-top:1px solid #dce5d7;margin-top:20px;padding-top:18px}.launch-path,.launch-job p{overflow-wrap:anywhere}.launch-path{padding:10px 12px;border:1px solid #dce5d7;border-radius:9px;background:#f7faf5;font-family:ui-monospace,monospace;font-size:12px}.launch-directories{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;max-height:260px;overflow:auto;margin:12px 0}.launch-directories button{text-align:left;overflow-wrap:anywhere}.launch-job{padding:12px;margin-top:12px;border:1px solid #dce5d7;border-radius:12px;background:#fbfcfa}.launch-job h4{margin:0}.launch-job p{margin:6px 0}.launch-job .open{display:inline-block;margin-top:6px}#launch-result{color:#815725}@media(max-width:600px){.launch-directories{grid-template-columns:1fr}.launch-section .controls{flex-direction:column;align-items:stretch}.launch-section .controls>*{width:100%;max-width:none}}`;
+var launchPortalJs = `
+  const launchPi = (() => {
+    let config, directory, jobs = [], loading, browsing = false, sequence = 0, sending = false, result = '', pending, known = false;
+    const requestStorageKey = 'pi-hub-launch';
+    const receiptStorageKey = 'pi-hub-launch-id';
+    const node = (tag, text, cls = '') => { const el = document.createElement(tag); el.textContent = text; el.className = cls; return el; };
+    const recovery = (value) => value && /^[a-f0-9]{32}$/.test(value.id) ? { id:value.id } : undefined;
+    const readStored = (key) => { try { return JSON.parse(sessionStorage.getItem(key) || 'null'); } catch { return undefined; } };
+    const writeStored = (key, value) => { try { sessionStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; } };
+    const removeStored = (key) => { try { sessionStorage.removeItem(key); return true; } catch { return false; } };
+    pending = recovery(readStored(receiptStorageKey));
+    let receiptDurable = !!pending;
+    if (!pending) pending = recovery(readStored(requestStorageKey));
+    const current = (generation) => generation === authGeneration && auth.authorized && !authTransition;
+    const saveReceipt = () => { const receipt = recovery(pending); return !!receipt && writeStored(receiptStorageKey, receipt); };
+    const clearStoredRecovery = () => removeStored(requestStorageKey) && removeStored(receiptStorageKey);
+    const retainRecovery = () => { pending = recovery(pending); if (!pending) return; if (saveReceipt()) receiptDurable = true; if (receiptDurable) removeStored(requestStorageKey); };
+    retainRecovery();
+    function render() {
+      get('launch-picker').hidden = !auth.authorized || !config?.enabled;
+      get('launch-refresh').disabled = !auth.authorized || authTransition || loading === authGeneration;
+      get('launch-start').disabled = !auth.authorized || authTransition || !config?.enabled || !directory || browsing || sending || !!pending;
+      get('launch-parent').disabled = !current(authGeneration) || browsing || !directory || directory.parent === null;
+      get('launch-root').disabled = !current(authGeneration) || browsing;
+      get('launch-more').hidden = !directory?.truncated;
+      get('launch-more').disabled = browsing || authTransition;
+      get('launch-again').hidden = !auth.authorized || !pending || !known;
+      get('launch-again').disabled = sending || authTransition;
+      get('launch-status').textContent = !auth.authorized ? '解锁管理后可新建 Pi' : !auth.gateManagementAvailable ? '新建 Pi 尚未接入：需要配置 Gate 管理能力。' : config && !config.enabled ? '新建 Pi 尚未启用：需管理员一次性配置固定启动模板。' : !config ? '正在检查新建 Pi 能力…' : '仅允许在 ' + config.rootLabel + ' 下选择已有目录，当前上限 ' + config.maxActive + ' 个受管启动。';
+      get('launch-result').textContent = auth.authorized ? result : '';
+      get('launch-jobs').replaceChildren();
+      if (!auth.authorized) return;
+      const statuses = { queued:'已排队', starting:'正在启动', running:'Pi 已运行，等待会话登记', exited:'Pi 已退出', failed:'启动失败，请核对任务', recovery_required:'结果不确定，需管理员核对，不能盲目重试' };
+      for (const job of jobs) {
+        const row = node('article', '', 'launch-job'); row.append(node('h4', job.label), node('p', '目录：' + config?.rootLabel + '/' + job.path), node('p', statuses[job.status] || '结果未知'), node('p', '任务编号：' + job.id + ' · ' + job.stage));
+        if (job.status === 'running' && typeof job.sessionUrl === 'string') {
+          try {
+            const chat = new URL(document.querySelector('meta[name="pi-chat-origin"]').content);
+            const url = new URL(job.sessionUrl);
+            if (url.origin === chat.origin && !url.username && !url.password && !url.search && !url.hash && new RegExp('^/s/${HUB_GENERATION_SOURCE}/$').test(url.pathname)) {
+              row.children[2].textContent = '会话已登记，可以进入'; const link = node('a', '进入会话 ↗', 'open'); link.href = url.href; row.append(link);
+            }
+          } catch {}
+        } else if (job.status === 'running' && Date.now() - job.updated_at > 60000) row.append(node('p', '登记等待较久：请检查 Web 扩展和 Hub 连接；不要重复创建来代替排查。'));
+        get('launch-jobs').append(row);
+      }
+    }
+    function renderDirectory() {
+      get('launch-directories').replaceChildren();
+      get('launch-current').textContent = directory ? config.rootLabel + (directory.path ? '/' + directory.path : '') : '';
+      for (const entry of directory?.entries || []) {
+        const button = node('button', '打开 ' + entry.name); button.type = 'button'; button.disabled = browsing || authTransition;
+        button.addEventListener('click', () => browse(entry.path)); get('launch-directories').append(button);
+      }
+      render();
+    }
+    async function browse(path, cursor) {
+      if (!auth.authorized || authTransition || !config?.enabled || browsing) return;
+      const generation = authGeneration, ticket = ++sequence;
+      browsing = true; renderDirectory();
+      try {
+        const query = new URLSearchParams({ path }); if (cursor) query.set('cursor', cursor);
+        const next = await api('gate/workspaces?' + query);
+        if (!current(generation) || ticket !== sequence) return;
+        if (cursor && directory?.path === next.path && directory.revision === next.revision) next.entries = [...directory.entries, ...next.entries];
+        directory = next;
+        if (!get('launch-name').value) get('launch-name').value = path.split('/').pop() || config.rootLabel;
+        result = '';
+      } catch (error) {
+        if (!current(generation) || error.stale || ticket !== sequence) return;
+        directory = undefined; result = '文件夹不可用或已变化，请重新选择；不会自动创建或扩大目录范围。';
+      } finally { if (ticket === sequence) { browsing = false; if (current(generation)) renderDirectory(); } }
+    }
+    async function poll() {
+      if (!auth.authorized || authTransition || !auth.gateManagementAvailable || loading === authGeneration) { render(); return; }
+      const generation = authGeneration; loading = generation; render();
+      try {
+        const next = await api('gate/launch-config'); if (!current(generation)) return;
+        const previous = config; config = next;
+        if (!config.enabled) { directory = undefined; jobs = []; renderDirectory(); return; }
+        if (!previous) await browse(config.defaultPath);
+        else if (previous.revision !== config.revision) { directory = undefined; result = '启动模板已变化，请重新选择目录并确认。'; renderDirectory(); }
+        if (!current(generation)) return;
+        const data = await api('gate/launches'); if (!current(generation)) return; jobs = data.jobs;
+        if (pending) {
+          try {
+            const original = await api('gate/launches/' + pending.id); if (!current(generation)) return;
+            known = true; if (!jobs.some((job) => job.id === original.id)) jobs.unshift(original);
+          } catch (error) { if (!current(generation) || error.stale) return; known = false; result = '原启动任务尚未确认：' + pending.id + '。仅查询原编号，不会重复提交。'; }
+        }
+      } catch (error) { if (!current(generation) || error.stale) return; config = undefined; jobs = []; directory = undefined; renderDirectory(); result = '新建 Pi 服务暂不可用；没有重新提交任何启动。'; }
+      finally { if (loading === generation) loading = undefined; if (current(generation)) render(); }
+    }
+    get('launch-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!current(authGeneration) || !config?.enabled || !directory || browsing || sending || pending) return;
+      const label = get('launch-name').value.trim(); if (!label || label.length > 80 || /[\\p{Cc}\\p{Cs}]/u.test(label)) { result = '请输入不超过 80 字的有效会话名称。'; render(); return; }
+      const generation = authGeneration;
+      const selected = directory, profile = config;
+      if (!window.confirm('在 ' + profile.rootLabel + '/' + selected.path + ' 新建 Pi？\\n名称：' + label + '\\n将使用固定容器配置。关闭网页不会停止 Pi。')) return;
+      if (!current(generation) || directory !== selected || config !== profile) return;
+      const id = [...crypto.getRandomValues(new Uint8Array(16))].map((v) => v.toString(16).padStart(2,'0')).join('');
+      const request = { id, path:selected.path, label, policy_revision:profile.revision, workspace_revision:selected.revision };
+      pending = recovery(request); known = false; receiptDurable = saveReceipt();
+      if (!receiptDurable || !writeStored(requestStorageKey, request)) { clearStoredRecovery(); pending = undefined; receiptDurable = false; result = '未启动：无法保存原任务编号，请恢复浏览器会话存储。'; render(); return; }
+      sending = true; render();
+      try {
+        const job = await api('gate/launches', request); if (!current(generation)) return;
+        known = true; jobs = [job, ...jobs.filter((row) => row.id !== job.id)]; result = '启动申请已记录：' + id + '。等待 Pi 运行并登记，不代表已可以聊天。';
+      } catch (error) {
+        if (!current(generation) || error.stale) return;
+        if ([400,409].includes(error.status)) { pending = undefined; clearStoredRecovery(); receiptDurable = false; result = '目录或启动配置已变化，请刷新后重新选择并确认。'; }
+        else result = '启动结果尚未确认：' + id + '。只查询原编号，不会自动重试。';
+      } finally { sending = false; if (current(generation)) render(); }
+    });
+    get('launch-root').addEventListener('click', () => browse(''));
+    get('launch-parent').addEventListener('click', () => directory?.parent !== null && directory && browse(directory.parent));
+    get('launch-more').addEventListener('click', () => directory?.nextCursor && browse(directory.path, directory.nextCursor));
+    get('launch-refresh').addEventListener('click', poll);
+    get('launch-again').addEventListener('click', () => { if (!current(authGeneration) || sending || !known) return; const old = pending; if (!clearStoredRecovery()) { pending = old; result = '无法保存新的操作状态，未允许重复创建。'; } else { pending = undefined; receiptDurable = false; known = false; result = '请核对目录和名称，再确认启动另一个独立 Pi。'; } render(); });
+    function clearProtected() { sequence++; browsing = false; retainRecovery(); config = undefined; directory = undefined; jobs = []; result = ''; known = false; get('launch-name').value = ''; renderDirectory(); }
+    return { poll, updateAuth: render, clearProtected };
+  })();
+`;
+//#endregion
 //#region hub/runtime-portal.ts
 /** Browser source injected into the trusted management portal script. */
 var runtimePortalJs = String.raw`
@@ -3000,8 +3245,8 @@ var portalHtml = `<!doctype html>
 <body><main><header><a class="brand" href="/sessions/" aria-label="Pi 会话首页"><span class="logo">π</span> Pi Web <span class="tag">HUB</span></a><span id="health" role="status">正在连接</span></header>
 <section class="intro"><span class="eyebrow">你的工作，随时接续</span><h1>所有会话，一个入口。</h1><p>选择正在运行的 Pi，在手机与电脑之间继续工作。</p></section>
 <section class="version-overview" aria-labelledby="versions-title"><div class="version-heading"><div><span class="eyebrow">SOFTWARE STATUS</span><h2 id="versions-title">版本与更新</h2></div><span id="version-summary" role="status">正在检查发布版本</span></div><div id="version-details" class="version-details"></div><p class="version-help">仅检查 Pi 与本 Web 扩展的公开发布版本，不自动安装或重启。会话版本为进程上报值，不等于磁盘已安装版本。构建不同不一定代表落后；其他扩展不在本次检查范围。</p></section>
-<details class="management"><summary>运行管理 <span id="management-status" role="status">正在检查能力</span></summary><p>管理操作需要身份验证。重启只刷新选中的空闲 Pi；全局运行时更新由 Gate 评估精确稳定版本，两项操作彼此独立。</p><p id="management-help">正在检查管理登录方式…</p><form id="management-unlock" hidden><label for="management-code">一次性管理码</label><div class="controls"><input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="输入 32 位管理码" required><button type="submit">解锁管理</button></div></form><button id="management-gateway" type="button" hidden>使用网页登录解锁</button><button id="management-logout" type="button" hidden>锁定管理</button><p id="management-notice" role="status" aria-live="polite"></p>${approvalsPortalHtml}<section class="runtime-updates" aria-labelledby="runtime-update-title"><div class="runtime-update-heading"><h3 id="runtime-update-title">全局 Pi 运行时更新</h3><span id="runtime-update-status" role="status">正在检查能力</span></div><p>从官方发布目录选择精确稳定版本。目录只证明版本已发布，不代表兼容；Gate 会在提交后重新解析并隔离验证。此处创建更新任务；审批请使用上方统一授权中心。网页不会重建 Docker 镜像。</p><p id="runtime-update-policy"></p><div class="runtime-version-tools"><label for="runtime-version-search">搜索发布版本前缀</label><div class="controls"><input id="runtime-version-search" type="search" inputmode="decimal" autocomplete="off" spellcheck="false" maxlength="64" pattern="[0-9.]*" placeholder="例如 1.4"><button id="runtime-version-refresh" type="button">刷新目录与就绪状态</button></div></div><p id="runtime-version-catalog-status" role="status"></p><div id="runtime-version-list" class="runtime-version-list" role="listbox" aria-label="官方发布的稳定 Pi 版本"></div><button id="runtime-version-more" type="button" hidden>加载更早版本</button><p id="runtime-version-selected" class="runtime-version-selected"></p><div id="runtime-readiness" class="runtime-readiness" aria-live="polite"></div><form id="runtime-update-form"><label for="runtime-update-version">已选择的精确稳定版本</label><div class="controls"><input id="runtime-update-version" type="text" inputmode="text" autocomplete="off" spellcheck="false" maxlength="64" readonly required><button id="runtime-update-submit" type="submit" disabled>提交给 Gate</button></div></form><button id="runtime-update-query" type="button" hidden>按原任务编号查询</button><div id="runtime-update-results" aria-live="polite"></div></section><section class="restart-results" aria-label="进程重启结果"><div id="management-results" aria-live="polite"></div></section></details>
-<section class="toolbar" aria-label="会话操作"><div><h2>在线会话 <span id="count">0</span></h2><p id="updated">等待登记</p></div><div class="controls"><label><span class="sr-only">搜索会话</span><input id="search" type="search" placeholder="搜索项目或会话…"></label><button id="refresh" type="button">刷新</button></div></section>
+<details class="management"><summary>运行管理 <span id="management-status" role="status">正在检查能力</span></summary><p>管理操作需要身份验证。重启只刷新选中的空闲 Pi；全局运行时更新由 Gate 评估精确稳定版本，两项操作彼此独立。</p><p id="management-help">正在检查管理登录方式…</p><form id="management-unlock" hidden><label for="management-code">一次性管理码</label><div class="controls"><input id="management-code" type="password" autocomplete="off" spellcheck="false" maxlength="32" placeholder="输入 32 位管理码" required><button type="submit">解锁管理</button></div></form><button id="management-gateway" type="button" hidden>使用网页登录解锁</button><button id="management-logout" type="button" hidden>锁定管理</button><p id="management-notice" role="status" aria-live="polite"></p>${launchPortalHtml}${approvalsPortalHtml}<section class="runtime-updates" aria-labelledby="runtime-update-title"><div class="runtime-update-heading"><h3 id="runtime-update-title">全局 Pi 运行时更新</h3><span id="runtime-update-status" role="status">正在检查能力</span></div><p>从官方发布目录选择精确稳定版本。目录只证明版本已发布，不代表兼容；Gate 会在提交后重新解析并隔离验证。此处创建更新任务；审批请使用上方统一授权中心。网页不会重建 Docker 镜像。</p><p id="runtime-update-policy"></p><div class="runtime-version-tools"><label for="runtime-version-search">搜索发布版本前缀</label><div class="controls"><input id="runtime-version-search" type="search" inputmode="decimal" autocomplete="off" spellcheck="false" maxlength="64" pattern="[0-9.]*" placeholder="例如 1.4"><button id="runtime-version-refresh" type="button">刷新目录与就绪状态</button></div></div><p id="runtime-version-catalog-status" role="status"></p><div id="runtime-version-list" class="runtime-version-list" role="listbox" aria-label="官方发布的稳定 Pi 版本"></div><button id="runtime-version-more" type="button" hidden>加载更早版本</button><p id="runtime-version-selected" class="runtime-version-selected"></p><div id="runtime-readiness" class="runtime-readiness" aria-live="polite"></div><form id="runtime-update-form"><label for="runtime-update-version">已选择的精确稳定版本</label><div class="controls"><input id="runtime-update-version" type="text" inputmode="text" autocomplete="off" spellcheck="false" maxlength="64" readonly required><button id="runtime-update-submit" type="submit" disabled>提交给 Gate</button></div></form><button id="runtime-update-query" type="button" hidden>按原任务编号查询</button><div id="runtime-update-results" aria-live="polite"></div></section><section class="restart-results" aria-label="进程重启结果"><div id="management-results" aria-live="polite"></div></section></details>
+<section class="toolbar" aria-label="会话操作"><div><h2>在线会话 <span id="count">0</span></h2><p id="updated">等待登记</p></div><div class="controls"><label><span class="sr-only">搜索会话</span><input id="search" type="search" placeholder="搜索项目或会话…"></label><a id="new-pi-entry" class="open" href="#new-pi">新建 Pi</a><button id="refresh" type="button">刷新</button></div></section>
 <div id="notice" role="status"></div><section id="sessions" class="grid" aria-label="在线 Pi 会话"></section>
 <section id="empty" class="empty" hidden><span class="empty-icon">π</span><h3>还没有在线会话</h3><p>为 Pi 配置本总管的登记 socket 和独立凭据。<br>已启动的会话会自动出现在这里。</p></section>
 <footer><span>每个会话独立连接 · 退出一个不影响其他会话</span><span>Pi Web Hub</span></footer></main></body></html>`;
@@ -3014,7 +3259,7 @@ function renderPortalHtml(admin, chatUrl, managementUrl) {
 		"'": "&#39;"
 	})[c] ?? c);
 	if (admin) return portalHtml.replace("<head>", `<head><meta name="pi-chat-origin" content="${escapeHtml(chatUrl)}">`);
-	return portalHtml.replace("<script src=\"/hub-management.js\" defer><\/script>", "").replace(/<details class="management">[\s\S]*?<\/details>/, managementUrl ? `<p class="management"><a href="${escapeHtml(managementUrl)}sessions/" rel="noopener noreferrer">打开运行管理 ↗</a></p>` : "");
+	return portalHtml.replace("<a id=\"new-pi-entry\" class=\"open\" href=\"#new-pi\">新建 Pi</a>", managementUrl ? `<a class="open" href="${escapeHtml(managementUrl)}sessions/#new-pi" rel="noopener noreferrer">新建 Pi ↗</a>` : "").replace("<script src=\"/hub-management.js\" defer><\/script>", "").replace(/<details class="management">[\s\S]*?<\/details>/, managementUrl ? `<p class="management"><a href="${escapeHtml(managementUrl)}sessions/" rel="noopener noreferrer">打开运行管理 ↗</a></p>` : "");
 }
 var portalJs = `(() => {
   const get = (id) => document.getElementById(id);
@@ -3155,10 +3400,12 @@ var portalJs = `(() => {
   refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 5000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(true); });
 })();`;
-var portalManagementCss = `${approvalsPortalCss}.management{border:1px solid #dce5d7;background:#ffffffa8;border-radius:14px;padding:16px 20px;margin:0 0 28px;font-size:13px;line-height:1.7}.management summary{cursor:pointer;font-weight:600}.management summary span{font-weight:400;color:#718076;margin-left:10px}.management p{color:#657768;margin:12px 0}.management form label,.runtime-version-tools label{display:block;margin-bottom:7px}.management .controls{flex-wrap:wrap}.management input{flex:1;max-width:360px;width:auto;min-width:0}.management button{min-height:42px}.management code{overflow-wrap:anywhere}.runtime-updates{border-top:1px solid #e1e7dd;margin-top:18px;padding-top:18px}.runtime-update-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.runtime-update-heading h3{font-size:14px;margin:0}.runtime-update-heading span,#runtime-update-policy,#runtime-version-catalog-status{color:#718076;font-size:12px}.runtime-version-tools{margin-top:16px}.runtime-version-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin:10px 0}.runtime-version-option{min-height:48px;text-align:left;background:#f7faf5;color:#415447}.runtime-version-option.selected{border-color:#668363;background:#eaf2e5;color:#294b36}.runtime-version-selected,.runtime-readiness{border:1px solid #e1e7dd;border-radius:10px;padding:10px 12px;background:#fbfcfa}.runtime-readiness{margin:12px 0}.runtime-readiness p{margin:5px 0}.runtime-readiness-consumer{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}.runtime-update-result,.restart-result{border-top:1px solid #e1e7dd;padding:10px 0}.runtime-update-result p,.restart-result p{overflow-wrap:anywhere}.runtime-update-result .runtime-update-heading{color:#334c3d;font-weight:600}.runtime-update-identity,.runtime-update-target{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}.runtime-update-target{padding-left:12px;border-left:3px solid #e4ebe0}.restart{display:block;width:100%;margin-top:10px;background:transparent;color:#64795e;font-size:12px}.restart-result .open{width:fit-content}#management-notice{color:#97613c}@media(max-width:600px){.management{padding:14px 16px}.management input{width:100%;flex-basis:100%;max-width:none}.management summary span{display:block;margin-left:0}.management .controls button{width:100%}.runtime-version-list{grid-template-columns:1fr}.runtime-version-option{width:100%}}`;
+var portalManagementCss = `${launchPortalCss}${approvalsPortalCss}.management{border:1px solid #dce5d7;background:#ffffffa8;border-radius:14px;padding:16px 20px;margin:0 0 28px;font-size:13px;line-height:1.7}.management summary{cursor:pointer;font-weight:600}.management summary span{font-weight:400;color:#718076;margin-left:10px}.management p{color:#657768;margin:12px 0}.management form label,.runtime-version-tools label{display:block;margin-bottom:7px}.management .controls{flex-wrap:wrap}.management input{flex:1;max-width:360px;width:auto;min-width:0}.management button{min-height:42px}.management code{overflow-wrap:anywhere}.runtime-updates{border-top:1px solid #e1e7dd;margin-top:18px;padding-top:18px}.runtime-update-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.runtime-update-heading h3{font-size:14px;margin:0}.runtime-update-heading span,#runtime-update-policy,#runtime-version-catalog-status{color:#718076;font-size:12px}.runtime-version-tools{margin-top:16px}.runtime-version-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin:10px 0}.runtime-version-option{min-height:48px;text-align:left;background:#f7faf5;color:#415447}.runtime-version-option.selected{border-color:#668363;background:#eaf2e5;color:#294b36}.runtime-version-selected,.runtime-readiness{border:1px solid #e1e7dd;border-radius:10px;padding:10px 12px;background:#fbfcfa}.runtime-readiness{margin:12px 0}.runtime-readiness p{margin:5px 0}.runtime-readiness-consumer{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}.runtime-update-result,.restart-result{border-top:1px solid #e1e7dd;padding:10px 0}.runtime-update-result p,.restart-result p{overflow-wrap:anywhere}.runtime-update-result .runtime-update-heading{color:#334c3d;font-weight:600}.runtime-update-identity,.runtime-update-target{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}.runtime-update-target{padding-left:12px;border-left:3px solid #e4ebe0}.restart{display:block;width:100%;margin-top:10px;background:transparent;color:#64795e;font-size:12px}.restart-result .open{width:fit-content}#management-notice{color:#97613c}@media(max-width:600px){.management{padding:14px 16px}.management input{width:100%;flex-basis:100%;max-width:none}.management summary span{display:block;margin-left:0}.management .controls button{width:100%}.runtime-version-list{grid-template-columns:1fr}.runtime-version-option{width:100%}}`;
 /** Separate trusted Hub script: never served by an individual Pi backend. */
 var portalManagementJs = `(() => {
   const get = (id) => document.getElementById(id);
+  get('new-pi-entry')?.addEventListener('click', () => { document.querySelector('details.management').open = true; });
+  if (typeof location !== 'undefined' && location.hash === '#new-pi') document.querySelector('details.management').open = true;
   let auth = { available: false, authorized: false };
   let authGeneration = 0;
   let authTransition = false;
@@ -3173,13 +3420,14 @@ var portalManagementJs = `(() => {
       headers: { 'Content-Type': 'application/json', ...(auth.csrf ? { 'X-Pi-Hub-Csrf': auth.csrf } : {}) }, body: value === undefined ? undefined : JSON.stringify(value) });
     current();
     if (!response.ok) {
-      if (response.status === 401) { authGeneration++; auth.authorized = false; auth.csrf = undefined; runtimeUpdates.clearProtected(); approvals.clearProtected(); updateAuth(); }
+      if (response.status === 401) { authGeneration++; auth.authorized = false; auth.csrf = undefined; runtimeUpdates.clearProtected(); approvals.clearProtected(); launchPi.clearProtected(); updateAuth(); }
       const error = new Error('管理请求未完成'); error.status = response.status; throw error;
     }
     const result = await response.json(); current(); return result;
   }
 ${runtimePortalJs}
 ${approvalsPortalJs}
+${launchPortalJs}
   const restartAvailable = () => auth.restartAvailable ?? auth.available;
   function updateAuth() {
     get('management-status').textContent = authTransition ? '正在处理管理登录或锁定…' : !auth.available ? '未配置' : auth.authorized ? '已解锁 · 30 分钟有效' : '已锁定';
@@ -3191,7 +3439,7 @@ ${approvalsPortalJs}
     get('management-logout').hidden = !auth.authorized;
     get('management-logout').disabled = authTransition;
     get('management-help').textContent = !auth.available ? '本 Hub 尚未接入 Gate 管理能力。旧容器需使用新镜像重新启动一次，不能通过 /reload 获得受管能力。' : gateway ? '使用已验证的网页登录身份，无需管理码。管理会话 30 分钟有效；过期或锁定后可点击使用网页登录解锁。申请更新仍遵循 Gate 审批策略。' : '管理员在 Hub 的可信终端运行 pi-web-hub pair --config 配置文件，生成一次性管理码。管理授权与网页登录分开，过期后需重新解锁。';
-    renderResults(); runtimeUpdates.updateAuth(); approvals.updateAuth();
+    renderResults(); runtimeUpdates.updateAuth(); approvals.updateAuth(); launchPi.updateAuth();
     changed();
   }
   function save() {
@@ -3264,7 +3512,7 @@ ${approvalsPortalJs}
   async function loginWithGateway() {
     if (authTransition || auth.authMode !== 'gateway' || !auth.available || auth.authorized) return;
     authTransition = true; updateAuth();
-    try { const result = await api('gateway', {}); authGeneration++; auth = { ...auth, ...result }; runtimeUpdates.clearProtected(); approvals.clearProtected(); updateAuth(); notice('已使用网页登录身份解锁管理，无需管理码。'); void poll(); void runtimeUpdates.poll(); void approvals.poll(); }
+    try { const result = await api('gateway', {}); authGeneration++; auth = { ...auth, ...result }; runtimeUpdates.clearProtected(); approvals.clearProtected(); launchPi.clearProtected(); updateAuth(); notice('已使用网页登录身份解锁管理，无需管理码。'); void poll(); void runtimeUpdates.poll(); void approvals.poll(); void launchPi.poll(); }
     catch (error) { if (!error.stale) notice('无法验证网页登录身份，请重新登录管理入口后重试；不会自动提交更新。'); }
     finally { authTransition = false; updateAuth(); }
   }
@@ -3274,14 +3522,14 @@ ${approvalsPortalJs}
     if (authTransition || auth.authMode === 'gateway') return;
     const input = get('management-code'); const code = input.value.trim(); input.value = '';
     authTransition = true; updateAuth();
-    try { const result = await api('unlock', { code }); authGeneration++; auth = { ...auth, ...result }; runtimeUpdates.clearProtected(); approvals.clearProtected(); updateAuth(); notice('管理已解锁。可独立选择进程重启或全局运行时更新。'); void poll(); void runtimeUpdates.poll(); void approvals.poll(); }
+    try { const result = await api('unlock', { code }); authGeneration++; auth = { ...auth, ...result }; runtimeUpdates.clearProtected(); approvals.clearProtected(); launchPi.clearProtected(); updateAuth(); notice('管理已解锁。可独立选择进程重启或全局运行时更新。'); void poll(); void runtimeUpdates.poll(); void approvals.poll(); void launchPi.poll(); }
     catch (error) { if (!error.stale) notice('管理码无效、已使用或过期，请从可信终端重新获取。'); }
     finally { authTransition = false; updateAuth(); }
   });
   get('management-logout').addEventListener('click', async () => {
     if (authTransition) return;
     authTransition = true; updateAuth();
-    try { await api('logout', {}); authGeneration++; auth.authorized = false; auth.csrf = undefined; runtimeUpdates.clearProtected(); approvals.clearProtected(); updateAuth(); notice('管理已锁定。已提交操作仍由门禁处理。'); }
+    try { await api('logout', {}); authGeneration++; auth.authorized = false; auth.csrf = undefined; runtimeUpdates.clearProtected(); approvals.clearProtected(); launchPi.clearProtected(); updateAuth(); notice('管理已锁定。已提交操作仍由门禁处理。'); }
     catch (error) { if (!error.stale) notice('锁定请求未完成，请关闭此页并让管理员撤销管理授权。'); }
     finally { authTransition = false; updateAuth(); }
   });
@@ -3289,8 +3537,8 @@ ${approvalsPortalJs}
     const saved = JSON.parse(sessionStorage.getItem('pi-hub-restarts') || '[]');
     if (Array.isArray(saved)) for (const o of saved.slice(0, 64)) if (/^[a-f0-9]{32}$/.test(o.id) && /^${HUB_GENERATION_SOURCE}$/.test(o.generation) && typeof o.label === 'string' && o.label.length <= 256) operations.set(o.id, { id: o.id, generation: o.generation, label: o.label, done: false, status: 'unknown' });
   } catch {}
-  void (async () => { try { auth = await api('status'); updateAuth(); if (auth.authMode === 'gateway') await loginWithGateway(); await poll(); await runtimeUpdates.poll(); await approvals.poll(); } catch { notice('无法查询运行管理能力。'); } })();
-  setInterval(async () => { await poll(); await runtimeUpdates.poll(); await approvals.poll(); }, 2000);
+  void (async () => { try { auth = await api('status'); updateAuth(); if (auth.authMode === 'gateway') await loginWithGateway(); await poll(); await runtimeUpdates.poll(); await approvals.poll(); await launchPi.poll(); } catch { notice('无法查询运行管理能力。'); } })();
+  setInterval(async () => { await poll(); await runtimeUpdates.poll(); await approvals.poll(); await launchPi.poll(); }, 2000);
 })();`;
 var portalCss = `:root{color-scheme:light;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#21312c;background:#f6f8f5;font-synthesis:none}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 90% 0,#e6efdf,transparent 55%)}main{max-width:1080px;margin:auto;padding:32px 40px 24px;min-height:100dvh}header{display:flex;align-items:center;justify-content:space-between;gap:16px}.brand{display:flex;align-items:center;gap:12px;font-size:20px;font-weight:650;color:inherit;text-decoration:none}.logo{display:grid;place-items:center;border-radius:12px;background:#234c3c;color:#e8f3dd;width:42px;height:42px;font:32px Georgia,serif}.tag{font-size:10px;letter-spacing:2px;color:#758478;border:1px solid #d7dfd5;border-radius:5px;padding:4px 6px}#health{font-size:12px;color:#697c70}.connected{color:#347652!important}.disconnected{color:#a35437!important}.intro{padding:48px 0 34px}.eyebrow{font-size:12px;letter-spacing:2px;color:#718478}h1{margin:14px 0 16px;font-size:clamp(30px,4vw,46px);font-weight:600;letter-spacing:-1.5px}.intro p{margin:0;color:#718076;font-size:15px;line-height:1.8}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:22px}h2{font-size:17px;font-weight:600;margin:0}#count{display:inline-grid;place-items:center;min-width:25px;height:23px;margin-left:8px;background:#e2ebe0;border-radius:7px;color:#476347;font-size:12px}#updated{font-size:12px;color:#879287;margin:8px 0 0}.controls{display:flex;gap:10px}input,button{font:inherit;border:1px solid #dce3d9;border-radius:9px;background:#fff;padding:11px 14px;font-size:13px;color:#415447}input{width:230px}button{cursor:pointer}button:hover{background:#eef3eb}button:disabled{opacity:.55}input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #93ad91;outline-offset:3px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}.card{display:flex;flex-direction:column;background:#ffffffdc;border:1px solid #e0e7dc;border-radius:16px;padding:24px;box-shadow:0 6px 24px #29412c04;min-width:0}.card-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}.project-icon{display:grid;place-items:center;width:40px;height:40px;background:#edf3e8;color:#587452;border-radius:11px;font-size:23px}.online{font-size:11px;color:#39734e;background:#eff5eb;border-radius:20px;padding:5px 10px}.online:before{content:'●';font-size:8px;margin-right:5px}.card h3{font-size:18px;font-weight:600;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{font-size:12px;color:#899587;margin:10px 0 20px;display:flex;flex-wrap:wrap;min-width:0;align-items:baseline}.session-name{max-width:calc(100% - 52px);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card>.open{margin-top:auto}.meta>span:nth-child(2){flex-shrink:0}.version-lines{display:flex;flex-direction:column;gap:9px;flex-basis:100%;min-width:0;margin-top:18px;padding-top:16px;border-top:1px solid #edf0e9}.version-line{display:flex;align-items:center;flex-wrap:wrap;gap:6px 8px;min-width:0;line-height:1.65}.version-label{font-weight:600;color:#64765f;min-width:48px}.version-value{color:#415447;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;min-width:0}.version-badge{border-radius:6px;padding:2px 7px;font-size:10px;line-height:1.6;overflow-wrap:anywhere}.version-badge.current{color:#356044;background:#edf4e9}.version-badge.update{color:#8a531d;background:#fff1d7}.version-badge.different{color:#805d2f;background:#f6efe0}.version-badge.unknown{color:#778174;background:#f1f3ef}.runtime-note{font-size:10px;color:#879180}.version-overview{border:1px solid #dce5d7;border-radius:16px;padding:22px 24px;background:#ffffffa8;margin-bottom:20px}.version-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}.version-heading .eyebrow{font-size:9px;letter-spacing:1.5px}.version-heading h2{margin-top:6px}.version-summary{font-size:12px;color:#72816e;line-height:1.8}.version-summary.has-update{color:#8a531d}.version-details{display:flex;flex-direction:column;gap:10px;margin-top:18px;font-size:12px}.release-target{color:#7c8975;font-size:11px;line-height:1.8;overflow-wrap:anywhere}.version-help{font-size:11px;color:#7c8975;line-height:1.8;margin:14px 0 0;padding-top:12px;border-top:1px solid #e8eee3}.open{display:block;text-align:center;color:#365b42;background:#f2f6ee;border:1px solid #e4ebdf;text-decoration:none;border-radius:8px;padding:11px;font-size:13px}.open:hover{background:#e7efdf}.empty{text-align:center;border:1px dashed #d6dfd0;border-radius:16px;padding:55px 20px;background:#ffffff70}.empty-icon{font:44px Georgia,serif;color:#8a9e82}.empty h3{font-size:17px;font-weight:500;margin:18px 0 10px}.empty p{font-size:13px;color:#7a8978;line-height:1.9}#notice{font-size:13px;color:#a35c3d;line-height:1.6;margin-bottom:14px}#notice:empty{display:none}footer{display:flex;justify-content:space-between;gap:15px;border-top:1px solid #e0e6db;margin-top:48px;padding-top:20px;font-size:11px;color:#96a18f}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}[hidden]{display:none!important}@media(max-width:600px){main{padding:24px 20px}header{gap:8px}.brand{font-size:17px;gap:8px}.logo{width:36px;height:36px;font-size:27px}#health{font-size:11px}.intro{padding:48px 0 34px}h1{letter-spacing:-1px;line-height:1.35}.toolbar{flex-direction:column;align-items:stretch;gap:18px}.controls label{flex:1;min-width:0}input{width:100%;min-width:0}.grid{grid-template-columns:1fr}.card{padding:22px}.card-top{margin-bottom:18px}footer{flex-direction:column;margin-top:32px;line-height:1.6}}`;
 //#endregion
@@ -4174,7 +4422,7 @@ function captureHubMetadata(moduleUrl = import.meta.url) {
 	{
 		const embedded = {
 			"version": "1.0.1",
-			"build": "33250e227bbaa53cf6b0cbc9aea862016e971dbc406bbfab628754c058601769"
+			"build": "39e5a942cba7f4de61513ad7ef9e4302838490716fccc4ba87ef42fa53a76231"
 		};
 		if (embedded && isStableSemver(embedded.version) && SHA256.test(embedded.build)) return Object.freeze({
 			version: embedded.version,
@@ -4578,7 +4826,11 @@ async function startLockedHub(config, options) {
 		return session;
 	};
 	const management = new HubManagement(config);
-	const gateManagementApi = createGateManagementApi(config, management);
+	const gateManagementApi = createGateManagementApi(config, management, (runId) => {
+		const matches = [...sessions.keys()].map(current).filter((session) => session?.grant.run_id === runId);
+		if (matches.length !== 1 || !matches[0]) return void 0;
+		return new URL(`/s/${matches[0].generation}/`, config.publicUrl ?? url).href;
+	});
 	const interactionTarget = (session) => {
 		const descriptor = session?.interaction ?? session?.runtime;
 		if (!session || !descriptor) return void 0;

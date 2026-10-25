@@ -1,5 +1,5 @@
 import path from "node:path";
-import { type BrowserContext, expect, type Page } from "@playwright/test";
+import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { createBdd } from "playwright-bdd";
 import { isHubSessionPath } from "../../extensions/hub-generation";
 import { type HubCapability, type HubCliHarness, startHubCli } from "../harness/hub-cli";
@@ -21,7 +21,12 @@ function page() {
   return browserPage;
 }
 async function manager() {
-  hub = await startHubCli({ repositoryRoot: path.resolve(__dirname, "../..") });
+  const managerDir = process.env.PI_E2E_MANAGER_DIR?.trim();
+  test.skip(
+    !managerDir,
+    "set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root to run Manager browser scenarios",
+  );
+  hub = await startHubCli({ managerDir });
   return hub;
 }
 

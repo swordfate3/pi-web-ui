@@ -3,10 +3,10 @@
 ## 2026-10-26 · 干净 Web v1 与独立 Pi Manager（拆分设计）
 
 - 从 `27326a8` 建立字面 `v1` 分支；原 `codex/hub-create-pi` 与 main 保留，复用已有隔离工作区，不再新增 Web 工作树。
-- 明确保留单会话聊天和扩展交互，将 Hub/Gate 管理职责迁往独立 `pi-manager`；管理器须零 Pi 独立启动，MCP 仅为调用入口。
-- 新项目目前只有 README、来源记录和完整设计；本分支新增拆分边界说明，尚未迁移源码、移除 Hub 或调整产品打包。待书面设计审阅，不宣称可运行/可部署。
-- 本轮不安装、不推送、不合并、不修改真实配置、不重启任何服务。历史新建 Pi 的真实验收缺口保留，不以新目录或旧测试记录替代新项目验收。
-- 文档链接、围栏及空白检查通过。重新执行 `just check`：TypeScript 通过，Biome 仍有未修改的 `e2e/web-interactions.browser.ts` 导入排序/格式两项错误（36 warnings、7 infos），未为本次文档任务改动该文件；没有宣称全检查通过。
+- 按经确认的拆分设计完成 Web 侧源码和分发清理：按 Manager 清单移除已迁入独立 `pi-manager` 的 Hub CLI/源码、Gate/运行更新器、Manager 专属测试和构建配置，共 168 个 tracked 源码/构建/测试文件；Web 重建另移除 1 个 tracked 生成物 `dist/hub/pi-web-hub.mjs`，合计 169 个 tracked 删除。纠正后的 Manager 清单为 255 个 source→target 条目加 4 个 disposition，逐个路径及原始 blob SHA-256 均匹配。
+- Web 包继续分发 `extensions/mirror-server.ts`、`./interactions/v1`、登记/控制薄适配器、远程访问和全部单会话前端逻辑；不再声明 `pi-web-hub` bin，不再打包 `hub/`、`dist/hub/` 或 `integrations/runtime-updater/`。E2E 只接受显式 `PI_E2E_MANAGER_DIR`，不会借用 `PI_E2E_RUNTIME_DIR` 或兄弟目录；无 Manager 时直接用例保留，Manager 用例显示可操作 skip。
+- TDD 分发回归先以 `Required directory is missing: hub` RED，清理后49/49 GREEN；Git-install聚焦回归2/2，Web单测54文件444项中443通过/1个可选1GiB文件系统skip，两个类型检查、Web build和dist校验通过。隔离生产安装/更新、八个源码篡改拒绝、tarball安装均通过；dry-run包781文件，含Web扩展和协议导出且无Manager产物。
+- Controller 隔离跨项目验收通过：显式独立 Manager 的两真实Pi登记/退出/Manager重启/续租/撤销及独立构建身份1/1；无Manager文件下载为直连1通过、Hub行1个带原因skip。完整Playwright、Gate/runtime和生产部署未在本任务重复执行。本轮未推送、合并、修改真实配置、安装到实际 Pi、启动 Docker 或重启任何服务；`.learnings/` 保持用户自有未跟踪状态。
 
 ## 2026-10-25 · Hub 新建 Pi（源码实现，验收未完成）
 

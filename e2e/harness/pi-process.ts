@@ -43,12 +43,15 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   const workspaceDir = path.join(tempRoot, "workspace");
   const externalDir = path.join(tempRoot, "external");
   const agentDir = path.join(tempRoot, "agent");
+  const homeDir = path.join(tempRoot, "home");
+  const xdgConfigHome = path.join(homeDir, ".config");
   const sessionDir = path.join(tempRoot, "sessions");
   const port = await getFreePort();
 
   mkdirSync(workspaceDir, { recursive: true });
   mkdirSync(externalDir, { recursive: true });
   mkdirSync(agentDir, { recursive: true });
+  mkdirSync(xdgConfigHome, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
   if (options.git !== false) prepareGitWorkspace(workspaceDir);
   const longSessionFile = options.boundedToolToggle
@@ -100,7 +103,11 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
       cwd: workspaceDir,
       env: {
         ...process.env,
+        HOME: homeDir,
+        XDG_CONFIG_HOME: xdgConfigHome,
         PI_CODING_AGENT_DIR: agentDir,
+        PI_MANAGER_CONFIG: path.join(tempRoot, "manager-config.json"),
+        PI_WEB_UI_HUB_CONFIG: path.join(tempRoot, "legacy-hub-config.json"),
         PI_E2E: "1",
         PI_OFFLINE: "1",
         PI_WEB_UI_HOST: "127.0.0.1",

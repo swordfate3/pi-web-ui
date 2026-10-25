@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 import { type HubCapability, startHubCli } from "./harness/hub-cli.ts";
 import { type PiWebUiHarness, startPiWebUi } from "./harness/pi-process.ts";
 
+const managerDir = process.env.PI_E2E_MANAGER_DIR?.trim();
+const managerSkip = managerDir
+  ? false
+  : "set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root to run Manager-backed integration";
+
 async function eventually<T>(read: () => Promise<T>, accepts: (value: T) => boolean, timeout = 10000): Promise<T> {
   const deadline = Date.now() + timeout;
   do {
@@ -20,9 +25,10 @@ async function eventually<T>(read: () => Promise<T>, accepts: (value: T) => bool
 
 test("two real Pi processes register; one exit leaves the second reachable; hub restart fences old links", {
   timeout: 65000,
+  skip: managerSkip,
 }, async (t) => {
   const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
-  const hub = await startHubCli({ repositoryRoot });
+  const hub = await startHubCli({ managerDir });
   const agents: PiWebUiHarness[] = [];
   const capabilities: HubCapability[] = [];
   t.after(async () => {
@@ -67,11 +73,12 @@ test("two real Pi processes register; one exit leaves the second reachable; hub 
     version: JSON.parse(readFileSync(path.join(runtimeRoot, "package.json"), "utf8")).version,
     build: JSON.parse(readFileSync(path.join(runtimeRoot, "dist/build-manifest.json"), "utf8")).source.sha256,
   };
-  assert.equal(
-    both.versions?.hub?.build,
-    webUi.build,
-    "built standalone Hub identifies the selected runtime package build",
-  );
+  const managerRoot = path.resolve(managerDir as string);
+  const manager = {
+    version: JSON.parse(readFileSync(path.join(managerRoot, "package.json"), "utf8")).version,
+    build: JSON.parse(readFileSync(path.join(managerRoot, "dist/build-manifest.json"), "utf8")).source.sha256,
+  };
+  assert.deepEqual(both.versions?.hub, manager, "Hub identity matches the explicitly selected independent Manager");
   for (const session of both.sessions) {
     assert.deepEqual(session.software, { piVersion: installedPi.stdout.trim(), webUi });
     const response = await fetch(`${hub.url.slice(0, -1)}${session.path}`);

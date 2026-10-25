@@ -12,7 +12,6 @@ const roots = new Set();
 
 const SOURCE_FILES = [
   "vite.config.ts",
-  "vite.hub.config.ts",
   "tsconfig.json",
   "package.json",
   "package-lock.json",
@@ -56,8 +55,6 @@ async function fixture({ dist = true } = {}) {
   await mkdir(path.join(root, "extensions/remote-access"), { recursive: true });
   await mkdir(path.join(root, "extensions/interactions"), { recursive: true });
   await mkdir(path.join(root, "scripts"), { recursive: true });
-  await mkdir(path.join(root, "hub"), { recursive: true });
-  await mkdir(path.join(root, "bin"), { recursive: true });
   for (const file of SOURCE_FILES) {
     await writeFile(path.join(root, file), `fixture:${file}\n`);
   }
@@ -65,12 +62,8 @@ async function fixture({ dist = true } = {}) {
   await writeFile(path.join(root, "scripts/web-dist.mjs"), "fixture script\n");
   await writeFile(path.join(root, "src/web/nested/app.tsx"), "export const app = true;\n");
   await writeFile(path.join(root, "public/icons/icon.svg"), "<svg/>\n");
-  await writeFile(path.join(root, "hub/server.ts"), "export const hub = true;\n");
-  await writeFile(path.join(root, "bin/pi-web-hub.mjs"), "console.log('hub');\n");
   if (dist) {
     await mkdir(path.join(root, "dist/assets"), { recursive: true });
-    await mkdir(path.join(root, "dist/hub"), { recursive: true });
-    await writeFile(path.join(root, "dist/hub/pi-web-hub.mjs"), "#!/usr/bin/env node\nconsole.log('hub fixture');\n");
     await writeFile(path.join(root, "dist/index.html"), '<script type="module" src="/assets/app.js?v=1#x"></script>\n');
     await writeFile(path.join(root, "dist/assets/app.js"), "console.log('fixture');\n");
   }
@@ -104,13 +97,49 @@ afterEach(async () => {
 test("build-time source identity needs no dist and matches the final manifest", async () => {
   const root = await fixture({ dist: false });
   const before = await createSourceInventory(root);
-  await mkdir(path.join(root, "dist/hub"), { recursive: true });
+  await mkdir(path.join(root, "dist"), { recursive: true });
   await writeFile(path.join(root, "dist/index.html"), "<main>fixture</main>");
-  await writeFile(path.join(root, "dist/hub/pi-web-hub.mjs"), "// independent output\n");
   const manifest = await createManifest(root);
   assert.deepEqual(before, manifest.source);
   await writeFile(path.join(root, "package.json"), '{"version":"1.0.1"}');
   assert.notEqual((await createSourceInventory(root)).sha256, before.sha256);
+});
+
+test("Web-only source and package verify without Manager sources or executable", async () => {
+  const root = await fixture();
+  await writeFile(
+    path.join(root, "package.json"),
+    `${JSON.stringify(
+      {
+        name: "web-only-fixture",
+        version: "1.0.0",
+        type: "module",
+        pi: { extensions: ["./extensions/mirror-server.ts"] },
+        files: ["extensions/", "dist/", "scripts/web-dist.mjs"],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  const manifest = await createManifest(root);
+  assert.ok(manifest.outputs.files.some((file) => file.path === "index.html"));
+  assert.equal(manifest.outputs.files.some((file) => file.path.startsWith("hub/")), false);
+  await writeManifest(root);
+  await verifyManifest(root);
+
+  const packEnv = { ...process.env };
+  delete packEnv.NODE_TEST_CONTEXT;
+  const pack = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts", "--offline"], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...packEnv, npm_config_cache: path.join(root, "npm-cache"), npm_config_update_notifier: "false" },
+  });
+  assert.equal(pack.error, undefined);
+  assert.equal(pack.status, 0, pack.stderr);
+  const files = JSON.parse(pack.stdout)[0].files.map((entry) => entry.path);
+  assert.ok(files.includes("extensions/mirror-server.ts"));
+  assert.equal(files.some((file) => file === "bin/pi-web-hub.mjs" || file.startsWith("hub/") || file.startsWith("dist/hub/")), false);
 });
 
 test("creates and verifies deterministic source and output inventories", async () => {
@@ -121,7 +150,6 @@ test("creates and verifies deterministic source and output inventories", async (
   assert.deepEqual(
     first.source.files.map(({ path: file }) => file),
     [
-      "bin/pi-web-hub.mjs",
       "extensions/bounded-json.ts",
       "extensions/connection-config.ts",
       "extensions/connection-listener.ts",
@@ -151,7 +179,6 @@ test("creates and verifies deterministic source and output inventories", async (
       "extensions/software-metadata.ts",
       "extensions/terminal-prompt.ts",
       "extensions/workspace-uploads.ts",
-      "hub/server.ts",
       "package-lock.json",
       "package.json",
       "public/icons/icon.svg",
@@ -160,12 +187,11 @@ test("creates and verifies deterministic source and output inventories", async (
       "src/web/nested/app.tsx",
       "tsconfig.json",
       "vite.config.ts",
-      "vite.hub.config.ts",
     ],
   );
   assert.deepEqual(
     first.outputs.files.map(({ path: file }) => file),
-    ["assets/app.js", "hub/pi-web-hub.mjs", "index.html"],
+    ["assets/app.js", "index.html"],
   );
 
   const written = await writeManifest(root);
@@ -186,25 +212,6 @@ test("requires an existing complete Vite dist and never creates it while writing
   const incomplete = await fixture();
   await rm(path.join(incomplete, "dist/index.html"));
   await assert.rejects(createManifest(incomplete), /dist\/index.html is missing/);
-});
-
-test("refuses missing prebuilt hub in write, verify, install and assets-only", async () => {
-  const root = await fixture();
-  await writeManifest(root);
-  await rm(path.join(root, "dist/hub/pi-web-hub.mjs"));
-  await assert.rejects(writeManifest(root), /dist\/hub\/pi-web-hub\.mjs is missing/);
-  for (const options of [{}, { install: true }, { assetsOnly: true }]) {
-    await assert.rejects(verifyManifest(root, options), /dist\/hub\/pi-web-hub\.mjs is missing/);
-  }
-  // A manifest with a freshly recomputed inventory digest must not redefine
-  // the package contract by omitting the bin, even when no source is checked.
-  const manifest = await loadManifest(root);
-  manifest.outputs.files = manifest.outputs.files.filter((entry) => entry.path !== "hub/pi-web-hub.mjs");
-  refreshInventory(manifest.outputs);
-  await saveManifest(root, manifest);
-  for (const options of [{}, { install: true }, { assetsOnly: true }]) {
-    await assert.rejects(verifyManifest(root, options), /outputs must include hub\/pi-web-hub\.mjs/);
-  }
 });
 
 test("detects changed, missing, and extra output files", async () => {
@@ -236,13 +243,8 @@ test("detects stale source content and source inventory omissions", async () => 
   await assert.rejects(verifyManifest(root), /Source inventory mismatch .*unexpected: src\/web\/nested\/app\.tsx/);
 });
 
-test("rejects stale browser, connection and hub inputs in verify and install", async (t) => {
-  const inputs = [
-    ...SOURCE_FILES.filter((file) => file.startsWith("extensions/")),
-    "hub/server.ts",
-    "bin/pi-web-hub.mjs",
-    "vite.hub.config.ts",
-  ];
+test("rejects stale browser and session-extension inputs in verify and install", async (t) => {
+  const inputs = SOURCE_FILES.filter((file) => file.startsWith("extensions/"));
   for (const file of inputs) {
     await t.test(file, async () => {
       const root = await fixture();

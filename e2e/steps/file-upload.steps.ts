@@ -13,7 +13,7 @@ import {
   writeSync,
 } from "node:fs";
 import path from "node:path";
-import { type BrowserContext, type CDPSession, expect, type Page } from "@playwright/test";
+import { type BrowserContext, type CDPSession, expect, type Page, test } from "@playwright/test";
 import { createBdd } from "playwright-bdd";
 import { type HubCliHarness, startHubCli } from "../harness/hub-cli";
 import { type PiWebUiHarness, startPiWebUi } from "../harness/pi-process";
@@ -120,7 +120,11 @@ async function throttleUploads() {
 Given("附件上传测试通过 {string} 在 {string} 打开", async ({ browser }, route: string, viewport: string) => {
   const repositoryRoot = path.resolve(__dirname, "../..");
   screen = viewport;
-  if (route === "hub") hub = await startHubCli({ repositoryRoot });
+  if (route === "hub") {
+    const managerDir = process.env.PI_E2E_MANAGER_DIR?.trim();
+    test.skip(!managerDir, "set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root to run the Hub route");
+    hub = await startHubCli({ managerDir });
+  }
   agent = await startPiWebUi("file-upload", {
     repositoryRoot,
     git: false,

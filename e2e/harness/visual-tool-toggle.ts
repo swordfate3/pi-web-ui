@@ -22,7 +22,7 @@ try {
     { width: 1440, height: 1000 },
     { width: 390, height: 844 },
   ]) {
-    const hub = await startHubCli({ repositoryRoot });
+    const hub = await startHubCli();
     let agent: PiWebUiHarness | undefined;
     let context: BrowserContext | undefined;
     let gate: ReturnType<typeof observeBrowserErrors> | undefined;

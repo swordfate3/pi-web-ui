@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { type BrowserContext, expect, type Page } from "@playwright/test";
+import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { createBdd } from "playwright-bdd";
 import { transportContent } from "../fixtures/transport-data";
 import { type HubCliHarness, startHubCli } from "../harness/hub-cli";
@@ -21,8 +21,11 @@ let omittedSources: string[] = [];
 let syncRequests = 0;
 
 async function open(browser: import("@playwright/test").Browser, useHub: boolean) {
-  const repositoryRoot = path.resolve(__dirname, "../..");
-  if (useHub) hub = await startHubCli({ repositoryRoot });
+  if (useHub) {
+    const managerDir = process.env.PI_E2E_MANAGER_DIR?.trim();
+    test.skip(!managerDir, "set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root to run the Hub route");
+    hub = await startHubCli({ managerDir });
+  }
   harness = await startPiWebUi("transport-large", { registration: hub?.issue("transport-large") });
   let url = harness.pageUrl;
   if (hub) {

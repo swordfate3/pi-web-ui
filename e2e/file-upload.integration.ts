@@ -46,6 +46,7 @@ type PreparedV2 = Prepared & {
 const MIB = 1024 * 1024;
 const CHUNK_SIZE = 8 * MIB;
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const managerDir = process.env.PI_E2E_MANAGER_DIR?.trim();
 
 function createSyntheticFile(filename: string, size: number) {
   const fd = openSync(filename, "wx", 0o600);
@@ -135,8 +136,12 @@ const runtimeRoot = path.resolve(process.env.PI_E2E_RUNTIME_DIR ?? repositoryRoo
 for (const mode of ["direct", "hub"]) {
   test(`${mode}: HTTP file upload preserves binary bytes; prompt carries only verified workspace paths`, {
     timeout: 180000,
+    skip:
+      mode === "hub" && !managerDir
+        ? "set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root to run the Hub route"
+        : false,
   }, async (t) => {
-    const hub = mode === "hub" ? await startHubCli({ repositoryRoot }) : undefined;
+    const hub = mode === "hub" ? await startHubCli({ managerDir }) : undefined;
     let agent: PiWebUiHarness | undefined;
     let ws: WebSocket | undefined;
     const pending = new Map<

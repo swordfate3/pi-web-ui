@@ -1,6 +1,6 @@
 // Exercise the packaged CLI, never the source server/config or the caller's real hub state.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -37,13 +37,30 @@ async function stopChild(child: ChildProcess) {
   }
 }
 
-export async function startHubCli(options: { repositoryRoot: string; runtimeDir?: string }): Promise<HubCliHarness> {
-  // Match the Pi harness's runtime selection. Missing/broken installed assets must fail, not fall back to source.
-  const runtimeDir = path.resolve(options.runtimeDir ?? process.env.PI_E2E_RUNTIME_DIR ?? options.repositoryRoot);
-  const cli = path.join(runtimeDir, "dist/hub/pi-web-hub.mjs");
+export async function startHubCli(options: { managerDir?: string } = {}): Promise<HubCliHarness> {
+  const selectedManager = options.managerDir ?? process.env.PI_E2E_MANAGER_DIR;
+  if (!selectedManager) {
+    throw new Error(
+      "Independent Manager integration requires PI_E2E_MANAGER_DIR pointing to a built @swordfate/pi-manager root",
+    );
+  }
+  const managerDir = path.resolve(selectedManager);
+  const cli = path.join(managerDir, "dist/hub/pi-web-hub.mjs");
   const dir = mkdtempSync(path.join(tmpdir(), "pi-hub-cli-e2e-"));
+  const home = path.join(dir, "home");
+  const xdgConfigHome = path.join(home, ".config");
+  const agentDir = path.join(dir, "agent");
   const config = path.join(dir, "config.json");
-  const env = { ...process.env, PI_WEB_UI_HUB_CONFIG: config };
+  mkdirSync(xdgConfigHome, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    XDG_CONFIG_HOME: xdgConfigHome,
+    PI_CODING_AGENT_DIR: agentDir,
+    PI_MANAGER_CONFIG: config,
+    PI_WEB_UI_HUB_CONFIG: path.join(dir, "legacy-hub-config.json"),
+  };
   let child: ChildProcess | undefined;
   let ready: Ready | undefined;
   let capabilityIndex = 0;
@@ -126,7 +143,7 @@ export async function startHubCli(options: { repositoryRoot: string; runtimeDir?
     await serve();
   } catch {
     await close();
-    throw new Error("Unable to start the selected runtime's Hub CLI");
+    throw new Error("Unable to start the explicitly selected independent Manager CLI");
   }
 
   return {

@@ -10,7 +10,7 @@ npm run test:unit
 
 This includes TypeScript frontend tests and `tests/*.test.mjs` prebuilt-distribution integrity tests. Production install/update lifecycle checks are separate: `node scripts/test-git-install.mjs`.
 
-Hub name metadata regressions live in `tests/session-registration.test.ts` and `tests/session-hub.test.ts`: current-name renewal, nullable/length/type guards, unchanged route identity and legacy registration. The real `session-hub.feature` additionally uses Pi `/name`, searches by the new name and verifies card labels and session isolation; see [Hub names validation](validation/hub-session-names.md).
+Web-side registration metadata regressions remain in `tests/session-registration.test.ts`: current-name renewal, nullable/length/type guards and coalesced adapter updates. Manager-owned portal/routing coverage, formerly `tests/session-hub.test.ts`, is tracked in the independent Manager repository. The cross-package `session-hub` integration remains here but runs only with an explicit `PI_E2E_MANAGER_DIR`.
 
 Whale local-artwork regressions:
 
@@ -26,7 +26,7 @@ Large live transport and preview-budget regressions:
 node --import ./tests/register-ts.mjs --test tests/live-transport.test.ts tests/history-store.test.ts tests/git-preview-budget.test.ts
 ```
 
-These use synthetic JSON, an in-memory store, and an isolated temporary Git workspace/local mock-extension WebSocket. They do not read user session text. `transport-large.feature` separately runs real Pi with a faux provider over direct/Hub connections, checking >4 MiB tool arguments/results, original persisted JSONL/file integrity, bounded frame sizes, terminal synchronization and dismissible notice. See [validation and limitations](validation/transport-limits.md).
+These use synthetic JSON, an in-memory store, and an isolated temporary Git workspace/local mock-extension WebSocket. They do not read user session text. `transport-large.feature` separately runs real Pi with a faux provider over a direct connection; its Manager route is visibly skipped unless `PI_E2E_MANAGER_DIR` selects an independently built Manager. It checks >4 MiB tool arguments/results, original persisted JSONL/file integrity, bounded frame sizes, terminal synchronization and dismissible notice. See [validation and limitations](validation/transport-limits.md).
 
 Only session-tree tests:
 
@@ -54,7 +54,9 @@ Install the Pi peer dependency or set `PI_E2E_BIN` to its binary. This integrati
 starts isolated Pi processes with a faux provider and temporary configuration:
 
 ```sh
-node --import ./tests/register-ts.mjs --test e2e/portable-connection.integration.ts
+npm run test:integration:web
+# Optional cross-package Manager routes:
+PI_E2E_MANAGER_DIR=/absolute/pi-manager npm run test:integration:manager
 ```
 
 It checks native registration, HTTP/WS proofs, stop/start/reload/shutdown,
@@ -62,8 +64,10 @@ unavailable registry and port conflicts. Missing/malformed/non-string capabiliti
 and disabled registration must reject stale proxy requests while retaining
 header-free local HTTP/WS access. `PI_E2E_RUNTIME_DIR` selects the product
 extension and assets from an installed snapshot; faux/lifecycle fixtures remain
-in the test repository. CI runs these scenarios after obtaining its
-production-only installation. It is **backend integration**, not browser E2E.
+in the test repository. `PI_E2E_MANAGER_DIR` is separate and never falls back to
+the Web runtime or a sibling checkout. CI runs the direct scenarios after obtaining
+its production-only Web installation and reports Manager-only cases as actionable
+skips. This is **backend integration**, not browser E2E.
 
 ## Remote gateway transaction and real Caddy checks
 
@@ -99,7 +103,8 @@ node --import ./tests/register-ts.mjs --test --test-timeout=70000 e2e/file-uploa
 ```
 
 Pure tests use disposable workspaces and HTTP fixtures or injectable browser
-transport. Backend integration starts real isolated Pi plus packaged Hub;
+transport. Backend integration starts a real isolated Pi directly; Manager rows
+use an independently built Manager only when `PI_E2E_MANAGER_DIR` is explicit.
 browser E2E additionally uses the real picker, progress, cancellation/retry,
 symlink-directory failure/recovery, a second browser switching sessions during
 upload, refresh/reselection recovery, chunk integrity/order and the real Pi
@@ -113,6 +118,8 @@ No test uploads files to the live public deployment. See
 
 ```sh
 LC_CTYPE=C.UTF-8 npm run e2e
+# Optional Manager-backed browser rows:
+LC_CTYPE=C.UTF-8 PI_E2E_MANAGER_DIR=/absolute/pi-manager npm run e2e:manager
 ```
 
 Use an installed UTF-8 process locale for Chromium (CI sets `LC_CTYPE=C.UTF-8`).
@@ -125,7 +132,9 @@ desktop/mobile viewports, real prompt/reply, relative assets/WS and export
 downloads. It captures rendered screenshots. Optional
 `PI_E2E_BROWSER_EXECUTABLE` selects a local compatible Chromium executable;
 otherwise Playwright uses its default browser installation. All temporary Pi
-processes, proxy servers and test workspaces are cleaned up by the harness.
+processes, proxy servers and test workspaces are cleaned up by the harness. The
+default run keeps direct single-session cases and visibly skips Manager-only
+scenarios when no independent Manager root is configured.
 
 ## Per-message editing and regeneration
 
@@ -141,9 +150,9 @@ npm run e2e:gen
 node_modules/.bin/playwright test -c e2e/playwright.config.ts message-revision
 ```
 
-## Hub navigation and immediate metadata refresh
+## Optional Manager navigation and metadata refresh
 
-`tests/session-registration.test.ts` uses real Unix IPC to cover bounded/coalesced rename refresh, epoch fencing and both mirror rename entries. `tests/session-hub.test.ts` executes portal JS with a minimal DOM for stable cards and merged history-return refresh, and real HTTP/IPC for proof/retirement gaps, first-successor binding and deadlines. The PiClient test verifies the route notification; React scope timing is additionally checked by real Hub handoff E2E, not certified by the stub alone. `tests/connection-path.test.ts` restricts the return-home link to exact Hub entries. The Hub browser flow tests immediate rename/return, cancellation with unsent text and attachments, native back and one initial Git request. See [Hub navigation validation](validation/hub-navigation.md).
+`tests/session-registration.test.ts` remains Web-owned and uses real Unix IPC to cover bounded/coalesced rename refresh, epoch fencing and both mirror rename entries. The former Manager portal/routing unit tests were migrated according to `pi-manager/docs/migration-inventory.json` and are no longer part of the Web default unit glob. `tests/connection-path.test.ts` still restricts the return-home link to exact Manager-generated entries. Cross-package handoff/browser coverage uses only the Manager CLI at `PI_E2E_MANAGER_DIR/dist/hub/pi-web-hub.mjs`; it never imports Manager source. Historical results remain in [Hub navigation validation](validation/hub-navigation.md) and are not claimed as post-split evidence.
 
 ## Web companion
 

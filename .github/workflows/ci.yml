@@ -58,14 +58,22 @@ jobs:
           node -e 'const fs=require("fs");const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/pi-web-ui-install-result.json"));console.log("PI_E2E_RUNTIME_DIR="+r.installedRuntime)' >> "$GITHUB_ENV"
           echo "PI_E2E_BIN=$GITHUB_WORKSPACE/node_modules/.bin/pi" >> "$GITHUB_ENV"
 
-      - name: Real Pi connection backend integration against the installed runtime
-        run: node --import ./tests/register-ts.mjs --test --test-timeout=70000 e2e/portable-connection.integration.ts e2e/session-hub.integration.ts e2e/date-history.integration.ts e2e/file-download.integration.ts e2e/file-upload.integration.ts e2e/whale-usage.integration.ts e2e/message-revision.integration.ts
+      - name: Real Pi Web backend integration against the installed runtime
+        run: npm run test:integration:web
+
+      - name: Independent Manager integration is an explicit separate job input
+        run: |
+          echo "Manager-backed cases above are visibly skipped in standalone Web CI."
+          echo "With a separately built Manager, run: PI_E2E_MANAGER_DIR=/absolute/manager/root npm run test:integration:manager"
 
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
       - name: Run real Pi E2E against the production-only installed runtime
         run: npm run e2e
+
+      - name: Independent Manager browser integration is explicit
+        run: echo "With a separately built Manager, run PI_E2E_MANAGER_DIR=/absolute/manager/root npm run e2e:manager"
 
       - name: Clean isolated installation fixtures
         if: always()

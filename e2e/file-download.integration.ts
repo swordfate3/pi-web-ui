@@ -10,12 +10,17 @@ import { startHubCli } from "./harness/hub-cli.ts";
 import { type PiWebUiHarness, startPiWebUi } from "./harness/pi-process.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const managerDir = process.env.PI_E2E_MANAGER_DIR?.trim();
 
 for (const mode of ["direct", "hub"]) {
   test(`${mode}: real file download streams binary bytes and enforces path, identity, verb and Origin boundaries`, {
     timeout: 45000,
+    skip:
+      mode === "hub" && !managerDir
+        ? "set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root to run the Hub route"
+        : false,
   }, async (t) => {
-    const hub = mode === "hub" ? await startHubCli({ repositoryRoot }) : undefined;
+    const hub = mode === "hub" ? await startHubCli({ managerDir }) : undefined;
     let agent: PiWebUiHarness | undefined;
     let socket: WebSocket | undefined;
     const pending = new Map<

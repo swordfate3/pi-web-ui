@@ -22,22 +22,21 @@
       "./extensions/mirror-server.ts"
     ]
   },
-  "bin": {
-    "pi-web-hub": "dist/hub/pi-web-hub.mjs"
-  },
   "exports": {
     "./interactions/v1": "./extensions/interactions/client.ts",
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test:interactions:browser": "node --import ./tests/register-ts.mjs --test e2e/web-interactions.browser.ts",
     "dev:web": "vite --host 127.0.0.1",
-    "build:web": "tsc --noEmit && vite build && vite build --config vite.hub.config.ts && node scripts/web-dist.mjs --write",
+    "build:web": "tsc --noEmit && vite build && node scripts/web-dist.mjs --write",
     "verify:dist": "node scripts/web-dist.mjs",
     "test:unit": "node --import ./tests/register-ts.mjs --test tests/*.test.ts tests/*.test.mjs src/web/src/core/i18n.test.ts src/web/src/components/pi-web-ui/sidebar-tree.test.ts",
+    "test:integration:web": "node --import ./tests/register-ts.mjs e2e/portable-connection.integration.ts && node --import ./tests/register-ts.mjs e2e/session-hub.integration.ts && node --import ./tests/register-ts.mjs e2e/date-history.integration.ts && node --import ./tests/register-ts.mjs e2e/file-download.integration.ts && node --import ./tests/register-ts.mjs e2e/file-upload.integration.ts && node --import ./tests/register-ts.mjs e2e/whale-usage.integration.ts && node --import ./tests/register-ts.mjs e2e/message-revision.integration.ts",
+    "test:integration:manager": "node -e \"if (!process.env.PI_E2E_MANAGER_DIR) throw new Error('set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root')\" && npm run test:integration:web",
     "preview:web": "vite preview --host 127.0.0.1",
     "e2e:gen": "bddgen test -c e2e/playwright.config.ts",
     "e2e": "npm run build:web && npm run e2e:gen && playwright test -c e2e/playwright.config.ts",
+    "e2e:manager": "node -e \"if (!process.env.PI_E2E_MANAGER_DIR) throw new Error('set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root')\" && npm run e2e",
     "format": "biome format --write .",
     "lint": "biome lint .",
     "check": "biome check .",
@@ -104,8 +103,6 @@
     "node": ">=22.19.0"
   },
   "files": [
-    "bin/",
-    "hub/",
     "extensions/",
     "integrations/adapters/",
     "integrations/check-adapter.mjs",
@@ -113,7 +110,6 @@
     "dist/",
     "public/",
     "docs/remote-access.md",
-    "docs/hub.md",
     "scripts/web-dist.mjs",
     "docs/images/",
     "LICENSE",

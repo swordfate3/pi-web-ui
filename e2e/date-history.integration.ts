@@ -25,6 +25,7 @@ type HistorySnapshot = {
 };
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const managerDir = process.env.PI_E2E_MANAGER_DIR?.trim();
 const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 type Detail = { sessionId: string; runtimeId: string; entryId: string; text: string; nextCursor: string | null };
@@ -39,8 +40,11 @@ function assertWindow(snapshot: HistorySnapshot) {
 
 test("large dated history remains connected through Hub and loads only requested pages without modifying JSONL", {
   timeout: 45000,
+  skip: managerDir
+    ? false
+    : "set PI_E2E_MANAGER_DIR to a built @swordfate/pi-manager root to run Manager-backed integration",
 }, async (t) => {
-  const hub = await startHubCli({ repositoryRoot });
+  const hub = await startHubCli({ managerDir });
   let agent: PiWebUiHarness | undefined;
   let ws: WebSocket | undefined;
   const pending = new Map<

@@ -3,7 +3,7 @@
 给 [Pi coding agent](https://github.com/badlogic/pi-mono) 使用的浏览器界面：在电脑或手机上查看消息、工具执行、思考过程和会话分支，与终端操作同一个 Pi 会话。
 
 > 本分支维护于 [swordfate3/pi-web-ui](https://github.com/swordfate3/pi-web-ui)，基于 [kkkiio/pi-web-ui](https://github.com/kkkiio/pi-web-ui)，上游最初派生自 [deflating/tau](https://github.com/deflating/tau)。感谢原作者，保留 MIT 许可及来源说明。
-> 本分支基于 **1.0.1**，当前包只分发单会话 Web 扩展及其可选 Manager 登记适配器；Hub、Gate 和运行管理实现已迁入独立的 `@swordfate/pi-manager` 项目。独立原生终端已归档至 `codex/archive-native-terminal-20261022`，不属于当前 main 的安装内容；见[归档与部署边界](docs/native-terminal-archive.md)。本 fork 未发布到上游 npm 包。
+> 本分支基于 **1.0.1**，当前包只分发单会话 Web 扩展及其可选 Manager 登记适配器；Hub、Gate 和运行管理实现已迁入独立的 `@swordfate/pi-manager` 项目。独立原生终端已归档至 `codex/archive-native-terminal-20261022`，不属于当前 main 的安装内容；见[归档与部署边界](docs/native-terminal-archive.md)。本 fork 未发布到上游 npm 包；本次拆分后的 `v1` 目前也只是本地 checkout，不存在可供安装的远程 `@v1` 来源。
 
 ![Pi Web UI example](docs/images/pi-web-ui-example.png)
 
@@ -30,13 +30,25 @@
 - Node.js `>=22.19`，推荐 Node 24。
 - 本地单会话不要求 Docker、WSL、Pi Manager 或 SSH。可选 Manager 登记使用 Unix socket，目前主要验证 Linux，原生 Windows 不支持此登记方式。
 
-在**实际运行 Pi 的同一环境**安装；Pi 在容器中就到对应容器终端执行：
+现有公开安装命令仍指向远程仓库的默认分支，属于当前公开／旧分支用法，**不等于本次本地 `v1` 拆分版本**。在实际运行 Pi 的同一环境使用该公开来源时，Pi 在容器中就到对应容器终端执行：
 
 ```bash
 pi install git:github.com/swordfate3/pi-web-ui
 ```
 
 Git 安装包含预构建资源，只安装运行依赖 `ws`；不用手动编译、安装开发依赖或设置 `npm_config_include=dev`。`prepare` 会核验随包文件。
+
+要评估当前尚未发布的本地 `v1` checkout，请在该 checkout 安装依赖并验证构建，然后显式加载其中的扩展文件；这不会把虚构的远程 `@v1` 写进配置：
+
+```bash
+cd /absolute/path/to/pi-web-ui-hub-approvals
+npm ci --legacy-peer-deps
+npm run build:web
+npm run verify:dist
+pi -e /absolute/path/to/pi-web-ui-hub-approvals/extensions/mirror-server.ts
+```
+
+该扩展由原路径直接加载，不会被复制。若改用持久的 `pi install /absolute/path/to/pi-web-ui-hub-approvals`，应先确认没有同时启用公开 Git／npm 版本，并明确知道它会更新 Pi 的包配置。
 
 然后：
 
@@ -115,11 +127,15 @@ pi
 
 ### 更新 Web 扩展包
 
+下列命令只更新以同一公开 Git 来源安装的远程默认分支，不会取得本地未发布的 `v1`：
+
 ```bash
 pi update git:github.com/swordfate3/pi-web-ui
 ```
 
 使用与原安装**相同的来源字符串**。若安装时显式使用 `@main`，更新也保留；固定旧功能分支的来源不会因 update 自动切换到 `main`。
+
+本地 `v1` checkout 不由 `pi update` 拉取。更新该本地评估版本时，在同一路径取得或应用新的本地提交后重新执行 `npm ci --legacy-peer-deps`、`npm run build:web` 和 `npm run verify:dist`，再用相同扩展文件绝对路径启动 `pi -e`；不要写成或暗示存在远程 `@v1`。
 
 更新成功后，安排对应 Pi 安全加载新版：保存当前会话、确认没有生成／排队／上传或未知派发，再在终端正常退出并恢复该会话，或按 Pi 支持的流程使用 `/reload`，随后重新执行 `/webui` 并刷新网页。`/reload` 不升级 Pi 本体，也不重启独立 Manager，更不是 unknown 派发的恢复保证。
 
@@ -132,8 +148,8 @@ Manager 不再随 Web 包更新。按 Manager 项目的独立版本、构建清�
 打开 `/webui-setup` 或“设置 → 远程访问／登录管理”，可生成供管理员审阅的连接与 Caddy 配置材料；向导不接收密码，不在浏览器执行服务器管理。新建远程模板面向单会话，不是多会话 Hub 自动部署器。
 
 ```text
-手机 → HTTPS + 登录网关 → 可信隧道／反向代理 → 单个 Pi Web
-                                                    ↘ 可选独立 Manager → 各 Pi
+手机 → HTTPS + 登录网关 → 可信隧道／反向代理 ┬→ 单个 Pi Web
+                                               └→ 独立 Manager → 已登记的 Pi Web 会话
 ```
 
 - 默认仅监听 `127.0.0.1`。不要将 Web 扩展或独立 Manager 裸露到公网；聊天入口本身没有可替代外部网关的内置登录。

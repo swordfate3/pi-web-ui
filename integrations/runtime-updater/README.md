@@ -257,6 +257,22 @@ Evidence is under `.tmp/launch-acceptance/<namespace>/`; a failed daemon call is
 not proof that its resource was never created. Check deterministic names before
 cleanup and never use a global prune command.
 
+The harness journals every exact creation intent before dispatch. It reconciles
+ambiguous results without replay and removes only positively proved test resources
+(containers by full immutable ID). Independent teardown failures do not suppress
+the original error or skip evidence: inspect `cleanup_errors` and `residual_targets`.
+`cleanup: false` includes unresolved in-flight creates; it is not permission to
+remove resources whose ownership cannot be proved.
+
+Daemon-free fault regression for that accounting, not real launch acceptance:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH=integrations/runtime-updater/gate:integrations/runtime-updater/tests \
+python3 -m unittest discover \
+  -s integrations/runtime-updater/tests -p 'test_real_launch_acceptance.py' -v
+```
+
 Offline bootstrap regressions (no Docker resources are created):
 
 ```sh

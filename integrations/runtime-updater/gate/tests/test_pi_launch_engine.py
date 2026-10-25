@@ -10,7 +10,7 @@ import threading
 import unittest
 from urllib.parse import unquote, urlsplit
 
-from gate.engine import Engine
+from gate.engine import DockerError, Engine
 from gate.service import Gate
 from test_pi_launches import launch_policy
 
@@ -26,6 +26,16 @@ class RecordingDocker:
         self.ambiguous, self.manager, self.hub_private_alias = None, None, False
         self.bad_image, self.foreign, self.fail_delete = False, False, False
         self.swap_credential = False
+        self.image_labels = {'org.opencontainers.image.title': 'test Pi',
+                             'cn.swordfate.pi.launch-id': 'image-default-not-owner'}
+        self.normalize_restart = True
+        self.volume_sources = {}
+        self.gate_container = {
+            'Id': '4' * 64, 'Image': 'sha256:' + '5' * 64, 'State': {'Running': True},
+            'Mounts': [
+                {'Type': 'volume', 'Name': 'gate-state', 'Source': '/var/lib/docker/volumes/gate-state/_data',
+                 'Destination': str(base / 'state'), 'RW': True},
+                {'Type': 'bind', 'Source': '/srv/gate-profile', 'Destination': str(base / 'private'), 'RW': False}]}
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -67,11 +77,14 @@ class RecordingDocker:
             image = path.removeprefix('/images/').removesuffix('/json')
             return 200, {'Id': image if not self.bad_image else 'sha256:' + 'f' * 64,
                          'Config': {'Entrypoint': ['/usr/local/bin/pi-entrypoint'], 'Cmd': [],
-                                    'Env': ['PATH=/usr/local/bin:/usr/bin:/bin'], 'Volumes': None}}, None
+                                    'Env': ['PATH=/usr/local/bin:/usr/bin:/bin'], 'Volumes': None,
+                                    'Labels': self.image_labels}}, None
         if path.startswith('/volumes/'):
             name = path.rsplit('/', 1)[-1]
             return 200, {'Name': name, 'Driver': 'local', 'Options': None,
-                         'Mountpoint': '/var/lib/docker/volumes/' + name + '/_data'}, None
+                         'Mountpoint': self.volume_sources.get(name, '/var/lib/docker/volumes/' + name + '/_data')}, None
+        if path == '/containers/' + '4' * 64 + '/json':
+            return 200, self.gate_container, None
         if path == '/containers/' + p['hub_container'] + '/json':
             return 200, {'Id': p['hub_container'], 'Image': p['hub_image'],
                          'Config': {'User': '1000:1000'}, 'State': {'Running': True},
@@ -106,6 +119,10 @@ class RecordingDocker:
             key = f'{100 + len(self.containers):064x}'
             name = path.split('name=', 1)[1]
             config = {k: copy.deepcopy(v) for k, v in value.items() if k != 'HostConfig'}
+            config['Labels'] = {**(self.image_labels or {}), **config.get('Labels', {})}
+            host = copy.deepcopy(value['HostConfig'])
+            if self.normalize_restart:
+                host['RestartPolicy'].setdefault('MaximumRetryCount', 0)
             mounts = []
             for m in value['HostConfig']['Mounts']:
                 mounts.append({'Type': m['Type'], 'Source': m['Source'] if m['Type'] == 'bind' else
@@ -113,7 +130,7 @@ class RecordingDocker:
                                **({'Name': m['Source']} if m['Type'] == 'volume' else {}),
                                'Destination': m['Target'], 'RW': not m['ReadOnly'], 'Propagation': 'rprivate'})
             self.containers[key] = dict(Id=key, Name='/' + name, Image=p['pi_image'], Config=config,
-                                        HostConfig=copy.deepcopy(value['HostConfig']), Mounts=mounts,
+                                        HostConfig=host, Mounts=mounts,
                                         State={'Status': 'created', 'Running': False, 'ExitCode': 0,
                                                'FinishedAt': '0001-01-01T00:00:00Z'})
             if self.swap_credential:
@@ -174,6 +191,141 @@ class LaunchEngineTest(unittest.TestCase):
     def writes(self, operation):
         return [(m, p, v) for m, p, v in self.docker.calls if m == 'POST' and p.startswith('/containers/') and
                 (p.endswith('/' + operation) or operation == 'create' and p.startswith('/containers/create?'))]
+
+    def test_inherited_image_labels_allow_launch_with_gate_ownership_override(self):
+        self.docker.normalize_restart = False
+        self.submit()
+        self.tick()
+        self.assertEqual(self.m.get('a' * 32)['status'], 'running')
+        labels = self.writes('create')[0][2]['Labels']
+        self.assertEqual(labels['org.opencontainers.image.title'], 'test Pi')
+        self.assertEqual(labels['cn.swordfate.pi.launch-id'], 'a' * 32)
+
+    def test_daemon_defaulted_restart_count_allows_launch(self):
+        self.docker.image_labels = {}
+        self.submit()
+        self.tick()
+        self.assertEqual(self.m.get('a' * 32)['status'], 'running')
+        self.assertEqual(self.writes('create')[0][2]['HostConfig']['RestartPolicy'],
+                         {'Name': 'no', 'MaximumRetryCount': 0})
+
+    def test_normalized_inspect_still_rejects_any_label_or_restart_policy_drift(self):
+        self.submit()
+        self.tick()
+        self.assertEqual(self.m.get('a' * 32)['status'], 'running')
+        job = self.m._get('a' * 32)
+        item = self.docker.containers[job['container_id']]
+        labels = copy.deepcopy(item['Config']['Labels'])
+        for key in labels:
+            for remove in (False, True):
+                with self.subTest(key=key, remove=remove):
+                    changed = dict(labels)
+                    if remove:
+                        del changed[key]
+                    else:
+                        changed[key] = 'unexpected'
+                    item['Config']['Labels'] = changed
+                    with self.assertRaises(DockerError):
+                        self.m._engine().observe(job)
+        item['Config']['Labels'] = {**labels, 'extra': 'unexpected'}
+        with self.assertRaises(DockerError):
+            self.m._engine().observe(job)
+        item['Config']['Labels'] = labels
+        for restart in ({'Name': 'always', 'MaximumRetryCount': 0}, {'Name': 'no', 'MaximumRetryCount': 1},
+                        {'Name': 'no'}, {'Name': 'no', 'MaximumRetryCount': False}):
+            with self.subTest(restart=restart):
+                item['HostConfig']['RestartPolicy'] = restart
+                with self.assertRaises(DockerError):
+                    self.m._engine().observe(job)
+
+    def test_invalid_image_labels_refused_before_grant(self):
+        for n, labels in enumerate(([], {'label': 1}, {str(i): 'x' for i in range(129)}, {'x': 'y' * 8193})):
+            with self.subTest(n=n):
+                self.docker.image_labels = labels
+                key = f'{n:032x}'
+                self.submit(key)
+                self.tick()
+                self.assertEqual(self.m.get(key)['status'], 'failed')
+                self.assertEqual(self.docker.grants, {})
+
+    def test_host_gate_state_volume_alias_rejected_before_grant(self):
+        self.docker.volume_sources['test-home'] = str(self.base / 'state')
+        self.submit()
+        self.tick()
+        self.assertEqual(self.m.get('a' * 32)['status'], 'failed')
+        self.assertEqual(self.docker.grants, {})
+        self.assertEqual(self.writes('create'), [])
+
+    def container_gate(self):
+        self.policy['gate_provenance'] = {'mode': 'container', 'container': '4' * 64,
+                                          'image': 'sha256:' + '5' * 64}
+        self.gate.close()
+        self.gate = Gate(self.base / 'state', launch_policy=self.policy,
+                         launch_engine=Engine(str(self.base / 'docker.sock')))
+        self.m = self.gate.pi_launches
+        self.docker.manager = self.m
+
+    def test_pinned_container_gate_resolves_disjoint_state_volume_and_profile_bind(self):
+        self.container_gate()
+        self.submit()
+        self.tick()
+        self.assertEqual(self.m.get('a' * 32)['status'], 'running')
+
+    def test_container_gate_state_volume_name_is_never_a_pi_volume(self):
+        self.policy['volumes']['home'] = 'gate-state'
+        self.container_gate()
+        self.submit()
+        self.tick()
+        self.assertEqual(self.m.get('a' * 32)['status'], 'failed')
+        self.assertEqual(self.docker.grants, {})
+        self.assertEqual(self.writes('create'), [])
+
+    def test_container_gate_private_backing_source_aliases_rejected(self):
+        self.container_gate()
+        for n, source in enumerate(('/var/lib/docker/volumes/gate-state/_data',
+                                    '/var/lib/docker/volumes/gate-state/_data/child',
+                                    '/var/lib/docker/volumes/gate-state', '/srv/gate-profile')):
+            with self.subTest(source=source):
+                self.docker.volume_sources['test-home'] = source
+                key = f'{n:032x}'
+                self.submit(key)
+                self.tick()
+                self.assertEqual(self.m.get(key)['status'], 'failed')
+                self.assertEqual(self.docker.grants, {})
+                self.assertEqual(self.writes('create'), [])
+
+    def test_container_gate_missing_ambiguous_or_changed_provenance_fails_closed(self):
+        self.container_gate()
+        good = copy.deepcopy(self.docker.gate_container)
+        cases = [dict(good, Id='6' * 64), dict(good, Image='sha256:' + '6' * 64),
+                 dict(good, State={'Running': False}), dict(good, Mounts=[]),
+                 dict(good, Mounts=good['Mounts'] + [good['Mounts'][0]]),
+                 dict(good, Mounts=[dict(good['Mounts'][0], Source='/wrong-volume'), good['Mounts'][1]])]
+        for n, item in enumerate(cases):
+            with self.subTest(n=n):
+                self.docker.gate_container = item
+                key = f'{n:032x}'
+                self.submit(key)
+                self.tick()
+                self.assertEqual(self.m.get(key)['status'], 'failed')
+                self.assertEqual(self.docker.grants, {})
+                self.assertEqual(self.writes('create'), [])
+
+    def test_container_gate_bind_backing_cannot_overlap_any_pi_bind_source(self):
+        source = self.base / 'models'
+        source.mkdir()
+        self.policy['auxiliary_binds'] = [{'source': str(source), 'target': '/run/cc-switch-pi-models', 'read_only': True}]
+        self.container_gate()
+        for n, protected in enumerate((self.policy['root'], self.policy['credential_root'], str(source))):
+            with self.subTest(protected=protected):
+                self.docker.gate_container['Mounts'][0] = {
+                    'Type': 'bind', 'Source': protected, 'Destination': str(self.base / 'state'), 'RW': True}
+                key = f'{n:032x}'
+                self.submit(key)
+                self.tick()
+                self.assertEqual(self.m.get(key)['status'], 'failed')
+                self.assertEqual(self.docker.grants, {})
+                self.assertEqual(self.writes('create'), [])
 
     def test_fixed_definition_independent_grants_and_owned_exit_cleanup(self):
         self.submit()
@@ -265,6 +417,9 @@ class LaunchEngineTest(unittest.TestCase):
                          launch_engine=Engine(str(self.base / 'docker.sock')))
         self.m = self.gate.pi_launches
         self.docker.manager = self.m
+        # A restarted observer must use the durable image-label snapshot, not
+        # reconstruct expected labels from a new daemon/image observation.
+        self.docker.image_labels = {'unexpected-new-label': 'changed'}
         before = len(self.docker.calls)
         self.m.recover()
         self.assertEqual(before, len(self.docker.calls))

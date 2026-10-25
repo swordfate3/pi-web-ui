@@ -17,7 +17,7 @@ from .store import ACTIVE, REQUEST_OPEN, Store, _json
 
 POLICY_FIELDS = ('version', 'enabled', 'root', 'root_label', 'default_path', 'profile_root',
                  'credential_root', 'pi_image', 'hub_image', 'hub_container', 'hub_config',
-                 'hub_export_root', 'volumes', 'environment', 'auxiliary_binds')
+                 'hub_export_root', 'volumes', 'environment', 'auxiliary_binds', 'gate_provenance')
 VOLUMES = {'home': '/home/node', 'runtime': '/home/node/.local', 'config': '/home/node/.pi',
            'credentials': '/home/node/.credentials', 'cache': '/home/node/.cache/huggingface',
            'hub_runtime': '/run/pi-web-hub'}
@@ -126,6 +126,16 @@ def validate_policy(value, state):
         if not isinstance(value[key], str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', value[key]):
             raise ValueError('immutable launch image required')
     checked_hex(value['hub_container'], HEX64)
+    provenance = value['gate_provenance']
+    if not isinstance(provenance, dict) or provenance.get('mode') not in ('host', 'container'):
+        raise ValueError('explicit Gate provenance required')
+    if provenance['mode'] == 'host':
+        exact(provenance, ('mode',))
+    else:
+        exact(provenance, ('mode', 'container', 'image'))
+        checked_hex(provenance['container'], HEX64)
+        if not isinstance(provenance['image'], str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', provenance['image']):
+            raise ValueError('immutable Gate image required')
     absolute(value['hub_config'])
     absolute(value['hub_export_root'])
     if overlap(str(Path(value['hub_config']).parent), value['hub_export_root']):
@@ -317,7 +327,7 @@ class PiLaunches:
     def _engine(self):
         from .engine import Engine
         from .pi_launch_engine import PiLaunchEngine
-        return PiLaunchEngine(self.engine or Engine(), self.policy)
+        return PiLaunchEngine(self.engine or Engine(), self.policy, str(self.gate.directory.absolute()))
 
     def _fence(self, job, workspace=True):
         with self.store.lock:
@@ -367,9 +377,9 @@ class PiLaunches:
         try:
             self._fence(job)
             engine = self._engine()
-            env = engine.preflight(job)
+            image = engine.preflight(job)
             self._fence(job)
-            job = self._update(job['id'], stage='grant_intent', image_env=env)
+            job = self._update(job['id'], stage='grant_intent', **image)
             credential = engine.grant(job)
             job = self._update(job['id'], stage='credential_intent', run_id=credential['run_id'])
             credential_identity = engine.write_credential(job, credential)

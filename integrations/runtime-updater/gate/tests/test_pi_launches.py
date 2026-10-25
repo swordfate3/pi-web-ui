@@ -18,6 +18,7 @@ def launch_policy(base):
                 credential_root=str(base / 'credentials'), pi_image='sha256:' + '1' * 64,
                 hub_image='sha256:' + '2' * 64, hub_container='3' * 64,
                 hub_config='/private/config.json', hub_export_root='/exports',
+                gate_provenance={'mode': 'host'},
                 volumes=dict(home='test-home', runtime='test-runtime', config='test-config',
                              credentials='test-models', cache='test-cache', hub_runtime='test-hub-runtime'),
                 environment={'HTTPS_PROXY': 'http://private-proxy:8080'})
@@ -45,6 +46,22 @@ class LaunchesTest(unittest.TestCase):
         return dict(id=key, path=path, label='Project A',
                     policy_revision=manager.configuration()['revision'],
                     workspace_revision=manager.browse(path)['revision'])
+
+    def test_gate_provenance_requires_explicit_trusted_host_or_pinned_container(self):
+        self.policy.pop('gate_provenance', None)
+        with self.assertRaises(ValueError):
+            self.enable()
+        for value in ({'mode': 'host', 'source': '/untrusted'}, {'mode': 'automatic'},
+                      {'mode': 'container', 'container': 'gate', 'image': 'latest'},
+                      {'mode': 'container', 'container': '4' * 64}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.policy['gate_provenance'] = value
+                self.enable()
+        for value in ({'mode': 'host'}, {'mode': 'container', 'container': '4' * 64,
+                                       'image': 'sha256:' + '5' * 64}):
+            with self.subTest(value=value):
+                self.policy['gate_provenance'] = value
+                self.assertTrue(self.enable().configuration()['enabled'])
 
     def test_default_disabled_and_no_browse_or_submit(self):
         self.assertTrue(hasattr(self.gate, 'pi_launches'), 'Gate launch capability is missing')

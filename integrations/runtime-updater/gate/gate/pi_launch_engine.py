@@ -1,6 +1,7 @@
 """Fixed launch operations over Engine.call; never a command API or Docker CLI."""
 import json
 import os
+import re
 import stat
 import time
 from urllib.parse import quote
@@ -53,8 +54,9 @@ try{
 
 
 class PiLaunchEngine:
-    def __init__(self, engine, policy):
+    def __init__(self, engine, policy, state_directory):
         self.engine, self.policy = engine, policy
+        self.state_directory = absolute(state_directory)
         self.deadline = time.monotonic() + 30
 
     def _call(self, method, path, value=None, **kwargs):
@@ -87,8 +89,64 @@ class PiLaunchEngine:
                 raise DockerError('auxiliary bind overlaps Hub private data')
         return hub
 
+    def _volume(self, name):
+        if not isinstance(name, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}', name):
+            raise DockerError('invalid fixed volume identity')
+        volume = self._call('GET', '/volumes/' + name)
+        if (not isinstance(volume, dict) or volume.get('Name') != name or
+                volume.get('Driver') != 'local' or volume.get('Options')):
+            raise DockerError('existing local volume required')
+        return absolute(volume.get('Mountpoint'))
+
+    def _gate_sources(self):
+        """Resolve private backing roots, never guess container-local host paths.
+
+        Host mode is an explicit administrator assertion of shared daemon path
+        coordinates. Container mode pins the Gate identity and requires mounted
+        state/profile storage; writable-layer or ambiguous mappings fail closed.
+        Exclude the entire backing mount, not just a suffix within that mount.
+        """
+        p = self.policy
+        private = [self.state_directory, p['profile_root']]
+        proof = p['gate_provenance']
+        if proof['mode'] == 'host':
+            return private, set()
+        gate = self._call('GET', '/containers/' + proof['container'] + '/json')
+        if (not isinstance(gate, dict) or gate.get('Id') != proof['container'] or
+                gate.get('Image') != proof['image'] or gate.get('State', {}).get('Running') is not True):
+            raise DockerError('Gate identity unavailable')
+        mounts = gate.get('Mounts')
+        if not isinstance(mounts, list) or len(mounts) > 128:
+            raise DockerError('Gate backing mounts unavailable')
+        destinations = [absolute(m.get('Destination')) for m in mounts]
+        if len(set(destinations)) != len(destinations):
+            raise DockerError('Gate backing mounts ambiguous')
+        sources, names = [], set()
+        for path in private:
+            parents = [m for m in mounts if path == m['Destination'] or path.startswith(m['Destination'] + '/')]
+            if not parents:
+                raise DockerError('Gate private storage must be mounted')
+            parent = max(parents, key=lambda m: len(m['Destination']))
+            relevant = [parent] + [m for m in mounts if m['Destination'].startswith(path + '/')]
+            for mount in relevant:
+                source = absolute(mount.get('Source'))
+                if mount.get('Type') == 'volume':
+                    name = mount.get('Name')
+                    if self._volume(name) != source or mount.get('SubPath') or mount.get('Subpath'):
+                        raise DockerError('Gate volume backing mismatch')
+                    names.add(name)
+                elif mount.get('Type') != 'bind':
+                    raise DockerError('Gate private backing unsupported')
+                sources.append(source)
+        return sources, names
+
     def preflight(self, job):
         p = self.policy
+        gate_sources, gate_names = self._gate_sources()
+        bind_sources = [p['root'], p['credential_root']] + [b['source'] for b in p['auxiliary_binds']]
+        if (gate_names.intersection(p['volumes'].values()) or
+                any(overlap(source, protected) for source in bind_sources for protected in gate_sources)):
+            raise DockerError('launch mount aliases Gate private data')
         images = {}
         for name in ('pi_image', 'hub_image'):
             item = self._call('GET', '/images/' + quote(p[name], safe='') + '/json')
@@ -102,20 +160,25 @@ class PiLaunchEngine:
         if (not isinstance(env, list) or any(not isinstance(e, str) or '=' not in e or len(e) > 8192 for e in env) or
                 len(env) > 128 or len({e.split('=', 1)[0] for e in env}) != len(env)):
             raise DockerError('launch image environment invalid')
+        labels = config.get('Labels')
+        if labels is None:
+            labels = {}
+        if (not isinstance(labels, dict) or len(labels) > 128 or
+                any(not isinstance(k, str) or not isinstance(v, str) or len(k) > 4096 or len(v) > 8192
+                    for k, v in labels.items())):
+            raise DockerError('launch image labels invalid')
         hub = self._hub()
         for name in p['volumes'].values():
-            volume = self._call('GET', '/volumes/' + name)
-            if (not isinstance(volume, dict) or volume.get('Name') != name or
-                    volume.get('Driver') != 'local' or volume.get('Options') or not volume.get('Mountpoint')):
-                raise DockerError('existing local volume required')
-            source = absolute(volume['Mountpoint'])
+            source = self._volume(name)
+            if any(overlap(source, protected) for protected in gate_sources):
+                raise DockerError('volume aliases Gate private data')
             if any(overlap(source, p[k]) for k in ('root', 'profile_root', 'credential_root')):
                 raise DockerError('volume overlaps private authority')
             for mount in hub.get('Mounts') or []:
                 if overlap(source, mount['Source']) and not (
                         name == p['volumes']['hub_runtime'] and mount['Destination'] == '/run/pi-web-hub'):
                     raise DockerError('volume aliases Hub private data')
-        return env
+        return {'image_env': env, 'image_labels': labels}
 
     def _hub_operation(self, action, job):
         self._hub()
@@ -197,11 +260,11 @@ class PiLaunchEngine:
                 'OpenStdin': True, 'StdinOnce': False, 'Tty': True,
                 'AttachStdin': False, 'AttachStdout': False, 'AttachStderr': False,
                 'Env': [k + '=' + v for k, v in sorted(env.items())],
-                'Labels': {OWNER: job['id'], 'cn.swordfate.pi.run-id': job['run_id'],
+                'Labels': {**job['image_labels'], OWNER: job['id'], 'cn.swordfate.pi.run-id': job['run_id'],
                            'cn.swordfate.pi.lifecycle': '1', 'cn.swordfate.pi.launch-policy': job['request']['policy_revision']},
                 'HostConfig': {'Mounts': mounts, 'NetworkMode': 'host', 'Privileged': False,
                                'CapDrop': ['ALL'], 'SecurityOpt': ['no-new-privileges:true'],
-                               'AutoRemove': False, 'RestartPolicy': {'Name': 'no'},
+                               'AutoRemove': False, 'RestartPolicy': {'Name': 'no', 'MaximumRetryCount': 0},
                                'Memory': 4 * 1024**3, 'PidsLimit': 512,
                                'LogConfig': {'Type': 'json-file', 'Config': {'max-size': '2m', 'max-file': '3'}}}}
 
@@ -226,6 +289,9 @@ class PiLaunchEngine:
                 raise DockerError('launch container definition changed')
         if sorted(config.get('Env') or []) != sorted(expected['Env']):
             raise DockerError('launch environment changed')
+        restart = host.get('RestartPolicy')
+        if not isinstance(restart, dict) or type(restart.get('MaximumRetryCount')) is not int:
+            raise DockerError('launch restart policy invalid')
         for key, value in expected['HostConfig'].items():
             if key != 'Mounts' and host.get(key) != value:
                 raise DockerError('launch security changed')

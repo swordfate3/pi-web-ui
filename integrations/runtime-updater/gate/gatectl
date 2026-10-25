@@ -125,7 +125,13 @@ def finish_upgrade(identifier):
 
 
 def export_lifecycle(destination):
+    export_credential(destination, 'lifecycle-export')
+
+
+def export_credential(destination, command):
     """Create once under a non-symlinked private host directory; never echo token."""
+    if command not in ('lifecycle-export', 'hub-management-export'):
+        raise ValueError('invalid credential export')
     path = Path(destination)
     if not path.is_absolute() or '..' in path.parts or path.name in ('', '.', '..'):
         raise ValueError('absolute new credential path required')
@@ -141,10 +147,10 @@ def export_lifecycle(destination):
         descriptor = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=directory)
         with os.fdopen(descriptor, 'w') as stream:
-            value = admin('lifecycle-export', payload={})
+            value = admin(command, payload={})
             if (not isinstance(value, dict) or set(value) != {'token'} or
                     not isinstance(value['token'], str) or not re.fullmatch('[0-9a-f]{64}', value['token'])):
-                raise ValueError('invalid lifecycle credential')
+                raise ValueError('invalid exported credential')
             os.fchmod(stream.fileno(), 0o600)
             json.dump(value, stream)
             stream.write('\n')
@@ -153,7 +159,7 @@ def export_lifecycle(destination):
         os.fsync(directory)
     finally:
         os.close(directory)
-    print('生命周期凭据已写入指定的0600文件；不会显示凭据，不会启用策略。')
+    print('独立凭据已写入指定的0600文件；不会显示凭据，不会启用策略。')
 
 
 def install_client(container):
@@ -370,6 +376,14 @@ auto 不监听推送、不追溯执行旧待批，需重新申请；Hub 须匹�
 文件为{"token":"..."}。勿放入普通Pi可写工作区或发送到聊天。
 导出失败可能留下空0600文件；检查后选择新文件名，不自动覆盖。''', **formatting)
     lifecycle_export.add_argument('file', metavar='FILE')
+    management_export = sub.add_parser(
+        'hub-management-export', help='将独立Hub审批凭据写入新的私有0600文件',
+        description='一次性引导受信Hub审批门户；仅导出固定管理协议凭据，不打印token。',
+        epilog='''示例：./gatectl hub-management-export /绝对路径/私有目录/gate-management.json
+目标必须不存在；拒绝软链接和覆盖。父目录须由当前用户所有且不可被其他用户写入。
+文件为{"token":"..."}。仅供受信Hub私有配置使用，不要放入Pi工作区或聊天。
+此命令不启用策略；导出失败后检查目标，选择新文件名。''', **formatting)
+    management_export.add_argument('file', metavar='FILE')
     runtime_updates = sub.add_parser(
         'runtime-updates', help='只读查询全局Pi runtime策略和更新任务',
         description='查询独立runtime策略、最近任务和全部活跃任务，或查看指定任务详情。',
@@ -438,6 +452,8 @@ auto 不监听推送、不追溯执行旧待批，需重新申请；Hub 须匹�
         print(json.dumps(result, ensure_ascii=False))
     elif args.command == 'lifecycle-export':
         export_lifecycle(args.file)
+    elif args.command == 'hub-management-export':
+        export_credential(args.file, 'hub-management-export')
     elif args.command == 'lifecycle':
         if args.id and not re.fullmatch('[0-9a-f]{32}', args.id):
             parser.error('full lifecycle job ID required')

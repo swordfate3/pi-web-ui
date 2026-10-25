@@ -59,6 +59,8 @@ class Gate:
         if (len(self.lifecycle_token) != 64 or any(c not in '0123456789abcdef' for c in self.lifecycle_token) or
                 self.lifecycle_token == self.token):
             raise ValueError('invalid lifecycle token')
+        from .hub_management import credential
+        self.hub_management_token = credential(directory, (self.token, self.lifecycle_token))
         self.deployer = deployer
         self.worker = None
         self.policy = policy
@@ -73,6 +75,8 @@ class Gate:
         self.head_resolver = head_resolver or fetch_head
         if policy is not None:
             self.store.bootstrap(policy)
+        from .hub_management import HubManagement
+        self.hub_management = HubManagement(self)
 
     def close(self):
         self.closing = True
@@ -416,8 +420,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def dispatch(self):
         gate = self.server.gate
         admin = self.server.is_admin
+        management = self.path.startswith('/v1/hub-management')
         if not admin:
             port = self.server.server_address[1]
+            if management and any(len(self.headers.get_all(name, [])) > 1 for name in
+                                  ('Host', 'Origin', 'Authorization', 'Content-Type', 'Transfer-Encoding')):
+                self.reply(400, {'error': 'ambiguous management headers'})
+                return
             if self.headers.get('Host') not in (f'127.0.0.1:{port}', f'localhost:{port}'):
                 self.reply(403, {'error': 'Host not allowed'})
                 return
@@ -430,13 +439,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             auth = self.headers.get('Authorization', '')
             lifecycle_route = self.path.startswith('/v1/pi-lifecycle/')
-            expected_token = gate.lifecycle_token if lifecycle_route else gate.token
+            expected_token = (gate.hub_management_token if management else
+                              gate.lifecycle_token if lifecycle_route else gate.token)
             if not hmac.compare_digest(auth.encode('utf-8'), ('Bearer ' + expected_token).encode('ascii')):
                 self.reply(401, {'error': 'request credential required'})
                 return
         try:
             route = urlsplit(self.path)
-            if not admin and route.path in ('/v1/runtime-versions', '/v1/runtime-readiness'):
+            if not admin and management:
+                gate.hub_management.handle(self)
+            elif admin and self.command == 'POST' and self.path == '/admin/hub-management-export':
+                exact(self.body(maximum=4096, strict=True), ())
+                self.reply(200, {'token': gate.hub_management_token})
+            elif not admin and route.path in ('/v1/runtime-versions', '/v1/runtime-readiness'):
                 if self.command != 'GET':
                     self.reply(405, {'error': 'method not allowed'})
                     return

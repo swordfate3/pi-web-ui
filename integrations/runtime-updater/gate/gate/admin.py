@@ -57,7 +57,8 @@ def main():
                                            'lifecycle-resolve', 'lifecycle-export', 'upgrade-status',
                                            'upgrade-reserve', 'upgrade-finish', 'upgrade-abort',
                                            'runtime-updates', 'runtime-policy', 'runtime-approve',
-                                           'runtime-reject', 'runtime-resolve', 'terminal-preflight'))
+                                           'runtime-reject', 'runtime-resolve', 'terminal-preflight',
+                                           'hub-management-export'))
     parser.add_argument('id', nargs='?')
     parser.add_argument('--commit')
     parser.add_argument('--plan')

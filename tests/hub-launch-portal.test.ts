@@ -39,6 +39,7 @@ function fixture(
   let randomByte = 7;
   let job: Record<string, unknown> | undefined;
   let delayed: (() => Promise<void>) | undefined;
+  let failNextStorageSet = false;
   const context = {
     get,
     URL,
@@ -54,7 +55,10 @@ function fixture(
     sessionStorage: {
       getItem: (key: string) => storage.get(key),
       setItem: (key: string, value: string) => {
-        if (options.storageFails) throw new Error();
+        if (options.storageFails || failNextStorageSet) {
+          failNextStorageSet = false;
+          throw new Error();
+        }
         storage.set(key, value);
       },
       removeItem: (key: string) => storage.delete(key),
@@ -85,7 +89,18 @@ function fixture(
       }
       if (route === "gate/launches" && !body) return { jobs: job ? [job] : [] };
       if (route === "gate/launches" && body) {
-        assert.ok([...storage.values()].some((raw) => raw.includes(String(body.id))));
+        const persisted = [...storage.values()].map((raw) => JSON.parse(raw));
+        assert.ok(persisted.some((value) => value.id === body.id && Object.keys(value).length === 1));
+        assert.ok(
+          persisted.some(
+            (value) =>
+              value.id === body.id &&
+              value.path === body.path &&
+              value.label === body.label &&
+              value.policy_revision === body.policy_revision &&
+              value.workspace_revision === body.workspace_revision,
+          ),
+        );
         job = {
           id: body.id,
           path: body.path,
@@ -129,6 +144,9 @@ function fixture(
     button,
     defer(fn: () => Promise<void>) {
       delayed = fn;
+    },
+    failNextStorageSet() {
+      failNextStorageSet = true;
     },
   };
 }
@@ -191,7 +209,10 @@ test("locking redacts a pending launch to its recovery id without permitting a r
 
   const restoredStorage = new Map(f.storage);
   const restored = fixture({ storage: restoredStorage });
-  assert.deepEqual(JSON.parse(restoredStorage.get("pi-hub-launch") ?? "null"), { id });
+  assert.deepEqual(
+    [...restoredStorage.values()].map((raw) => JSON.parse(raw)),
+    [{ id }],
+  );
   await restored.launchPi.poll();
   await restored.get("launch-form").fire("submit");
   assert.ok(restored.calls.some((call) => call.route === `gate/launches/${id}` && !call.body));
@@ -202,13 +223,41 @@ test("locking redacts a pending launch to its recovery id without permitting a r
   assert.equal(f.get("launch-current").textContent, "");
   assert.equal(f.get("launch-name").value, "");
   assert.equal(f.get("launch-jobs").children.length, 0);
-  assert.deepEqual(JSON.parse(f.storage.get("pi-hub-launch") ?? "null"), { id });
+  assert.deepEqual(
+    [...f.storage.values()].map((raw) => JSON.parse(raw)),
+    [{ id }],
+  );
 
   f.unlock();
   await f.launchPi.poll();
   assert.ok(f.calls.some((call) => call.route === `gate/launches/${id}` && !call.body));
   await f.get("launch-form").fire("submit");
   assert.equal(f.calls.filter((call) => call.body).length, 1);
+
+  const reopened = fixture({ storage: f.storage });
+  await reopened.launchPi.poll();
+  await reopened.get("launch-form").fire("submit");
+  assert.ok(reopened.calls.some((call) => call.route === `gate/launches/${id}` && !call.body));
+  assert.equal(reopened.calls.filter((call) => call.body).length, 0);
+  assert.equal(reopened.get("launch-start").disabled, true);
+});
+
+test("failed lock redaction preserves a durable recovery id across reload", async () => {
+  const f = fixture({ lose: true });
+  await f.launchPi.poll();
+  f.get("launch-name").value = "不能泄露的目录名称";
+  await f.get("launch-form").fire("submit");
+  const id = "07".repeat(16);
+
+  f.failNextStorageSet();
+  f.lock();
+
+  const stored = [...f.storage.values()].map((raw) => JSON.parse(raw));
+  assert.deepEqual(stored, [{ id }]);
+  assert.equal(
+    [...f.storage.values()].some((raw) => raw.includes("不能泄露") || raw.includes("pi_projects")),
+    false,
+  );
 
   const reopened = fixture({ storage: f.storage });
   await reopened.launchPi.poll();

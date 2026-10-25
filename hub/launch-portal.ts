@@ -6,13 +6,20 @@ export const launchPortalCss = `.launch-section{border-top:1px solid #dce5d7;mar
 export const launchPortalJs = `
   const launchPi = (() => {
     let config, directory, jobs = [], loading, browsing = false, sequence = 0, sending = false, result = '', pending, known = false;
-    const storageKey = 'pi-hub-launch';
+    const requestStorageKey = 'pi-hub-launch';
+    const receiptStorageKey = 'pi-hub-launch-id';
     const node = (tag, text, cls = '') => { const el = document.createElement(tag); el.textContent = text; el.className = cls; return el; };
     const recovery = (value) => value && /^[a-f0-9]{32}$/.test(value.id) ? { id:value.id } : undefined;
-    try { pending = recovery(JSON.parse(sessionStorage.getItem(storageKey) || 'null')); } catch {}
+    const readStored = (key) => { try { return JSON.parse(sessionStorage.getItem(key) || 'null'); } catch { return undefined; } };
+    const writeStored = (key, value) => { try { sessionStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; } };
+    const removeStored = (key) => { try { sessionStorage.removeItem(key); return true; } catch { return false; } };
+    pending = recovery(readStored(receiptStorageKey));
+    let receiptDurable = !!pending;
+    if (!pending) pending = recovery(readStored(requestStorageKey));
     const current = (generation) => generation === authGeneration && auth.authorized && !authTransition;
-    const save = () => { try { if (pending) sessionStorage.setItem(storageKey, JSON.stringify(pending)); else sessionStorage.removeItem(storageKey); return true; } catch { return false; } };
-    const retainRecovery = () => { pending = recovery(pending); if (!save()) { try { sessionStorage.removeItem(storageKey); } catch {} } };
+    const saveReceipt = () => { const receipt = recovery(pending); return !!receipt && writeStored(receiptStorageKey, receipt); };
+    const clearStoredRecovery = () => removeStored(requestStorageKey) && removeStored(receiptStorageKey);
+    const retainRecovery = () => { pending = recovery(pending); if (!pending) return; if (saveReceipt()) receiptDurable = true; if (receiptDurable) removeStored(requestStorageKey); };
     retainRecovery();
     function render() {
       get('launch-picker').hidden = !auth.authorized || !config?.enabled;
@@ -98,15 +105,16 @@ export const launchPortalJs = `
       if (!window.confirm('在 ' + profile.rootLabel + '/' + selected.path + ' 新建 Pi？\\n名称：' + label + '\\n将使用固定容器配置。关闭网页不会停止 Pi。')) return;
       if (!current(generation) || directory !== selected || config !== profile) return;
       const id = [...crypto.getRandomValues(new Uint8Array(16))].map((v) => v.toString(16).padStart(2,'0')).join('');
-      pending = { id, path:selected.path, label, policy_revision:profile.revision, workspace_revision:selected.revision }; known = false;
-      if (!save()) { pending = undefined; result = '未启动：无法保存原任务编号，请恢复浏览器会话存储。'; render(); return; }
+      const request = { id, path:selected.path, label, policy_revision:profile.revision, workspace_revision:selected.revision };
+      pending = recovery(request); known = false; receiptDurable = saveReceipt();
+      if (!receiptDurable || !writeStored(requestStorageKey, request)) { clearStoredRecovery(); pending = undefined; receiptDurable = false; result = '未启动：无法保存原任务编号，请恢复浏览器会话存储。'; render(); return; }
       sending = true; render();
       try {
-        const job = await api('gate/launches', pending); if (!current(generation)) return;
+        const job = await api('gate/launches', request); if (!current(generation)) return;
         known = true; jobs = [job, ...jobs.filter((row) => row.id !== job.id)]; result = '启动申请已记录：' + id + '。等待 Pi 运行并登记，不代表已可以聊天。';
       } catch (error) {
         if (!current(generation) || error.stale) return;
-        if ([400,409].includes(error.status)) { pending = undefined; save(); result = '目录或启动配置已变化，请刷新后重新选择并确认。'; }
+        if ([400,409].includes(error.status)) { pending = undefined; clearStoredRecovery(); receiptDurable = false; result = '目录或启动配置已变化，请刷新后重新选择并确认。'; }
         else result = '启动结果尚未确认：' + id + '。只查询原编号，不会自动重试。';
       } finally { sending = false; if (current(generation)) render(); }
     });
@@ -114,7 +122,7 @@ export const launchPortalJs = `
     get('launch-parent').addEventListener('click', () => directory?.parent !== null && directory && browse(directory.parent));
     get('launch-more').addEventListener('click', () => directory?.nextCursor && browse(directory.path, directory.nextCursor));
     get('launch-refresh').addEventListener('click', poll);
-    get('launch-again').addEventListener('click', () => { if (!current(authGeneration) || sending || !known) return; const old = pending; pending = undefined; if (!save()) { pending = old; result = '无法保存新的操作状态，未允许重复创建。'; } else { known = false; result = '请核对目录和名称，再确认启动另一个独立 Pi。'; } render(); });
+    get('launch-again').addEventListener('click', () => { if (!current(authGeneration) || sending || !known) return; const old = pending; if (!clearStoredRecovery()) { pending = old; result = '无法保存新的操作状态，未允许重复创建。'; } else { pending = undefined; receiptDurable = false; known = false; result = '请核对目录和名称，再确认启动另一个独立 Pi。'; } render(); });
     function clearProtected() { sequence++; browsing = false; retainRecovery(); config = undefined; directory = undefined; jobs = []; result = ''; known = false; get('launch-name').value = ''; renderDirectory(); }
     return { poll, updateAuth: render, clearProtected };
   })();

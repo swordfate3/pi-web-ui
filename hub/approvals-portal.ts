@@ -7,6 +7,7 @@ export const approvalsPortalJs = `
     let tasks = [], policies = [], inbox = [], unavailable = 0, truncated = false;
     let loading, sending = false, result = '', failed = false;
     const pending = new Map();
+    const taskCards = new Map(), policyCards = new Map();
     const storageKey = 'pi-hub-gate-decisions';
     const keyFor = (item, policy = false) => (policy ? 'policy:' : 'task:') + item.kind + ':' + item.id;
     const node = (tag, text, cls = '') => { const item = document.createElement(tag); item.textContent = text; item.className = cls; return item; };
@@ -23,15 +24,38 @@ export const approvalsPortalJs = `
     function button(label, callback, disabled, danger = false) {
       const item = node('button', label, danger ? 'danger' : ''); item.type = 'button'; item.disabled = disabled; item.addEventListener('click', callback); return item;
     }
+    function renderCards(id, items, cache, policy, create) {
+      const container = get(id), keys = new Set(), rows = [];
+      for (const item of items) {
+        const key = keyFor(item, policy), model = JSON.stringify([authGeneration, item]);
+        let card = cache.get(key);
+        if (!card || card.model !== model) { card = { ...create(item), model }; cache.set(key, card); }
+        keys.add(key); rows.push(card.row);
+        for (const control of card.controls) control.disabled = blocked(key);
+      }
+      for (const key of cache.keys()) if (!keys.has(key)) cache.delete(key);
+      // Leave unchanged nodes attached: polling must not reset details, drafts
+      // or focus. Changed identities/content receive new closures and controls.
+      const retained = new Set(rows);
+      for (const child of [...container.children]) if (!retained.has(child)) container.removeChild(child);
+      for (let index = 0; index < rows.length; index++) {
+        if (container.children[index] !== rows[index]) container.insertBefore(rows[index], container.children[index] || null);
+      }
+    }
     function render() {
-      for (const id of ['approvals-tasks','approvals-policies','approvals-inbox','approvals-receipts']) get(id).replaceChildren();
+      for (const id of ['approvals-inbox','approvals-receipts']) get(id).replaceChildren();
       get('approvals-result').textContent = auth.authorized ? result : '';
       get('approvals-refresh').disabled = !auth.authorized || authTransition || loading === authGeneration;
       get('approvals-inbox-status').textContent = '';
       get('approvals-status').textContent = !auth.authorized ? '解锁管理后可查看任务' : !auth.gateManagementAvailable ? 'Gate 审批尚未接入：需管理员一次性配置专用凭据；扩展审核独立可用。' : failed ? 'Gate 暂不可用；已清除旧任务显示，未执行任何操作。' : loading === authGeneration ? '正在核对任务…' : tasks.length + ' 个任务 · Gate 独立执行';
-      if (!auth.authorized) return;
+      if (!auth.authorized) {
+        tasks = []; policies = []; inbox = []; unavailable = 0; truncated = false; result = ''; failed = false;
+        taskCards.clear(); policyCards.clear();
+        get('approvals-tasks').replaceChildren(); get('approvals-policies').replaceChildren();
+        return;
+      }
       for (const item of pending.values()) get('approvals-receipts').append(node('p', '未确认回执：' + item.decision_id + '。仅查询原编号，不会重复发送；未确认前该对象不能再次操作。', 'approval-receipt'));
-      for (const item of tasks) {
+      renderCards('approvals-tasks', tasks, taskCards, false, (item) => {
         const row = node('article', '', 'approval-card');
         row.append(node('h5', item.title), node('p', item.target + ' · ' + item.status + ' / ' + item.stage));
         row.append(node('p', '任务编号：' + item.id + (item.version ? ' · 版本：' + item.version : ''), 'approval-identity'));
@@ -43,9 +67,9 @@ export const approvalsPortalJs = `
           if (!actionLabel(action)) continue;
           controls.append(button(actionLabel(action), () => decide(item, action), blocked(keyFor(item)), action !== 'approve'));
         }
-        row.append(controls); get('approvals-tasks').append(row);
-      }
-      for (const item of policies) {
+        row.append(controls); return { row, controls: [...controls.children] };
+      });
+      renderCards('approvals-policies', policies, policyCards, true, (item) => {
         const row = node('article', '', 'approval-card'); row.append(node('h5', item.kind + ' / ' + item.id));
         row.append(node('p', '当前策略：' + modeLabel(item.mode) + (item.paused ? ' · 已暂停' : '')));
         row.append(node('p', '可信镜像：' + (item.images?.join(', ') || '由已登记的服务定义管理'), 'approval-identity'));
@@ -55,8 +79,8 @@ export const approvalsPortalJs = `
         select.value = item.mode; select.disabled = blocked(keyFor(item, true)); controls.append(select);
         controls.append(button('保存策略', () => changePolicy(item, select.value), blocked(keyFor(item, true))));
         if (item.kind === 'service' && item.paused) controls.append(button('恢复服务审批', () => resume(item), blocked(keyFor(item, true))));
-        row.append(controls); get('approvals-policies').append(row);
-      }
+        row.append(controls); return { row, controls: [...controls.children] };
+      });
       get('approvals-inbox-status').textContent = !auth.interactionsAvailable ? '扩展授权收件箱未配置' : inbox.length + ' 个待审核请求' + (unavailable ? ' · ' + unavailable + ' 个来源暂不可用，不能视为空' : '') + (truncated ? ' · 已达显示上限' : '');
       for (const item of inbox) {
         if (!/^\\/interactions\\/[a-f0-9-]{32,64}\\/[a-f0-9]{32}\\/$/.test(item.path) || item.deadline <= Date.now()) continue;
@@ -132,7 +156,7 @@ export const approvalsPortalJs = `
         }
       } finally { if (loading === generation) loading = undefined; if (generation === authGeneration) render(); }
     }
-    function clearProtected() { tasks = []; policies = []; inbox = []; unavailable = 0; result = ''; failed = false; render(); }
+    function clearProtected() { tasks = []; policies = []; inbox = []; unavailable = 0; truncated = false; result = ''; failed = false; taskCards.clear(); policyCards.clear(); render(); }
     get('approvals-refresh').addEventListener('click', poll);
     return { poll, updateAuth: render, clearProtected };
   })();

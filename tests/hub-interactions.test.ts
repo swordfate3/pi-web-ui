@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
 import type net from "node:net";
@@ -9,7 +10,10 @@ import { InteractionBroker } from "../extensions/interactions/broker.ts";
 import { createInteractionControlServer } from "../extensions/interactions/control.ts";
 import { createSessionRegistration, guardSessionRequest } from "../extensions/session-registration.ts";
 import { initializeHub, issueSession, readHubConfig } from "../hub/config.ts";
-import { issueManagementCode, revokeManagement } from "../hub/management.ts";
+import type { InteractionTarget } from "../hub/interaction-control.ts";
+import { interactionSigning } from "../hub/interaction-signing.ts";
+import { createInteractionApi } from "../hub/interactions.ts";
+import { HubManagement, issueManagementCode, revokeManagement } from "../hub/management.ts";
 import { startHub } from "../hub/server.ts";
 
 async function fixture(t: test.TestContext) {
@@ -152,3 +156,82 @@ test("inbox admits one bounded enumeration and rejects concurrent scans without 
     assert.equal(proofs, 1);
   } finally { release(); await first; }
 });
+
+for (const change of ["retired", "replaced", "expired"] as const) {
+  test(`inbox removes source A ${change} after collection while real source B is deferred`, { timeout: 10_000 }, async (t) => {
+    const dir = mkdtempSync(path.join(tmpdir(), "hub-inbox-race-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const file = path.join(dir, "hub.json");
+    initializeHub(file, { port: 0, management: { port: 0 } });
+    const config = readHubConfig(file);
+    const signing = interactionSigning(config);
+    const management = new HubManagement(config);
+    const session = management.unlock(issueManagementCode(config).code);
+    let now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    let collected!: () => void;
+    let release!: () => void;
+    const sourceACollected = new Promise<void>((resolve) => { collected = resolve; });
+    const sourceBDeferred = new Promise<void>((resolve) => { release = resolve; });
+    t.after(release);
+    let sourceAStatusReturned = false;
+    const revalidate = management.revalidate.bind(management);
+    t.mock.method(management, "revalidate", (...args: Parameters<HubManagement["revalidate"]>) => {
+      revalidate(...args);
+      // This real authorization check follows A's real status response. Its
+      // worker finishes collecting synchronously before this waiter resumes.
+      if (sourceAStatusReturned) collected();
+    });
+    const sources = [];
+    for (const generation of ["a".repeat(32), "b".repeat(32)]) {
+      const identity = { runId: generation, generation, runtimeId: "runtime-1", sessionId: "session-1" };
+      const token = "c".repeat(64);
+      const broker = new InteractionBroker(identity, { pin: signing.pin, now: () => now });
+      const control = createInteractionControlServer({ broker: () => broker, authorize: (request) => request.headers["x-pi-web-proof"] === createHmac("sha256", token).update(generation).digest("hex") });
+      const server = http.createServer((_request, response) => response.writeHead(404).end());
+      server.on("upgrade", (request, socket, head) => { if (!control.upgrade(request, socket, head)) socket.destroy(); });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      t.after(async () => { control.close(); broker.close(); await new Promise<void>((resolve) => server.close(() => resolve())); });
+      const target: InteractionTarget = { identity, backendHost: "127.0.0.1", port: (server.address() as net.AddressInfo).port, token };
+      const adapter = broker.registerAdapter({ id: "memory", version: "1", packageName: "memory", actions: { write: { method: "confirm", classification: "sensitive" } } });
+      const source = adapter.request({ action: "write", revision: "prepared-1", classification: "sensitive", method: "confirm", schema: { kind: "confirm" }, content: { preview: "PRIVATE-RACE-CONTENT" }, deadline: now + (sources.length ? 20_000 : 2000) }, { isCurrent: () => true });
+      if (!sources.length) {
+        const pending = broker.pending.bind(broker);
+        let reads = 0;
+        t.mock.method(broker, "pending", () => {
+          const metadata = pending();
+          // First read is the channel's initial notice; second is status RPC.
+          if (++reads === 2) sourceAStatusReturned = true;
+          return metadata;
+        });
+      }
+      sources.push({ target, source });
+    }
+    const [a, b] = sources;
+    const current = new Map(sources.map(({ target }) => [target.identity.generation, target]));
+    const api = createInteractionApi(config, management, {
+      generations: () => [...current.keys()],
+      lookup: async (generation) => {
+        if (generation === b.target.identity.generation) await sourceBDeferred;
+        return current.get(generation);
+      },
+      current: (target) => current.get(target.identity.generation) === target,
+    });
+    const server = http.createServer((request, response) => { void api.handle(request, response, true); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(async () => { api.close(); await new Promise<void>((resolve) => server.close(() => resolve())); });
+    const response = fetch(`http://127.0.0.1:${(server.address() as net.AddressInfo).port}/api/management/interactions`, { headers: { Cookie: session.cookie.split(";")[0] } });
+    await sourceACollected;
+    if (change === "retired") api.retire(a.target.identity.generation);
+    if (change === "replaced") current.set(a.target.identity.generation, { ...a.target, identity: { ...a.target.identity, sessionId: "session-2" } });
+    if (change === "expired") now = a.source.request.deadline;
+    release();
+    const reply = await response;
+    assert.equal(reply.status, 200);
+    const data = await reply.json();
+    assert.deepEqual(data.items.map((item: { requestId: string }) => item.requestId), [b.source.request.requestId]);
+    assert.equal(data.unavailable, change === "expired" ? 0 : 1);
+    assert.equal(data.truncated, false);
+    assert.ok(!JSON.stringify(data).includes("PRIVATE-RACE-CONTENT"));
+  });
+}

@@ -212,7 +212,13 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
               });
             const all = [...new Set(hooks.generations?.() ?? [])];
             const queue = all.slice(0, 64);
-            const items: Record<string, unknown>[] = [];
+            const batches: {
+              generation: string;
+              record: ChannelRecord;
+              channel: InteractionChannel;
+              items: Record<string, unknown>[];
+            }[] = [];
+            let collected = 0;
             let unavailable = 0;
             let truncated = all.length > queue.length;
             let cursor = 0;
@@ -222,6 +228,8 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
                   const generation = queue[cursor++];
                   try {
                     const channel = await withinDeadline(channelFor(generation, revalidate));
+                    const record = channels.get(generation);
+                    if (!record || record.channel !== channel) throw new Error();
                     const status = await withinDeadline(channel.status());
                     revalidate();
                     if (!channel.active()) throw new Error();
@@ -231,6 +239,7 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
                       status.pending.length > INTERACTION_LIMITS.pendingPerHub
                     )
                       throw new Error();
+                    const items: Record<string, unknown>[] = [];
                     for (const item of status.pending) {
                       if (
                         !plainRecord(item) ||
@@ -241,7 +250,7 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
                       )
                         throw new Error();
                       if (Number(item.deadline) <= Date.now()) continue;
-                      if (items.length >= INTERACTION_LIMITS.pendingPerHub) {
+                      if (collected + items.length >= INTERACTION_LIMITS.pendingPerHub) {
                         truncated = true;
                         break;
                       }
@@ -254,6 +263,8 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
                         path: `/interactions/${generation}/${item.requestId}/`,
                       });
                     }
+                    collected += items.length;
+                    batches.push({ generation, record, channel, items });
                   } catch {
                     revalidate();
                     unavailable++;
@@ -263,6 +274,23 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
             );
             unavailable += queue.length - cursor;
             revalidate();
+            // Other sources may have waited after this batch was collected.
+            // Fence the exact original target/channel and deadlines at the final
+            // response boundary; never look up a replacement or await here.
+            const items: Record<string, unknown>[] = [];
+            const now = Date.now();
+            for (const batch of batches) {
+              if (
+                channels.get(batch.generation) !== batch.record ||
+                batch.record.channel !== batch.channel ||
+                !hooks.current(batch.record.target) ||
+                !batch.channel.active()
+              ) {
+                unavailable++;
+                continue;
+              }
+              for (const item of batch.items) if (Number(item.deadline) > now) items.push(item);
+            }
             reply(200, { items, unavailable, truncated });
             return true;
           } finally {

@@ -134,6 +134,15 @@ test("Gate failures are bounded and decisions are never automatically retried", 
   assert.ok(!(await data.text()).includes("DO-NOT-FORWARD"));
 });
 
+test("a valid long pinned image identity stays visible in the reviewed task", async (t) => {
+  const f = await fixture(t);
+  const image = `registry.example/${"a".repeat(220)}@sha256:${"b".repeat(64)}`;
+  f.reply({ tasks: [{ ...task, kind: "deployment", image }], policies: [] });
+  const response = await f.request();
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).tasks[0].image, image);
+});
+
 test("revoked management during a provider response cannot disclose task data", async (t) => {
   const f = await fixture(t);
   f.beforeReply(() => revokeManagement(f.config));

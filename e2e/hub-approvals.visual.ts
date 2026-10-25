@@ -29,7 +29,9 @@ test("synthetic approval portal renders and confirms on desktop and phone", { ti
   };
   const policy = { kind: "service", id: "pi-web-hub", revision: "e".repeat(64), mode: "manual", paused: true };
   let writes = 0;
+  let overviewReads = 0;
   const gate = http.createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/v1/hub-management") overviewReads++;
     let value: unknown = { tasks: [task], policies: [policy] };
     if (request.method === "POST") {
       const chunks: Buffer[] = [];
@@ -74,6 +76,12 @@ test("synthetic approval portal renders and confirms on desktop and phone", { ti
       await expect(page.locator("#approvals-tasks")).toContainText("Deploy pi-web-hub");
       await page.locator("#approvals").scrollIntoViewIfNeeded();
       await page.locator("#approvals-tasks details > summary").click();
+      const select = page.locator("#approvals-policy-service-pi-web-hub");
+      await select.selectOption("auto");
+      const initialReads = overviewReads;
+      await expect.poll(() => overviewReads, { timeout: 10000 }).toBeGreaterThanOrEqual(initialReads + 2);
+      await expect(select).toHaveValue("auto");
+      await expect(page.locator("#approvals-tasks details")).toHaveAttribute("open", "");
       await page.locator("#approvals").screenshot({ path: path.join(screenshots, `${name}-approvals.png`) });
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       const approve = page.getByRole("button", { name: "批准", exact: true });

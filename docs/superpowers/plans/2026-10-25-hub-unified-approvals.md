@@ -25,10 +25,10 @@
 
 **Interfaces:** Produces the Gate protocol in the spec exactly, including durable receipts and private bootstrap `hub-management-export`. Existing Gate execution methods remain the sole executors.
 
-- [ ] Add temporary Gate HTTP tests first; assert a request token receives 401 at the new routes and the dedicated token can read a safe pending deployment.
-- [ ] Add approval/rejection and receipt tests: `POST /v1/hub-management/decisions` with the exact task revision changes the existing real Store task; replay leaves one execution; changed payload/stale revision conflict.
-- [ ] Implement bounded `HubManagement` in a separate module, dedicated credential creation/export, fixed routing and safe projections; cover runtime/restart approvals, intent rejection, rollback, policies preserving image lists and resume.
-- [ ] Run `python3 -m unittest discover -s tests -p 'test_hub_management.py' -v` and affected existing Gate suites from the integration directory. Commit the task and report evidence.
+- [x] Add temporary Gate HTTP tests first; assert a request token receives 401 at the new routes and the dedicated token can read a safe pending deployment.
+- [x] Add approval/rejection and receipt tests: `POST /v1/hub-management/decisions` with the exact task revision changes the existing real Store task; replay leaves one execution; changed payload/stale revision conflict.
+- [x] Implement bounded `HubManagement` in a separate module, dedicated credential creation/export, fixed routing and safe projections; cover runtime/restart approvals, intent rejection, rollback, policies preserving image lists and resume.
+- [x] Run `python3 -m unittest discover -s tests -p 'test_hub_management.py' -v` and affected existing Gate suites from the integration directory. Commit the task and report evidence.
 
 ### Task 2: Trusted Hub transport and inbox
 
@@ -36,10 +36,10 @@
 
 **Interfaces:** Consumes Task 1 HTTP protocol; produces identical sanitized result under `/api/management/gate`, optional `HubConfig.gateManagement`, management status `gateManagementAvailable`. Produces `GET /api/management/interactions` metadata inbox with `items`, `unavailable`, `truncated`; entries contain generation, requestId, adapterId, action, deadline, path only.
 
-- [ ] Write real Hub HTTP integration tests proving unauthorized/chat requests cannot reach Gate and valid management+CSRF decisions are forwarded once.
-- [ ] Add loopback provider with request/response bounds and timeout; validate exact schemas and reject route suffix/query/body abuse. Revalidate management after async operations.
-- [ ] Add authenticated extension metadata enumeration using verified current session targets and bounded channel concurrency. Keep existing per-request review behavior intact.
-- [ ] Run focused Hub transport, management and interaction tests. Commit task and report evidence.
+- [x] Write real Hub HTTP integration tests proving unauthorized/chat requests cannot reach Gate and valid management+CSRF decisions are forwarded once.
+- [x] Add loopback provider with request/response bounds and timeout; validate exact schemas and reject route suffix/query/body abuse. Revalidate management after async operations.
+- [x] Add authenticated extension metadata enumeration using verified current session targets and bounded channel concurrency. Keep existing per-request review behavior intact.
+- [x] Run focused Hub transport, management and interaction tests. Commit task and report evidence.
 
 ### Task 3: Portal approvals and policy controls
 
@@ -47,16 +47,16 @@
 
 **Interfaces:** Consumes Task 2 endpoints and `auth.gateManagementAvailable`. Exposes a portal module with `updateAuth`, `clearProtected`, `poll` integrated with existing authentication lifecycle. DOM contains task lists, explicit decision confirmation, receipt reconciliation, policy selectors and extension-review links.
 
-- [ ] Add behavior tests for one explicit approve, cancelled confirmation, reject, policy switching, stale revision and lost-response reconciliation without replay.
-- [ ] Build a mobile-friendly section above runtime updates, with scoped task details and an explicit review confirmation; preserve in-flight receipt IDs in session storage and clear private views on lock.
-- [ ] Point existing manual runtime/restart instructions to the portal approval section when configured. Show configuration-required state on older deployments.
-- [ ] Run focused portal and management regression tests; commit and report.
+- [x] Add behavior tests for one explicit approve, cancelled confirmation, reject, policy switching, stale revision and lost-response reconciliation without replay.
+- [x] Build a mobile-friendly section above runtime updates, with scoped task details and an explicit review confirmation; preserve in-flight receipt IDs in session storage and clear private views on lock.
+- [x] Point existing manual runtime/restart instructions to the portal approval section when configured. Show configuration-required state on older deployments.
+- [x] Run focused portal and management regression tests; commit and report.
 
 ### Task 4: Integration, docs and rendered validation
 
 **Files:** Update `docs/hub.md`, `docs/web-interactions.md`, `docs/development-log.md`, add `docs/validation/2026-10-25-hub-unified-approvals.md`, rebuild `dist/`.
 
-- [ ] Document one-time private credential bootstrap, optional Hub config, daily phone approvals, policy impact and recoverable unknown outcomes. Do not claim enrollment proposals execute without a registered service.
-- [ ] Run Python affected suites, Hub focused regression suites, type checks and required formatting/build checks; run `npm run build:web` and `npm run verify:dist`.
-- [ ] Follow the repository visual-check skill for real rendered synthetic desktop/phone portal states; inspect screenshots and fix visible issues.
-- [ ] Review the entire branch for privilege expansion, lost ACK retries, stale policy/task races and incomplete UI flows. Keep work on feature branch and report deployment requirements clearly.
+- [x] Document one-time private credential bootstrap, optional Hub config, daily phone approvals, policy impact and recoverable unknown outcomes. Do not claim enrollment proposals execute without a registered service.
+- [x] Run Python affected suites, Hub focused regression suites, type checks and required formatting/build checks; run `npm run build:web` and `npm run verify:dist`.
+- [x] Follow the repository visual-check skill for real rendered synthetic desktop/phone portal states; inspect screenshots and fix visible issues.
+- [x] Review the entire branch for privilege expansion, lost ACK retries, stale policy/task races and incomplete UI flows. Keep work on feature branch and report deployment requirements clearly.

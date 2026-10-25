@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 188,
-    "sha256": "a33716e6aa85c468b337932fc7caa86cf085e778a36b3e222ab1262d0e15fc39",
+    "sha256": "33250e227bbaa53cf6b0cbc9aea862016e971dbc406bbfab628754c058601769",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -126,7 +126,7 @@
       },
       {
         "path": "hub/approvals-portal.ts",
-        "sha256": "364bcfc215c74e144c0ec53dd1749f906617ce5681bdd17739788a3e3ce74892"
+        "sha256": "07dd51d867172e458dc04de0e514e59c784d72b81fbde39d5b464c3eaf64069b"
       },
       {
         "path": "hub/asset-transfer.ts",
@@ -146,7 +146,7 @@
       },
       {
         "path": "hub/gate-management.ts",
-        "sha256": "8cd7467eb9607d0191b4a726e42aedde133bf007d3fc04a86cd6ca4927109624"
+        "sha256": "6ba3775c70c49d684d74782c6cd015f6be2c95eb0c277e828e27b31d0200ac2a"
       },
       {
         "path": "hub/gateway-auth.ts",
@@ -166,7 +166,7 @@
       },
       {
         "path": "hub/interactions.ts",
-        "sha256": "98a1f9ddeef270c332b0456ac6234fa1769fd6ab8a11071bdb89d893f806fbce"
+        "sha256": "7ffdf1b8b089826ca306f80a3a0b070679c80872484d9891d529e2984d8cc38f"
       },
       {
         "path": "hub/lifecycle.ts",
@@ -760,7 +760,7 @@
   },
   "outputs": {
     "count": 732,
-    "sha256": "2fc90fc220d372311869e030e1edb4b06868fedefe7b3efdba3ae944dcdd6552",
+    "sha256": "fc77059286fc3be1f29a32b9f934c17ffcabc2688efc2591af030abda1d0ae80",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3664,7 +3664,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "9790309b9c848039e4ad061a85aca1c163bc34bccf632686bbf016d4d003e1c5"
+        "sha256": "15f509adf983bee194d0ccf9af8a143e12fcc88b220c484f11cf21d7f57a7e6e"
       },
       {
         "path": "icons/pi-web-ui-192.png",

@@ -24,8 +24,8 @@ per-request source identity and approval guards.
 
 ## Tests
 
-- Gate commit `ba3bf80`: 29 focused management tests; final complete Gate suite
-  **467 tests, 8 skipped, no failures**. HTTP/SQLite/accounting are real; external
+- Gate commits `ba3bf80` and `154d867`: initial 29 then 32 focused management tests;
+  post-review complete Gate suite **471 tests, 8 skipped, no failures**. HTTP/SQLite/accounting are real; external
   Docker/npm boundaries are offline fixtures. The full suite emitted a Python
   3.14 SQLite resource warning; the focused run was clean.
 - Hub command below: **232 passed, zero failed/cancelled/skipped**, about 47s.
@@ -46,6 +46,50 @@ per-request source identity and approval guards.
   cancellation, mode-only changes, stale revisions, uncertain-result lookup,
   unknown-operation blocking, storage refusal, inbox links and locked-state
   clearing. Inbox scan admission test showed RED then GREEN with concurrent503.
+- Final complete Node run after build completion: **788 tests, 786 passed,
+  2 skipped, zero failed/cancelled**, about 76s. Includes temporary actual Pi,
+  Hub and Gate regression paths and packaging/source-inventory checks:
+
+  ```sh
+  node --import ./tests/register-ts.mjs --test --test-concurrency=4 \
+    tests/*.test.ts tests/*.test.mjs \
+    src/web/src/core/i18n.test.ts \
+    src/web/src/components/pi-web-ui/sidebar-tree.test.ts
+  ```
+
+  The first complete attempt ran concurrently with dist rebuilding: two
+  packaging checks read the old inventory and a 2,000-rotation filesystem test
+  timed out. Build was allowed to finish before the complete rerun; no assertion,
+  iteration count or timeout was relaxed. Raw final log:
+  `/tmp/pi-hub-approvals-all-node-final.log` (local, untracked).
+
+## Independent review fixes
+
+The initial scoped Gate review identified two P2 defects. `154d867` adds durable
+service management generations so a delayed resume cannot authorize a later
+failure incident with repeatable service state. Existing executor policy hashes
+and pinned plans do not change merely because accounting advances. Long valid
+pinned image identities (270/327 chars) remain intact under a coordinated512
+field bound; executable actions are withheld if the identity must be redacted.
+New regressions demonstrated RED before fixes. Same-ID receipts still replay
+without a second mutation, including after temporary Gate state is reopened.
+
+The scoped Hub review identified two P2 defects. `07c7390` revalidates each inbox
+batch's original channel record, channel, target and deadline synchronously just
+before response assembly. Stable keyed portal cards preserve expanded details
+and unsaved policy drafts across unchanged polls, while changed revisions replace
+only the affected card and revocation clears caches. The independent scoped
+re-review found both addressed, with seven selected regressions passing and no
+actionable residual. Hub's pinned-image projection also accepts the coordinated
+512-character bound; its regression showed RED before the correction.
+
+Final independent whole-branch source review returned **ReadyToMerge: yes**,
+with no actionable findings. It traced the complete original-base-to-working-tree
+diff, cross-component contracts, credential isolation, durable intent/replay,
+policy generations, browser authorization/callbacks and bounded inbox behavior.
+All four prior P2 findings remained closed. The reviewer independently hashed
+188 manifest source entries without mismatch; it did not rerun the owner suites
+or authorize deployment. Full-repository formatting limitations remain below.
 
 ## Rendered validation (not real Pi E2E)
 
@@ -62,6 +106,8 @@ and opened both resulting screenshots for actual visual inspection:
   no horizontal overflow; all controls accessible by scrolling.
 - Both sizes accepted a revision-bound confirmation, displayed the recorded
   receipt and cleared protected task views on lock, without browser page errors.
+- Both sizes retained an expanded detail and an unsaved policy selection across
+  two actual scheduled overview polls, not merely direct render calls.
 - Local untracked artifacts: `.tmp/hub-approvals-visual/desktop-approvals.png`
   and `.tmp/hub-approvals-visual/phone-approvals.png`.
 

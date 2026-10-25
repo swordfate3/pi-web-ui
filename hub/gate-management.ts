@@ -98,7 +98,7 @@ function task(value: unknown): GateTask {
   };
   for (const key of ["version", "commit", "image", "plan_hash"] as const) {
     if (value[key] !== undefined) {
-      if (!label(value[key])) throw new GateManagementError();
+      if (!label(value[key], key === "image" ? 512 : 256)) throw new GateManagementError();
       result[key] = value[key];
     }
   }

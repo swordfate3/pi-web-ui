@@ -63,6 +63,8 @@
       "tests/hub-management.test.ts",
       "tests/hub-gate-management.test.ts",
       "tests/hub-gate-live.test.ts",
+      "tests/hub-launches.test.ts",
+      "tests/hub-launch-portal.test.ts",
       "tests/hub-approvals-portal.test.ts",
       "tests/hub-gateway-login.test.ts",
       "tests/hub-management-origin.test.ts",

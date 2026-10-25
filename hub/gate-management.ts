@@ -2,6 +2,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { type HubConfig, readPrivateJson } from "./config.ts";
 import { type LifecycleConfig, lifecycleConfig } from "./lifecycle.ts";
 import type { HubManagement } from "./management.ts";
+import { attachLaunchSessions, launchRequest, launchResponse, workspaceQuery } from "./pi-launches.ts";
 
 type RecordValue = Record<string, unknown>;
 export type GateTask = {
@@ -224,6 +225,20 @@ export class GateManagementProvider {
       request.on("error", () => finish(new GateManagementError()));
       request.end(payload);
     });
+    if (
+      suffix === "/launch-config" ||
+      suffix.startsWith("/workspaces?") ||
+      suffix === "/launches" ||
+      suffix.startsWith("/launches/")
+    ) {
+      try {
+        const safe = launchResponse(suffix, data, method);
+        if (value && (safe as RecordValue).id !== value.id) throw new Error();
+        return safe;
+      } catch {
+        throw new GateManagementError();
+      }
+    }
     if (suffix === "") {
       if (
         !object(data) ||
@@ -288,7 +303,11 @@ async function body(request: IncomingMessage): Promise<RecordValue> {
   return value;
 }
 
-export function createGateManagementApi(config: HubConfig, management: HubManagement) {
+export function createGateManagementApi(
+  config: HubConfig,
+  management: HubManagement,
+  resolveSession: (id: string) => string | undefined = () => undefined,
+) {
   const provider = config.gateManagement ? new GateManagementProvider(config.gateManagement) : undefined;
   const prefix = "/api/management/gate";
   return {
@@ -305,13 +324,19 @@ export function createGateManagementApi(config: HubConfig, management: HubManage
             "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
           })
           .end(JSON.stringify(value));
-      const suffix = url.pathname.slice(prefix.length);
+      let suffix = url.pathname.slice(prefix.length);
+      const launchRead =
+        suffix === "/launch-config" ||
+        suffix === "/workspaces" ||
+        suffix === "/launches" ||
+        /^\/launches\/[a-f0-9]{32}$/.test(suffix);
       const read =
+        launchRead ||
         suffix === "" ||
         /^\/tasks\/(deployment|runtime|restart|intent)\/[a-f0-9]{32}$/.test(suffix) ||
         /^\/decisions\/[a-f0-9]{32}$/.test(suffix);
-      const write = ["/decisions", "/policies", "/resume"].includes(suffix);
-      if (url.search || (!read && !write)) {
+      const write = ["/decisions", "/policies", "/resume", "/launches"].includes(suffix);
+      if ((url.search && suffix !== "/workspaces") || (!read && !write)) {
         reply(404, { error: "Management route not found" });
         return true;
       }
@@ -335,30 +360,38 @@ export function createGateManagementApi(config: HubConfig, management: HubManage
           reply(503, { error: "Hub approvals are not configured" });
           return true;
         }
+        if (suffix === "/workspaces") {
+          phase = "body";
+          suffix += workspaceQuery(url.searchParams);
+        }
         let value: RecordValue | undefined;
         if (request.method === "POST") {
           phase = "body";
           value = await body(request);
           revalidate();
           phase = "body";
-          if (!hex(value.decision_id, 32) || !hex(value.revision, 64)) throw new Error();
-          if (suffix === "/decisions") {
-            if (
-              !exact(value, ["kind", "id", "revision", "action", "decision_id"]) ||
-              !kinds.includes(String(value.kind)) ||
-              !hex(value.id, 32) ||
-              !actions.includes(String(value.action))
-            )
-              throw new Error();
-          } else if (suffix === "/policies") {
-            if (
-              !exact(value, ["kind", "id", "revision", "mode", "decision_id"]) ||
-              !policyKinds.includes(String(value.kind)) ||
-              !service(value.id) ||
-              !modes.includes(String(value.mode))
-            )
-              throw new Error();
-          } else if (!exact(value, ["id", "revision", "decision_id"]) || !service(value.id)) throw new Error();
+          if (suffix === "/launches") {
+            launchRequest(value);
+          } else {
+            if (!hex(value.decision_id, 32) || !hex(value.revision, 64)) throw new Error();
+            if (suffix === "/decisions") {
+              if (
+                !exact(value, ["kind", "id", "revision", "action", "decision_id"]) ||
+                !kinds.includes(String(value.kind)) ||
+                !hex(value.id, 32) ||
+                !actions.includes(String(value.action))
+              )
+                throw new Error();
+            } else if (suffix === "/policies") {
+              if (
+                !exact(value, ["kind", "id", "revision", "mode", "decision_id"]) ||
+                !policyKinds.includes(String(value.kind)) ||
+                !service(value.id) ||
+                !modes.includes(String(value.mode))
+              )
+                throw new Error();
+            } else if (!exact(value, ["id", "revision", "decision_id"]) || !service(value.id)) throw new Error();
+          }
         }
         revalidate();
         let result: unknown;
@@ -369,7 +402,7 @@ export function createGateManagementApi(config: HubConfig, management: HubManage
           throw error;
         }
         revalidate();
-        reply(200, result);
+        reply(200, launchRead ? attachLaunchSessions(result, resolveSession) : result);
       } catch (error) {
         const status =
           phase === "authorization"

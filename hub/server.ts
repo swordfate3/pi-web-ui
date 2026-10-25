@@ -341,7 +341,11 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     return session;
   };
   const management = new HubManagement(config);
-  const gateManagementApi = createGateManagementApi(config, management);
+  const gateManagementApi = createGateManagementApi(config, management, (runId) => {
+    const matches = [...sessions.keys()].map(current).filter((session) => session?.grant.run_id === runId);
+    if (matches.length !== 1 || !matches[0]) return undefined;
+    return new URL(`/s/${matches[0].generation}/`, config.publicUrl ?? url).href;
+  });
   const interactionTarget = (session: Session | undefined): InteractionTarget | undefined => {
     const descriptor = session?.interaction ?? session?.runtime;
     if (!session || !descriptor) return undefined;

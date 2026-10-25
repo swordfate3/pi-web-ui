@@ -7,6 +7,8 @@
     "tests/interaction-*.test.ts",
     "tests/hub-interactions.test.ts",
     "tests/hub-gate-management.test.ts",
+    "tests/hub-launches.test.ts",
+    "tests/hub-launch-portal.test.ts",
     "tests/hub-gate-live.test.ts",
     "e2e/hub-approvals.visual.ts",
     "tests/hub-approvals-portal.test.ts",

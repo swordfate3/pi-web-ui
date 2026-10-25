@@ -182,6 +182,42 @@ test("lost response and reloaded page query original id without replaying POST",
   assert.equal(reopened.get("launch-start").disabled, true);
 });
 
+test("locking redacts a pending launch to its recovery id without permitting a replay", async () => {
+  const f = fixture({ lose: true });
+  await f.launchPi.poll();
+  f.get("launch-name").value = "私密项目名称";
+  await f.get("launch-form").fire("submit");
+  const id = "07".repeat(16);
+
+  const restoredStorage = new Map(f.storage);
+  const restored = fixture({ storage: restoredStorage });
+  assert.deepEqual(JSON.parse(restoredStorage.get("pi-hub-launch") ?? "null"), { id });
+  await restored.launchPi.poll();
+  await restored.get("launch-form").fire("submit");
+  assert.ok(restored.calls.some((call) => call.route === `gate/launches/${id}` && !call.body));
+  assert.equal(restored.calls.filter((call) => call.body).length, 0);
+
+  f.lock();
+
+  assert.equal(f.get("launch-current").textContent, "");
+  assert.equal(f.get("launch-name").value, "");
+  assert.equal(f.get("launch-jobs").children.length, 0);
+  assert.deepEqual(JSON.parse(f.storage.get("pi-hub-launch") ?? "null"), { id });
+
+  f.unlock();
+  await f.launchPi.poll();
+  assert.ok(f.calls.some((call) => call.route === `gate/launches/${id}` && !call.body));
+  await f.get("launch-form").fire("submit");
+  assert.equal(f.calls.filter((call) => call.body).length, 1);
+
+  const reopened = fixture({ storage: f.storage });
+  await reopened.launchPi.poll();
+  await reopened.get("launch-form").fire("submit");
+  assert.ok(reopened.calls.some((call) => call.route === `gate/launches/${id}` && !call.body));
+  assert.equal(reopened.calls.filter((call) => call.body).length, 0);
+  assert.equal(reopened.get("launch-start").disabled, true);
+});
+
 test("storage failure or confirmation cancellation refuses to start a container", async () => {
   for (const options of [{ storageFails: true }, { confirm: false }]) {
     const f = fixture(options);

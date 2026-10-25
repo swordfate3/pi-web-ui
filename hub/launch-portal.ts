@@ -8,9 +8,12 @@ export const launchPortalJs = `
     let config, directory, jobs = [], loading, browsing = false, sequence = 0, sending = false, result = '', pending, known = false;
     const storageKey = 'pi-hub-launch';
     const node = (tag, text, cls = '') => { const el = document.createElement(tag); el.textContent = text; el.className = cls; return el; };
-    try { const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null'); if (saved && /^[a-f0-9]{32}$/.test(saved.id)) pending = saved; } catch {}
+    const recovery = (value) => value && /^[a-f0-9]{32}$/.test(value.id) ? { id:value.id } : undefined;
+    try { pending = recovery(JSON.parse(sessionStorage.getItem(storageKey) || 'null')); } catch {}
     const current = (generation) => generation === authGeneration && auth.authorized && !authTransition;
     const save = () => { try { if (pending) sessionStorage.setItem(storageKey, JSON.stringify(pending)); else sessionStorage.removeItem(storageKey); return true; } catch { return false; } };
+    const retainRecovery = () => { pending = recovery(pending); if (!save()) { try { sessionStorage.removeItem(storageKey); } catch {} } };
+    retainRecovery();
     function render() {
       get('launch-picker').hidden = !auth.authorized || !config?.enabled;
       get('launch-refresh').disabled = !auth.authorized || authTransition || loading === authGeneration;
@@ -112,7 +115,7 @@ export const launchPortalJs = `
     get('launch-more').addEventListener('click', () => directory?.nextCursor && browse(directory.path, directory.nextCursor));
     get('launch-refresh').addEventListener('click', poll);
     get('launch-again').addEventListener('click', () => { if (!current(authGeneration) || sending || !known) return; const old = pending; pending = undefined; if (!save()) { pending = old; result = '无法保存新的操作状态，未允许重复创建。'; } else { known = false; result = '请核对目录和名称，再确认启动另一个独立 Pi。'; } render(); });
-    function clearProtected() { sequence++; browsing = false; config = undefined; directory = undefined; jobs = []; result = ''; known = false; get('launch-name').value = ''; renderDirectory(); }
+    function clearProtected() { sequence++; browsing = false; retainRecovery(); config = undefined; directory = undefined; jobs = []; result = ''; known = false; get('launch-name').value = ''; renderDirectory(); }
     return { poll, updateAuth: render, clearProtected };
   })();
 `;

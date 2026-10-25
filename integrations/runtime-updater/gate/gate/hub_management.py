@@ -5,6 +5,7 @@ import re
 import secrets
 import stat
 import unicodedata
+from urllib.parse import urlsplit, parse_qs
 
 from .registry import MODES, contains_secret, fingerprint, validate_identifier
 from .store import ACTIVE, _json
@@ -324,9 +325,35 @@ class HubManagement:
     def handle(self, handler):
         """No admin dispatcher, encoded suffixes, query parameters or freeform routes."""
         path = handler.path
+        route = urlsplit(path)
+        launch = self.gate.pi_launches
+        if route.path == ROOT + '/workspaces':
+            if len(path) > 8192 or route.fragment or '#' in path or re.search(r'%(?![0-9a-fA-F]{2})', path):
+                raise ValueError('invalid workspace query')
+            params = parse_qs(route.query, keep_blank_values=True, strict_parsing=True,
+                              max_num_fields=2, encoding='utf-8', errors='strict')
+            if set(params) - {'path', 'cursor'} or any(len(v) != 1 for v in params.values()):
+                raise ValueError('invalid workspace query')
+            if handler.command != 'GET':
+                handler.reply(405, {'error': 'method not allowed'})
+            else:
+                handler.reply(200, launch.browse(params.get('path', [''])[0], params.get('cursor', [None])[0]))
+            return
         if len(path) > 256 or any(char in path for char in ('?', '#', '%', '\\')):
             raise ValueError('invalid management route')
         method = handler.command
+        if path in (ROOT + '/launch-config', ROOT + '/launches') or path.startswith(ROOT + '/launches/'):
+            if path == ROOT + '/launches' and method == 'POST':
+                handler.reply(202, launch.submit(handler.body(maximum=8192, strict=True)))
+            elif method != 'GET':
+                handler.reply(405, {'error': 'method not allowed'})
+            elif path == ROOT + '/launch-config':
+                handler.reply(200, launch.configuration())
+            elif path == ROOT + '/launches':
+                handler.reply(200, launch.jobs())
+            else:
+                handler.reply(200, launch.get(path.removeprefix(ROOT + '/launches/')))
+            return
         if path == ROOT:
             if method != 'GET':
                 handler.reply(405, {'error': 'method not allowed'})

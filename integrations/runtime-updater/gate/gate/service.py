@@ -15,11 +15,12 @@ from urllib.parse import urlsplit, parse_qs
 
 from .errors import PreconditionChanged
 from .runtime_catalog import RegistryUnavailable
-from .store import ACTIVE, REQUEST_OPEN, Store, _json, check_sha, public
+from .store import ACTIVE, REQUEST_OPEN, _json, check_sha, public
 
 
 class Gate:
-    def __init__(self, directory, deployer=None, policy=None, head_resolver=None, *, runtime_volume='pi-runtime'):
+    def __init__(self, directory, deployer=None, policy=None, head_resolver=None, *, runtime_volume='pi-runtime',
+                 launch_policy=None, launch_engine=None):
         from .runtime_engine import runtime_volume as checked_volume
         self.runtime_volume = checked_volume(runtime_volume)
         os.umask(0o077)
@@ -29,7 +30,8 @@ class Gate:
             raise ValueError('state directory cannot be a symlink')
         self.lease = open(directory / 'gate.lock', 'a')
         fcntl.flock(self.lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.store = Store(directory)
+        from .pi_launches import LaunchStore
+        self.store = LaunchStore(directory)
         tokenfile = directory / 'request.token'
         if not tokenfile.exists():
             fd = os.open(tokenfile, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -77,6 +79,9 @@ class Gate:
             self.store.bootstrap(policy)
         from .hub_management import HubManagement
         self.hub_management = HubManagement(self)
+        from .pi_launches import PiLaunches
+        self.pi_launches = PiLaunches(self, launch_policy, launch_engine)
+        self.store.launch_fence = lambda: self.pi_launches.busy()
 
     def close(self):
         self.closing = True
@@ -84,7 +89,7 @@ class Gate:
             self.terminal_server.close()
             self.terminal_server = None
         if self.worker:
-            self.worker.join(timeout=540)
+            self.worker.join(timeout=35 if self.worker.name == 'pi-launch' else 540)
             if self.worker.is_alive():
                 raise RuntimeError('deployment still active; leave state open for recovery')
         self.store.close()
@@ -114,7 +119,7 @@ class Gate:
                     'instanceId': self.instance_id, 'ready': True}
 
     def _upgrade_idle(self):
-        if (self.closing or (self.worker and self.worker.is_alive()) or self.lifecycle.active() or self.runtime_updates.active() or
+        if (self.closing or (self.worker and self.worker.is_alive()) or self.pi_launches.busy() or self.lifecycle.active() or self.runtime_updates.active() or
                 any(j['status'] in (*ACTIVE, *REQUEST_OPEN) for j in self.store.list())):
             raise RuntimeError('unresolved work prevents upgrade')
 
@@ -256,6 +261,8 @@ class Gate:
             # A worker may finish its terminal write but fail to commit its
             # receipt. Reconcile before dispatch; any accounting error fails closed.
             self.store.reconcile_results()
+            if self.pi_launches.busy() and self.pi_launches.tick():
+                return
             if any(j['status'] in ACTIVE for j in self.store.list()):
                 return
             if self.runtime_updates.tick():
@@ -274,6 +281,9 @@ class Gate:
                 self.worker = threading.Thread(target=self._execute, args=(job,), daemon=False)
                 self.worker.start()
                 return
+            # Stable Pi lifetime does not reserve admission. Existing work gets
+            # priority over the bounded background exit/reconciliation poll.
+            self.pi_launches.tick()
 
     def _confirm(self, job, commit=None, plan=None):
         if 'snapshot' in job:
@@ -694,13 +704,15 @@ def main():
     parser.add_argument('--policy', default='/app/policy.json')
     parser.add_argument('--port', type=int, default=16182)
     parser.add_argument('--terminal-policy', default='/app/terminal-policy.json')
+    parser.add_argument('--launch-policy', help='Explicit private JSON launch profile; omitted means disabled')
     args = parser.parse_args()
     policy = json.loads(Path(args.policy).read_text())
-    gate = Gate(Path(args.state), policy=policy)
+    gate = Gate(Path(args.state), policy=policy, launch_policy=Path(args.launch_policy) if args.launch_policy else None)
     gate.deployer = DeploymentRouter(gate.store, Engine(), policy, before_cutover=gate.verify_execution)
     start_terminal(gate, json.loads(Path(args.terminal_policy).read_text()))
     gate.lifecycle.recover()
-    if not gate.store.upgrade_reservation() and not gate.lifecycle.active() and not gate.runtime_updates.active():
+    gate.pi_launches.recover()
+    if not gate.store.upgrade_reservation() and not gate.pi_launches.busy() and not gate.lifecycle.active() and not gate.runtime_updates.active():
         gate.deployer.recover()
     http, admin = start_servers(gate, args.port)
     done = threading.Event()

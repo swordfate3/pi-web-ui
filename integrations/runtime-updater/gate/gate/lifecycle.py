@@ -196,6 +196,7 @@ class Lifecycle:
         deadline.remaining()
         with self.store.lock:
             # Repeat admission after blocking inspection; concurrent submissions dedup here.
+            self.store.require_admission()
             try:
                 previous = self._get(key)
             except KeyError:

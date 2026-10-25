@@ -96,7 +96,7 @@ export const runtimePortalJs = String.raw`
       const stage = document.createElement('p'); stage.textContent = '阶段：' + stageLabel(value.stage);
       row.append(heading, identity, stage);
       if (value.status === 'pending' && policy?.mode === 'manual') {
-        const approval = document.createElement('p'); approval.textContent = '手动策略：请在主机使用 runtime-approve ' + value.id + ' 批准；本页面不会批准更新。'; row.append(approval);
+        const approval = document.createElement('p'); approval.textContent = auth.gateManagementAvailable ? '手动策略：请在上方「统一授权中心」核对并批准此任务。' : '手动策略：请在主机使用 runtime-approve ' + value.id + ' 批准；统一授权中心尚未配置。'; row.append(approval);
       }
       if (value.status === 'recovery_required' && value.resolved !== true) {
         const unresolved = document.createElement('p'); unresolved.textContent = '此结果尚未解决，将阻止新的运行时更新任务；需要管理员检查并在 Gate 侧解决，本页面不会自动解决。'; row.append(unresolved);
@@ -289,7 +289,7 @@ export const runtimePortalJs = String.raw`
       const version = get('runtime-update-version').value.trim();
       if (!stableVersion(version)) { notice('请输入精确稳定版本，例如 1.3.0；不接受 latest、范围、预发布版或构建标记。'); return; }
       if (version !== selectedVersion) { notice('请先从官方发布目录选择要提交的精确稳定版本。'); return; }
-      const manual = policy?.mode === 'manual' ? '\n当前是手动策略；提交后仍需主机管理员使用 runtime-approve 批准。' : '';
+      const manual = policy?.mode === 'manual' ? (auth.gateManagementAvailable ? '\n当前是手动策略；提交后请在统一授权中心审阅并批准。' : '\n当前是手动策略；提交后仍需主机管理员使用 runtime-approve 批准。') : '';
       const blockers = (readinessState?.consumers || []).filter((consumer) => !consumer.ready).slice(0, 5);
       const blockerText = blockers.length ? '\n当前已知阻止项（执行时 Gate 会重新清点）：\n' + blockers.map((consumer) => consumer.run_id + ' · ' + reasonLabel(consumer.reason || 'consumer_not_ready')).join('\n') : '';
       if (!window.confirm('确认向 Gate 提交 Pi ' + version + ' 的全局运行时更新任务？\n' + directionLabel(version) + '\n该版本已发布，但兼容性尚未验证；Gate 将先进行隔离验证，选择本身不会改变在线进程。\n这会影响所有共享运行时使用者；忙碌目标会等待空闲，不会被强制中断。\n旧镜像中的使用者需要先迁移到受管运行环境。\n本页面只创建任务，不批准更新。' + blockerText + manual)) return;

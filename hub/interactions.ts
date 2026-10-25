@@ -17,6 +17,7 @@ import type { HubManagement } from "./management.ts";
 type Hooks = {
   lookup: (generation: string) => Promise<InteractionTarget | undefined>;
   current: (target: InteractionTarget) => boolean;
+  generations?: () => string[];
 };
 type ChannelRecord = {
   target: InteractionTarget;
@@ -73,6 +74,7 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
   const signing = config.management ? interactionSigning(config) : undefined;
   const channels = new Map<string, ChannelRecord>();
   let closed = false;
+  let enumerating = false;
   const retire = (generation: string) => {
     const record = channels.get(generation);
     if (!record) return;
@@ -157,7 +159,8 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
     },
     async handle(request: IncomingMessage, response: ServerResponse, sameOrigin: boolean): Promise<boolean> {
       const url = new URL(request.url ?? "/", "http://hub.invalid");
-      if (!url.pathname.startsWith("/api/management/interactions/")) return false;
+      const inbox = url.pathname === "/api/management/interactions";
+      if (!inbox && !url.pathname.startsWith("/api/management/interactions/")) return false;
       const reply = (status: number, body: unknown) =>
         response
           .writeHead(status, {
@@ -169,11 +172,11 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
           })
           .end(JSON.stringify(body));
       const match = pattern.exec(url.pathname);
-      if (!match || url.search || !signing) {
+      if ((!match && !inbox) || url.search || !signing) {
         reply(404, { error: "Interaction route unavailable" });
         return true;
       }
-      if (request.method !== "GET" && request.method !== "POST") {
+      if ((request.method !== "GET" && request.method !== "POST") || (inbox && request.method !== "GET")) {
         reply(405, { error: "Method not allowed" });
         return true;
       }
@@ -191,6 +194,82 @@ export function createInteractionApi(config: HubConfig, management: HubManagemen
           authorized = true;
         };
         authorized = true;
+        if (inbox) {
+          if (enumerating) {
+            reply(503, { error: "Interaction inbox already being checked" });
+            return true;
+          }
+          enumerating = true;
+          try {
+            const deadline = Date.now() + 4500;
+            const withinDeadline = <T>(operation: Promise<T>) =>
+              new Promise<T>((resolve, reject) => {
+                const timer = setTimeout(
+                  () => reject(new Error("Inbox deadline reached")),
+                  Math.max(1, deadline - Date.now()),
+                );
+                operation.then(resolve, reject).finally(() => clearTimeout(timer));
+              });
+            const all = [...new Set(hooks.generations?.() ?? [])];
+            const queue = all.slice(0, 64);
+            const items: Record<string, unknown>[] = [];
+            let unavailable = 0;
+            let truncated = all.length > queue.length;
+            let cursor = 0;
+            await Promise.all(
+              Array.from({ length: Math.min(4, queue.length) }, async () => {
+                while (cursor < queue.length && Date.now() < deadline && !request.destroyed) {
+                  const generation = queue[cursor++];
+                  try {
+                    const channel = await withinDeadline(channelFor(generation, revalidate));
+                    const status = await withinDeadline(channel.status());
+                    revalidate();
+                    if (!channel.active()) throw new Error();
+                    if (
+                      !plainRecord(status) ||
+                      !Array.isArray(status.pending) ||
+                      status.pending.length > INTERACTION_LIMITS.pendingPerHub
+                    )
+                      throw new Error();
+                    for (const item of status.pending) {
+                      if (
+                        !plainRecord(item) ||
+                        !opaqueId(item.requestId) ||
+                        !safeLabel(item.adapterId, 64) ||
+                        !safeLabel(item.action, 64) ||
+                        !Number.isSafeInteger(item.deadline)
+                      )
+                        throw new Error();
+                      if (Number(item.deadline) <= Date.now()) continue;
+                      if (items.length >= INTERACTION_LIMITS.pendingPerHub) {
+                        truncated = true;
+                        break;
+                      }
+                      items.push({
+                        generation,
+                        requestId: item.requestId,
+                        adapterId: item.adapterId,
+                        action: item.action,
+                        deadline: item.deadline,
+                        path: `/interactions/${generation}/${item.requestId}/`,
+                      });
+                    }
+                  } catch {
+                    revalidate();
+                    unavailable++;
+                  }
+                }
+              }),
+            );
+            unavailable += queue.length - cursor;
+            revalidate();
+            reply(200, { items, unavailable, truncated });
+            return true;
+          } finally {
+            enumerating = false;
+          }
+        }
+        if (!match) throw new Error();
         const channel = await channelFor(match[1], revalidate);
         if (!write) {
           const status = (await channel.status(match[2])) as { completed?: Record<string, unknown>[] };

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "source": {
-    "count": 186,
-    "sha256": "91592c40737daf3ad74e9896197e8759d72244d0d5db9471438b285ee83a4e79",
+    "count": 188,
+    "sha256": "a33716e6aa85c468b337932fc7caa86cf085e778a36b3e222ab1262d0e15fc39",
     "files": [
       {
         "path": "bin/pi-web-hub.mjs",
@@ -125,6 +125,10 @@
         "sha256": "0710f3bd6968466a0088d57a677282e94334e891e75252469e03905b933343c1"
       },
       {
+        "path": "hub/approvals-portal.ts",
+        "sha256": "364bcfc215c74e144c0ec53dd1749f906617ce5681bdd17739788a3e3ce74892"
+      },
+      {
         "path": "hub/asset-transfer.ts",
         "sha256": "caddd274bb7124d88f13f706650388d1e2cc0dc44afe9016cde0a4f7bef486e9"
       },
@@ -134,11 +138,15 @@
       },
       {
         "path": "hub/config.ts",
-        "sha256": "97b455400a3e325e1bc13d9f0c9edc6c2feef9d53cffb9df4cbcfcd7b6dd4de7"
+        "sha256": "86be7821b3efba89a7811df834f7835673f8caa17a7e1584e7bd72c452ab45ea"
       },
       {
         "path": "hub/forward-queue.ts",
         "sha256": "437ac2eef32eb04f11cfeef0a17ca9eb103f656376fa06fd7de83e9f7a1aafc1"
+      },
+      {
+        "path": "hub/gate-management.ts",
+        "sha256": "8cd7467eb9607d0191b4a726e42aedde133bf007d3fc04a86cd6ca4927109624"
       },
       {
         "path": "hub/gateway-auth.ts",
@@ -158,7 +166,7 @@
       },
       {
         "path": "hub/interactions.ts",
-        "sha256": "69e4b5b32b228c0388e76f90149937a741b12a411bf25f2321872c63baadf66e"
+        "sha256": "98a1f9ddeef270c332b0456ac6234fa1769fd6ab8a11071bdb89d893f806fbce"
       },
       {
         "path": "hub/lifecycle.ts",
@@ -178,15 +186,15 @@
       },
       {
         "path": "hub/portal.ts",
-        "sha256": "b5d9aa3838a991caabf601b73b7ae63a7dc7316f9e6aec8720bd538415e98bda"
+        "sha256": "4d606820c03a79d175414997d3a7727132294d6bdfca2758e7935d6eae33c5bd"
       },
       {
         "path": "hub/restart-api.ts",
-        "sha256": "9b9519d5256bf5504d46a3b9a0454e2d5208f3441d887d64bb6bbf245e4d9d28"
+        "sha256": "64e53e1fca2a05670d84d4bb95af7f4978b0c5192f81310d187c115345c644a5"
       },
       {
         "path": "hub/runtime-portal.ts",
-        "sha256": "7b3cf6284ad872837c4d77b572fb811f166c840d2e94b1ee43e2a5a20bcd3946"
+        "sha256": "2cbc9420e737a3677202396008614fdecbbdb418863c1f57afd2a25b737d473d"
       },
       {
         "path": "hub/runtime-updates.ts",
@@ -194,7 +202,7 @@
       },
       {
         "path": "hub/server.ts",
-        "sha256": "e181fc5c372f4d019582714c9176aef08fbe543d9a13f5b069158d4cbc717d00"
+        "sha256": "d852bbd6871b747c3ceb4684870d9f2d274301e3dc5398598b5e30410ee8e7bd"
       },
       {
         "path": "hub/state-budget.ts",
@@ -752,7 +760,7 @@
   },
   "outputs": {
     "count": 732,
-    "sha256": "87b925c252d5d9e847188074f5e746ce95c37c74a7287b721cc4d4e561c706e1",
+    "sha256": "2fc90fc220d372311869e030e1edb4b06868fedefe7b3efdba3ae944dcdd6552",
     "files": [
       {
         "path": "assets/KaTeX_AMS-Regular-BQhdFMY1.woff2",
@@ -3656,7 +3664,7 @@
       },
       {
         "path": "hub/pi-web-hub.mjs",
-        "sha256": "b940e6fea08847dd758e7b60055dfdea94554c5fedb7580d4a8553640592452e"
+        "sha256": "9790309b9c848039e4ad061a85aca1c163bc34bccf632686bbf016d4d003e1c5"
       },
       {
         "path": "icons/pi-web-ui-192.png",

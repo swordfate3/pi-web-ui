@@ -27,6 +27,7 @@ import {
   readPrivateJson,
 } from "./config.ts";
 import { ForwardQueue } from "./forward-queue.ts";
+import { createGateManagementApi } from "./gate-management.ts";
 import { gatewayIdentity } from "./gateway-auth.ts";
 import type { InteractionTarget } from "./interaction-control.ts";
 import { interactionPageCss, interactionPageJs, renderInteractionPageHtml } from "./interaction-page.ts";
@@ -340,6 +341,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     return session;
   };
   const management = new HubManagement(config);
+  const gateManagementApi = createGateManagementApi(config, management);
   const interactionTarget = (session: Session | undefined): InteractionTarget | undefined => {
     const descriptor = session?.interaction ?? session?.runtime;
     if (!session || !descriptor) return undefined;
@@ -356,6 +358,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
     };
   };
   interactionApi = createInteractionApi(config, management, {
+    generations: () => [...sessions.keys()].filter((generation) => !!interactionTarget(current(generation))),
     lookup: async (generation) => interactionTarget(await verified(generation)),
     current: (target) => {
       const fresh = interactionTarget(current(target.identity.generation));
@@ -760,6 +763,7 @@ async function startLockedHub(config: HubConfig, options: { versions?: VersionSt
           fail(response, 401);
           return;
         }
+        if (await gateManagementApi.handle(request, response, allowedBrowser(request, true, true))) return;
         if (await interactionApi?.handle(request, response, allowedBrowser(request, request.method !== "GET", true)))
           return;
         if (await restartApi.handle(request, response, allowedBrowser(request, true, true))) return;

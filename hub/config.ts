@@ -17,6 +17,7 @@ export type HubConfig = {
   publicUrl?: string;
   lifecycle?: LifecycleConfig;
   runtimeUpdates?: LifecycleConfig;
+  gateManagement?: LifecycleConfig;
   management?: { port: number; publicUrl?: string; gateway?: { credentialFile: string } };
 };
 export type Grant = {
@@ -82,6 +83,7 @@ export function readHubConfig(file: string): HubConfig {
     throw new Error("Bundled hub currently requires Unix IPC (Linux/macOS); standalone Pi Web still works");
   const lifecycle = value.lifecycle === undefined ? undefined : lifecycleConfig(value.lifecycle);
   const runtimeUpdates = value.runtimeUpdates === undefined ? undefined : lifecycleConfig(value.runtimeUpdates);
+  const gateManagement = value.gateManagement === undefined ? undefined : lifecycleConfig(value.gateManagement);
   const management = value.management === undefined ? undefined : managementConfig(value.management, port, publicUrl);
   return {
     stateDir,
@@ -93,6 +95,7 @@ export function readHubConfig(file: string): HubConfig {
     publicUrl,
     ...(lifecycle ? { lifecycle } : {}),
     ...(runtimeUpdates ? { runtimeUpdates } : {}),
+    ...(gateManagement ? { gateManagement } : {}),
     ...(management ? { management } : {}),
   };
 }

@@ -229,9 +229,12 @@ export function createRestartApi(config: HubConfig, hooks: Hooks, management = n
         }
         if (request.method === "GET" && pathname === "/api/management/status") {
           reply(200, {
-            available: !!provider || !!runtimeProvider,
+            available: !!provider || !!runtimeProvider || !!config.gateManagement || !!config.management,
+            ...(config.gateManagement ? { gateManagementAvailable: true } : {}),
+            ...(config.management ? { interactionsAvailable: true } : {}),
+            restartAvailable: !!provider,
             ...(config.management?.gateway ? { authMode: "gateway" } : {}),
-            ...(runtimeProvider ? { runtimeUpdatesAvailable: true, restartAvailable: !!provider } : {}),
+            ...(runtimeProvider ? { runtimeUpdatesAvailable: true } : {}),
             ...management.status(request),
           });
           return true;

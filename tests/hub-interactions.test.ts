@@ -23,9 +23,9 @@ async function fixture(t: test.TestContext) {
   const registration = createSessionRegistration({ credentialFile, socketPath: config.socketPath });
   const broker = new InteractionBroker({ runId: credential.run_id, generation: "a".repeat(32), runtimeId: "runtime-1", sessionId: "session-1" }, { pin: registration.interactionPin, onChange: () => control.notify() });
   const control = createInteractionControlServer({ broker: () => broker, authorize: (request) => typeof request.headers["x-pi-web-proof"] === "string" && guardSessionRequest(registration, request) });
-  let beforeProof: (() => void) | undefined;
-  const sourceServer = http.createServer((request, response) => {
-    if (request.headers["x-pi-web-challenge"]) beforeProof?.();
+  let beforeProof: (() => void | Promise<void>) | undefined;
+  const sourceServer = http.createServer(async (request, response) => {
+    if (request.headers["x-pi-web-challenge"]) await beforeProof?.();
     if (guardSessionRequest(registration, request, response)) response.writeHead(404).end();
   });
   sourceServer.on("upgrade", (request, socket, head) => { if (!control.upgrade(request, socket, head)) socket.destroy(); });
@@ -47,7 +47,7 @@ async function fixture(t: test.TestContext) {
   const csrf = (await unlock.json()).csrf;
   const headers = { Cookie: cookie, Origin: new URL(hub.managementUrl!).origin, "x-pi-hub-csrf": csrf, "Content-Type": "application/json" };
   const route = (requestId: string) => `${hub.managementUrl}api/management/interactions/${generation}/${requestId}`;
-  return { hub, broker, config, source, headers, route, generation, beforeProof: (callback: () => void) => { beforeProof = callback; } };
+  return { hub, broker, config, source, headers, route, generation, beforeProof: (callback: () => void | Promise<void>) => { beforeProof = callback; } };
 }
 
 test("trusted review shares existing management session; chat, missing auth and wrong CSRF cannot approve", async (t) => {
@@ -113,4 +113,42 @@ test("management revoked while backend identity proof is in flight cannot receiv
   assert.equal(f.broker.pending().length, 1);
   source.cancel();
   assert.equal((await source.result).state, "cancelled");
+});
+
+test("trusted inbox discovers live extension requests without private preview or chat access", async (t) => {
+  const f = await fixture(t);
+  const source = f.source();
+  const inbox = `${f.hub.managementUrl}api/management/interactions`;
+  assert.equal((await fetch(inbox)).status, 401);
+  assert.equal((await fetch(`${f.hub.url}api/management/interactions`)).status, 404);
+  const response = await fetch(inbox, { headers: f.headers });
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.unavailable, 0);
+  assert.equal(data.truncated, false);
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].requestId, source.request.requestId);
+  assert.equal(data.items[0].path, `/interactions/${f.generation}/${source.request.requestId}/`);
+  assert.ok(!JSON.stringify(data).includes("PRIVATE-MEMORY-CONTENT"));
+  source.cancel();
+  assert.equal((await source.result).state, "cancelled");
+  assert.equal((await (await fetch(inbox, { headers: f.headers })).json()).items.length, 0);
+});
+
+test("inbox admits one bounded enumeration and rejects concurrent scans without extra source work", async (t) => {
+  const f = await fixture(t);
+  let release!: () => void;
+  let entered!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  let proofs = 0;
+  f.beforeProof(async () => { proofs++; entered(); await blocked; });
+  const inbox = `${f.hub.managementUrl}api/management/interactions`;
+  const first = fetch(inbox, { headers: f.headers });
+  await started;
+  try {
+    const second = await fetch(inbox, { headers: f.headers });
+    assert.equal(second.status, 503);
+    assert.equal(proofs, 1);
+  } finally { release(); await first; }
 });

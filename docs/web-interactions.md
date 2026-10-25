@@ -17,6 +17,16 @@ Only commands explicitly advertised by the installed source adapter route to a p
 
 ## Trust and prerequisites
 
+The trusted Hub portal now also exposes an **extension approval inbox** under
+“运行管理 → 统一授权中心”. It enumerates pending metadata from verified live
+interaction-capable sessions, with at most four simultaneous channel opens,
+64 source channels and 64 visible requests. Partial/unavailable sources are
+identified rather than reported as an empty success. The list never reads
+private request previews or OAuth URLs; each link opens the existing per-request
+review page. This does not add support to extensions without an adapter.
+Gate deployment/runtime approvals in the same portal use a separate dedicated
+management capability; see [Hub setup](hub.md#统一授权中心需配套升级-gate-与-hub).
+
 The chat application does not receive sensitive previews, OAuth URLs/callbacks or a management signing key. A sensitive notice provides an explicit top-level management link, with an ordinary same-tab fallback if opening a separate tab is inconvenient.
 
 Use the already configured separate management origin and its gateway login/unlock. There is no new application password or management code for gateway deployments. If an existing installation uses the original one-time-code unlock instead, that existing mode remains supported; the feature does not silently change authentication modes.

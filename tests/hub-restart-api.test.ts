@@ -216,9 +216,14 @@ async function fixture(t: test.TestContext, managed = true) {
   };
 }
 
-test("management is optional and loopback access alone cannot authorize a restart", async (t) => {
+test("inbox management does not grant a restart provider and loopback alone cannot authorize", async (t) => {
   const f = await fixture(t, false);
-  assert.deepEqual(await (await f.request("status")).json(), { available: false, authorized: false });
+  assert.deepEqual(await (await f.request("status")).json(), {
+    available: true,
+    authorized: false,
+    interactionsAvailable: true,
+    restartAvailable: false,
+  });
   assert.equal((await f.request(`targets/${f.payload.generation}`)).status, 401);
   await f.unlock();
   assert.equal((await f.request("restarts", f.payload)).status, 503);

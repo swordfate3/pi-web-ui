@@ -9,17 +9,17 @@ const loader = new URL("./register-ts.mjs", import.meta.url).href;
 
 // A separate process gives each test an immutable guard descriptor, as a real
 // preload would. The fake input source is the only double; control IPC is real.
-async function probe(transport, dispatch = false) {
+async function probe(transport, dispatch = false, commitCase = null) {
   const source = `
     import {mkdtemp,writeFile,rm} from 'node:fs/promises';
     import {tmpdir} from 'node:os';import path from 'node:path';import net from 'node:net';
     import * as runtime from ${JSON.stringify(entry)};
     const {startRuntimeControl}=runtime;
     const root=await mkdtemp(path.join(tmpdir(),'web-rpc-control-'));
-    let safe=true,barrier=null;
+    let safe=true,barrier=null,stopping=false;
     const guard=Object.freeze({version:1,transport:${JSON.stringify(transport)},intact:()=>true,safe:()=>safe,
       taint:()=>{safe=false;},freeze:(owner,operation)=>{if(!safe)return false;barrier={owner,operation};return true;},
-      release:(owner,operation)=>{if(barrier?.owner!==owner||barrier.operation!==operation)return false;barrier=null;return true;},shutdown:()=>{safe=false;}});
+      release:(owner,operation)=>{if(stopping||barrier?.owner!==owner||barrier.operation!==operation)return false;barrier=null;return true;},shutdown:()=>{safe=false;stopping=true;}});
     if(${JSON.stringify(transport !== null)}) Object.defineProperty(globalThis,Symbol.for('pi.runtime.stdin-guard.v1'),{value:guard,configurable:false,writable:false});
     const session=path.join(root,'session.jsonl');await writeFile(session,'{}\\n',{mode:0o600});
     const socket=path.join(root,'rpc.sock'),token='a'.repeat(64),operation='b'.repeat(32);
@@ -36,8 +36,22 @@ async function probe(transport, dispatch = false) {
       const before=await request({action:'snapshot'});
       const prepared=await request({action:'prepare',operation_id:operation,expected:{runtime_id:'runtime',session_id:'session',leaf_id:'leaf'}});
       const held=control.prepared;
-      const cancelled=held?await request({action:'cancel',operation_id:operation}):null;
-      console.log(JSON.stringify({before,prepared,held,cancelled,released:!control.prepared,dispatches,safeDuringDispatch}));
+      const commitCase=${JSON.stringify(commitCase)};
+      if(commitCase){
+        const expected=structuredClone(snapshot);
+        if(commitCase==='no-lease') await request({action:'cancel',operation_id:operation});
+        if(commitCase==='tainted') guard.taint();
+        if(commitCase==='drift') snapshot.thinking='low';
+        if(commitCase==='caller-drift') expected.model='other';
+        if(commitCase==='clock-forward') Date.now=()=>9000000000000;
+        const committed=await request({action:'commit',operation_id:commitCase==='wrong-operation'?'d'.repeat(32):operation,expected});
+        const replay=commitCase==='commit'?await request({action:'commit',operation_id:operation,expected}):null;
+        const cancelled=await request({action:'cancel',operation_id:operation});
+        console.log(JSON.stringify({committed,replay,cancelled,held:control.prepared,stopping}));
+      }else{
+        const cancelled=held?await request({action:'cancel',operation_id:operation}):null;
+        console.log(JSON.stringify({before,prepared,held,cancelled,released:!control.prepared,dispatches,safeDuringDispatch}));
+      }
     }finally{await control.close();await rm(root,{recursive:true,force:true});}
   `;
   const { stdout, stderr } = await run(process.execPath, ["--experimental-default-type=module", "--import", loader, "--input-type=module", "-e", source], {
@@ -53,6 +67,31 @@ test("private runtime control admits the intact RPC fence and holds/cancels the 
   assert.equal(result.prepared.ok, true); assert.equal(result.held, true);
   assert.equal(result.prepared.result.version, "1.4.0");
   assert.equal(result.cancelled.result.cancelled, true); assert.equal(result.released, true);
+});
+
+test('private final commit latches admission before acknowledgement and cannot be cancelled or replayed', async () => {
+  const result = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, 'commit');
+  assert.equal(result.committed.ok, true, 'Final live commit handshake must exist');
+  assert.equal(result.committed.result.committed, true);
+  assert.equal(result.committed.result.operation_id, 'b'.repeat(32));
+  assert.equal(result.committed.result.snapshot.thinking, 'off');
+  assert.equal(result.stopping, true); assert.equal(result.held, true);
+  assert.equal(result.replay.ok, false); assert.equal(result.cancelled.ok, false);
+});
+
+test('private final commit refuses missing lease, wrong operation, complete state drift and tainted input', async () => {
+  for (const mode of ['no-lease', 'wrong-operation', 'drift', 'caller-drift', 'tainted']) {
+    const result = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, mode);
+    assert.equal(result.committed.ok, false, mode);
+    assert.equal(result.stopping, false, mode);
+  }
+});
+
+test('wall clock jumps cannot expire an otherwise valid original monotonic runtime lease', async () => {
+  const result = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, 'clock-forward');
+  assert.equal(result.committed.ok, true);
+  assert.equal(result.stopping, true); assert.equal(result.held, true);
+  assert.equal(result.cancelled.ok, false);
 });
 
 test("private runtime control preserves audited TUI admission and refuses unknown transports", async () => {

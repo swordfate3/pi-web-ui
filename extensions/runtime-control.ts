@@ -31,6 +31,30 @@ const equal = (a: unknown, b: string) =>
   typeof a === "string" &&
   Buffer.byteLength(a) === Buffer.byteLength(b) &&
   timingSafeEqual(Buffer.from(a), Buffer.from(b));
+const snapshotFields = [
+  "run_id",
+  "runtime_id",
+  "session_id",
+  "leaf_id",
+  "session_file",
+  "cwd",
+  "version",
+  "idle",
+  "pending",
+  "busy",
+  "provider",
+  "model",
+  "thinking",
+] as const;
+function sameSnapshot(a: unknown, b: RuntimeSnapshot): boolean {
+  return (
+    !!a &&
+    typeof a === "object" &&
+    !Array.isArray(a) &&
+    Object.keys(a).sort().join() === [...snapshotFields].sort().join() &&
+    snapshotFields.every((key) => (a as Record<string, unknown>)[key] === b[key])
+  );
+}
 
 type StdinGuard = {
   version: number;
@@ -107,12 +131,16 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
   let prepared: string | null = null;
   let closed = false;
   let preparedAt = 0;
+  let heldSnapshot: RuntimeSnapshot | undefined;
+  let committed = false;
   let lease: NodeJS.Timeout | undefined;
   const guard = stdinGuard();
   const owner = Object.freeze({});
   const release = () => {
+    if (committed) return;
     if (prepared) guard?.release(owner, prepared);
     prepared = null;
+    heldSnapshot = undefined;
     clearTimeout(lease);
   };
   const peers = new Set<net.Socket>();
@@ -175,11 +203,12 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
         if (!request || typeof request !== "object" || Array.isArray(request) || !equal(request.token, token))
           throw new Error();
         // A prepared lease cannot strand the user's terminal forever if its controller vanished.
-        if (prepared && Date.now() - preparedAt > 150_000) release();
+        if (prepared && !committed && performance.now() - preparedAt >= 150_000) release();
         let result: unknown;
         if (request.action === "snapshot" && Object.keys(request).every((key) => ["action", "token"].includes(key))) {
           result = fresh();
         } else if (request.action === "prepare") {
+          if (committed) throw new Error();
           if (Object.keys(request).some((key) => !["action", "token", "operation_id", "expected"].includes(key)))
             throw new Error();
           const value = fresh();
@@ -202,14 +231,43 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
           if (!stat.isFile() || stat.uid !== process.getuid?.()) throw new Error();
           if (!guard?.freeze(owner, request.operation_id)) throw new Error();
           if (!prepared) {
-            preparedAt = Date.now();
+            preparedAt = performance.now();
+            heldSnapshot = { ...value };
             lease = setTimeout(release, 150_000);
             lease.unref();
           }
           prepared = request.operation_id;
           result = value;
+        } else if (request.action === "commit") {
+          if (
+            Object.keys(request).sort().join() !== "action,expected,operation_id,token" ||
+            committed ||
+            !prepared ||
+            request.operation_id !== prepared ||
+            !heldSnapshot ||
+            performance.now() - preparedAt >= 150_000
+          )
+            throw new Error();
+          const value = fresh();
+          if (
+            !sameSnapshot(request.expected, heldSnapshot) ||
+            !sameSnapshot(value, heldSnapshot) ||
+            !value.idle ||
+            value.pending ||
+            value.busy ||
+            !guard
+          )
+            throw new Error();
+          // No await between complete live-state comparison and the permanent
+          // admission latch. A lost acknowledgement must never reopen input.
+          committed = true;
+          clearTimeout(lease);
+          guard.shutdown(owner);
+          if (guard.safe()) throw new Error();
+          result = { committed: true, operation_id: prepared, snapshot: value };
         } else if (request.action === "cancel") {
           if (
+            committed ||
             Object.keys(request).some((key) => !["action", "token", "operation_id"].includes(key)) ||
             !prepared ||
             request.operation_id !== prepared
@@ -238,7 +296,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
   server.on("error", () => {});
   return {
     get prepared() {
-      if (prepared && Date.now() - preparedAt > 150_000) release();
+      if (prepared && !committed && performance.now() - preparedAt >= 150_000) release();
       return prepared !== null;
     },
     async close(shutdown = false) {

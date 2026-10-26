@@ -29,3 +29,14 @@ process with a missing or incompatible guard cannot silently bypass it. Guard
 cooperation is not security isolation against hostile code in the same process.
 This mechanism grants no administrator credentials or update authority, and its
 successful tests do not mean complete update activation is implemented.
+
+The optional private controller can prepare a lease and then commit the exact
+complete held snapshot. Commit compares the live run, session, leaf, file,
+working directory, Pi version, provider/model/thinking and settled flags without
+an asynchronous gap before permanently latching input shutdown. Lease age uses
+the original monotonic clock deadline. Commit does not extend it. After commit,
+neither cancellation nor retry can reopen input, even if the controller loses
+the acknowledgement. Read-only Web queries remain available until process exit.
+This handshake is private quiescence evidence, not permission to stop a process
+or proof that a candidate version can restore the session. Manager must verify
+those separately before authorizing a replacement.

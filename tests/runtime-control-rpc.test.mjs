@@ -9,17 +9,18 @@ const loader = new URL("./register-ts.mjs", import.meta.url).href;
 
 // A separate process gives each test an immutable guard descriptor, as a real
 // preload would. The fake input source is the only double; control IPC is real.
-async function probe(transport) {
+async function probe(transport, dispatch = false) {
   const source = `
     import {mkdtemp,writeFile,rm} from 'node:fs/promises';
     import {tmpdir} from 'node:os';import path from 'node:path';import net from 'node:net';
-    import {startRuntimeControl} from ${JSON.stringify(entry)};
+    import * as runtime from ${JSON.stringify(entry)};
+    const {startRuntimeControl}=runtime;
     const root=await mkdtemp(path.join(tmpdir(),'web-rpc-control-'));
     let safe=true,barrier=null;
     const guard=Object.freeze({version:1,transport:${JSON.stringify(transport)},intact:()=>true,safe:()=>safe,
       taint:()=>{safe=false;},freeze:(owner,operation)=>{if(!safe)return false;barrier={owner,operation};return true;},
       release:(owner,operation)=>{if(barrier?.owner!==owner||barrier.operation!==operation)return false;barrier=null;return true;},shutdown:()=>{safe=false;}});
-    Object.defineProperty(globalThis,Symbol.for('pi.runtime.stdin-guard.v1'),{value:guard,configurable:false,writable:false});
+    if(${JSON.stringify(transport !== null)}) Object.defineProperty(globalThis,Symbol.for('pi.runtime.stdin-guard.v1'),{value:guard,configurable:false,writable:false});
     const session=path.join(root,'session.jsonl');await writeFile(session,'{}\\n',{mode:0o600});
     const socket=path.join(root,'rpc.sock'),token='a'.repeat(64),operation='b'.repeat(32);
     const snapshot={run_id:'c'.repeat(32),runtime_id:'runtime',session_id:'session',leaf_id:'leaf',
@@ -30,11 +31,13 @@ async function probe(transport) {
       peer.on('connect',()=>peer.end(JSON.stringify({...message,token})+'\\n'));
       peer.on('data',chunk=>data+=chunk.toString());peer.on('end',()=>{try{resolve(JSON.parse(data));}catch(e){reject(e);}});});
     try{
+      let dispatches=0,safeDuringDispatch=null;
+      if(${JSON.stringify(dispatch)}) runtime.dispatchRuntimeUserMessage(()=>{dispatches++;safeDuringDispatch=guard.safe();});
       const before=await request({action:'snapshot'});
       const prepared=await request({action:'prepare',operation_id:operation,expected:{runtime_id:'runtime',session_id:'session',leaf_id:'leaf'}});
       const held=control.prepared;
       const cancelled=held?await request({action:'cancel',operation_id:operation}):null;
-      console.log(JSON.stringify({before,prepared,held,cancelled,released:!control.prepared}));
+      console.log(JSON.stringify({before,prepared,held,cancelled,released:!control.prepared,dispatches,safeDuringDispatch}));
     }finally{await control.close();await rm(root,{recursive:true,force:true});}
   `;
   const { stdout, stderr } = await run(process.execPath, ["--experimental-default-type=module", "--import", loader, "--input-type=module", "-e", source], {
@@ -58,4 +61,32 @@ test("private runtime control preserves audited TUI admission and refuses unknow
   const unknown = await probe("pi-rpc-v0:unverified");
   assert.equal(unknown.before.result.busy, true); assert.equal(unknown.prepared.ok, false);
   assert.equal(unknown.held, false);
+});
+
+test("RPC void dispatch fails closed before calling Pi and cannot acquire a lease", async () => {
+  const result = await probe("pi-rpc-v1:stdin-stdout-jsonl", true);
+  assert.equal(result.dispatches, 1);
+  assert.equal(result.safeDuringDispatch, false);
+  assert.equal(result.before.result.busy, true);
+  assert.equal(result.prepared.ok, false);
+  assert.equal(result.held, false);
+});
+
+test("RPC void dispatch fencing preserves legacy TUI dispatch admission", async () => {
+  const result = await probe("pi-tui-1.1.0:stdin-data", true);
+  assert.equal(result.dispatches, 1);
+  assert.equal(result.safeDuringDispatch, true);
+  assert.equal(result.before.result.busy, false);
+  assert.equal(result.prepared.ok, true);
+});
+
+test("RPC void dispatch preserves standalone input without admitting an absent or unknown guard", async () => {
+  for (const transport of [null, "pi-rpc-v0:unverified"]) {
+    const result = await probe(transport, true);
+    assert.equal(result.dispatches, 1);
+    assert.equal(result.safeDuringDispatch, true);
+    assert.equal(result.before.result.busy, true);
+    assert.equal(result.prepared.ok, false);
+    assert.equal(result.held, false);
+  }
 });

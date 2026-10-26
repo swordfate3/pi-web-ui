@@ -35,7 +35,7 @@ import { INTERACTION_PROTOCOL } from "./interactions/protocol.ts";
 import { projectLiveEvent } from "./live-transport.ts";
 import { matchesRevisionDispatch, resolveMessageRevision, revisionContent } from "./message-revision.ts";
 import { resolveMessageVersions } from "./message-versions.ts";
-import { startRuntimeControl, taintRuntimeInput } from "./runtime-control.ts";
+import { dispatchRuntimeUserMessage, startRuntimeControl, taintRuntimeInput } from "./runtime-control.ts";
 import {
   guardHistoryFrame,
   historyRange,
@@ -386,6 +386,8 @@ export default function (pi: ExtensionAPI) {
   let activeHttpMutations = 0;
   let runtimeControl: Awaited<ReturnType<typeof startRuntimeControl>>;
   let runtimeStopping = false;
+  const sendUserMessage: ExtensionAPI["sendUserMessage"] = (...args) =>
+    dispatchRuntimeUserMessage(() => pi.sendUserMessage(...args));
   // Protocol: replacement acknowledgements mean accepted, never completed.
   // Resume completes on state_sync.sessionId === targetSessionId; reload keeps
   // that ID and completes only on a different state_sync.runtimeId. Both clear
@@ -673,7 +675,7 @@ export default function (pi: ExtensionAPI) {
     try {
       // Fence a delayed dispatch too: an expired command cannot execute under
       // the lock of a later request for the same operation.
-      pi.sendUserMessage(`${invocation} ${dispatchId} ${args.join(" ")}`.trimEnd(), { expandPromptTemplates: true });
+      sendUserMessage(`${invocation} ${dispatchId} ${args.join(" ")}`.trimEnd(), { expandPromptTemplates: true });
     } catch {
       clearSessionAction();
       throw new Error("Pi could not dispatch the session action. Try again.");
@@ -1768,7 +1770,7 @@ export default function (pi: ExtensionAPI) {
         if (epoch === lifecycleEpoch && !revisionAttempt) sessionReplacementPending = false;
       }, 8_000);
       revisionDispatchTimer.unref();
-      pi.sendUserMessage(content, { expandPromptTemplates: false });
+      sendUserMessage(content, { expandPromptTemplates: false });
       return { dispatched: true, sessionId: params.sessionId, runtimeId, userEntryId: original.userEntryId };
     } catch {
       if (revisionDispatchTimer && epoch === lifecycleEpoch) {
@@ -2038,7 +2040,7 @@ export default function (pi: ExtensionAPI) {
                 },
                 () => {
                   checkReady();
-                  pi.sendUserMessage(message, { expandPromptTemplates: false });
+                  sendUserMessage(message, { expandPromptTemplates: false });
                 },
               );
               sendTo(ws, success());
@@ -2062,7 +2064,7 @@ export default function (pi: ExtensionAPI) {
               sendTo(ws, error(`Unknown Pi command: /${commandName}`));
               break;
             }
-            pi.sendUserMessage(message, { expandPromptTemplates: true });
+            sendUserMessage(message, { expandPromptTemplates: true });
             sendTo(ws, success({ command: commandName, source: "pi" }));
             break;
           }
@@ -2186,7 +2188,7 @@ export default function (pi: ExtensionAPI) {
           const commandContext = latestCtx;
           if (commandContext && !commandContext.isIdle()) {
             const behavior = typeof params.streamingBehavior === "string" ? params.streamingBehavior : "steer";
-            pi.sendUserMessage(message, {
+            sendUserMessage(message, {
               deliverAs: behavior === "followUp" ? "followUp" : "steer",
               expandPromptTemplates: images.length === 0,
             });
@@ -2206,11 +2208,11 @@ export default function (pi: ExtensionAPI) {
                   | "image/webp";
                 content.push({ type: "image", data, mimeType });
               }
-              pi.sendUserMessage(content.some((block) => block.type === "image") ? content : message, {
+              sendUserMessage(content.some((block) => block.type === "image") ? content : message, {
                 expandPromptTemplates: false,
               });
             } else {
-              pi.sendUserMessage(message, { expandPromptTemplates: true });
+              sendUserMessage(message, { expandPromptTemplates: true });
             }
           }
           sendTo(ws, success());
@@ -2219,14 +2221,14 @@ export default function (pi: ExtensionAPI) {
 
         case "steer": {
           if (sessionReplacementPending) throw new Error("A session action is already in progress");
-          pi.sendUserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "steer" });
+          sendUserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "steer" });
           sendTo(ws, success());
           break;
         }
 
         case "follow_up": {
           if (sessionReplacementPending) throw new Error("A session action is already in progress");
-          pi.sendUserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "followUp" });
+          sendUserMessage(typeof params.message === "string" ? params.message : "", { deliverAs: "followUp" });
           sendTo(ws, success());
           break;
         }

@@ -59,6 +59,18 @@ export function taintRuntimeInput() {
   stdinGuard()?.taint();
 }
 
+/** Account before Pi's void API can enter asynchronous prompt preflight. */
+export function dispatchRuntimeUserMessage(dispatch: () => void) {
+  const guard = stdinGuard();
+  if (guard?.transport === "pi-rpc-v1:stdin-stdout-jsonl") {
+    // The public extension API provides neither a completion promise nor a
+    // dispatch ID. agent_start/agent_settled may belong to another submission;
+    // handled/queued input may still own work. Fail closed for this process.
+    guard.taint();
+  }
+  dispatch();
+}
+
 /** Private container IPC only. It never signals processes or accepts executable arguments. */
 export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () => RuntimeSnapshot | null) {
   const keys = [env.PI_RUNTIME_RUN_ID, env.PI_RUNTIME_CHILD_TOKEN, env.PI_RUNTIME_EXTENSION_SOCKET];

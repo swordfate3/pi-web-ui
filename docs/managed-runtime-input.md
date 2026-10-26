@@ -40,3 +40,15 @@ the acknowledgement. Read-only Web queries remain available until process exit.
 This handshake is private quiescence evidence, not permission to stop a process
 or proof that a candidate version can restore the session. Manager must verify
 those separately before authorizing a replacement.
+
+A replacement process may additionally be launched with the private
+`PI_RUNTIME_PENDING_ACTIVATION` operation ID. Web mutations start closed,
+including the interval before its controller socket is ready. Cancelling or
+expiring a preparation lease cannot open that bootstrap gate. Only an exact
+private `admit` request with the held complete snapshot and unexpired original
+lease releases it; wrong operations, state drift and replay are refused. A
+normal standalone process cannot use `admit`. Read-only queries remain possible.
+The external executor must verify readiness and publish its installation
+selection before requesting admission, and treat a lost acknowledgement as
+unknown rather than replaying it. This optional gate still grants no update,
+approval, executable selection or process-control authority to the extension.

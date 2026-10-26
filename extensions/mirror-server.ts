@@ -391,6 +391,8 @@ export default function (pi: ExtensionAPI) {
   let activeHttpMutations = 0;
   let runtimeControl: Awaited<ReturnType<typeof startRuntimeControl>>;
   let runtimeStopping = false;
+  const runtimeInputHeld = () =>
+    runtimeStopping || (runtimeControl ? runtimeControl.prepared : !!process.env.PI_RUNTIME_PENDING_ACTIVATION);
   const sendUserMessage: ExtensionAPI["sendUserMessage"] = (...args) =>
     dispatchRuntimeUserMessage(() => pi.sendUserMessage(...args));
   // Protocol: replacement acknowledgements mean accepted, never completed.
@@ -498,7 +500,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", (_event, ctx) => {
     latestCtx = ctx;
-    if (runtimeStopping || runtimeControl?.prepared) {
+    if (runtimeInputHeld()) {
       ctx.ui.notify("Pi is preparing to restart. Nothing was sent; wait for reconnection.", "warning");
       return { action: "handled" };
     }
@@ -521,7 +523,7 @@ export default function (pi: ExtensionAPI) {
   ] as const) {
     pi.on(event, (_event, ctx) => {
       latestCtx = ctx;
-      if (runtimeStopping || runtimeControl?.prepared) return { cancel: true };
+      if (runtimeInputHeld()) return { cancel: true };
     });
   }
 
@@ -1916,10 +1918,7 @@ export default function (pi: ExtensionAPI) {
       !request.method.startsWith("get_") &&
       !["abort", "health", "sync_request", "extension_ui_response"].includes(request.method);
     try {
-      if (
-        (runtimeStopping || runtimeControl?.prepared) &&
-        (mutates || request.method === "abort" || request.method === "extension_ui_response")
-      )
+      if (runtimeInputHeld() && (mutates || request.method === "abort" || request.method === "extension_ui_response"))
         throw new Error("Pi is preparing to restart. Wait for reconnection; nothing was sent.");
       if (
         (revisionAttempt || revisionDispatchUnknown) &&
@@ -2807,7 +2806,7 @@ export default function (pi: ExtensionAPI) {
     urlPath = urlPath.split("?")[0];
 
     if (urlPath.startsWith("/api/uploads")) {
-      if (runtimeStopping || runtimeControl?.prepared) {
+      if (runtimeInputHeld()) {
         res.writeHead(409, { "Cache-Control": "no-store" }).end();
         return;
       }
@@ -2818,12 +2817,7 @@ export default function (pi: ExtensionAPI) {
         res,
         workspaceUploads,
         scope,
-        () =>
-          !!scope &&
-          !runtimeStopping &&
-          !runtimeControl?.prepared &&
-          !sessionReplacementPending &&
-          scopeIsCurrent(scope),
+        () => !!scope && !runtimeStopping && !runtimeInputHeld() && !sessionReplacementPending && scopeIsCurrent(scope),
         SETTINGS.publicUrl ? new URL(SETTINGS.publicUrl).origin : `http://${req.headers.host}`,
         !!registration && typeof req.headers["x-pi-web-proof"] === "string",
       )
@@ -3564,8 +3558,9 @@ export default function (pi: ExtensionAPI) {
     interactionPanels.close();
     detachInteractionPanels();
     terminalPrompt.clear();
+    const heldBeforeShutdown = runtimeInputHeld();
     runtimeStopping = true;
-    if (event.reason !== "quit" && runtimeControl?.prepared) taintRuntimeInput();
+    if (event.reason !== "quit" && heldBeforeShutdown) taintRuntimeInput();
     await runtimeControl?.close(event.reason === "quit");
     runtimeControl = undefined;
     runtimeActive = false;

@@ -26,8 +26,10 @@ async function probe(transport, dispatch = false, commitCase = null) {
     const snapshot={run_id:'c'.repeat(32),runtime_id:'runtime',session_id:'session',leaf_id:'leaf',
       session_file:session,cwd:root,version:'1.4.0',idle:true,pending:false,busy:false,provider:'test',model:'fixture',thinking:'off'};
     let commitFresh=false,now=1000;
-    if(${JSON.stringify(commitCase)}==='deadline-boundary') globalThis.performance={now:()=>now};
-    const control=await startRuntimeControl({PI_RUNTIME_RUN_ID:snapshot.run_id,PI_RUNTIME_CHILD_TOKEN:token,PI_RUNTIME_EXTENSION_SOCKET:socket},()=>{
+    if(['deadline-boundary','bootstrap-expired','bootstrap-deadline-boundary'].includes(${JSON.stringify(commitCase)})) globalThis.performance={now:()=>now};
+    const bootstrap=!!${JSON.stringify(commitCase)}?.startsWith('bootstrap-');
+    const control=await startRuntimeControl({PI_RUNTIME_RUN_ID:snapshot.run_id,PI_RUNTIME_CHILD_TOKEN:token,PI_RUNTIME_EXTENSION_SOCKET:socket,
+      ...(bootstrap?{PI_RUNTIME_PENDING_ACTIVATION:operation}:{})},()=>{
       if(commitFresh) now+=150001;
       return snapshot;
     });
@@ -38,10 +40,30 @@ async function probe(transport, dispatch = false, commitCase = null) {
     try{
       let dispatches=0,safeDuringDispatch=null;
       if(${JSON.stringify(dispatch)}) runtime.dispatchRuntimeUserMessage(()=>{dispatches++;safeDuringDispatch=guard.safe();});
+      const initiallyHeld=control.prepared;
       const before=await request({action:'snapshot'});
       const prepared=await request({action:'prepare',operation_id:operation,expected:{runtime_id:'runtime',session_id:'session',leaf_id:'leaf'}});
       const held=control.prepared;
       const commitCase=${JSON.stringify(commitCase)};
+      if(bootstrap){
+        if(commitCase!=='bootstrap-admit'){
+          const expected=structuredClone(snapshot);
+          if(commitCase==='bootstrap-drift') snapshot.thinking='low';
+          if(commitCase==='bootstrap-expired') now+=150001;
+          if(commitCase==='bootstrap-deadline-boundary') commitFresh=true;
+          const admitted=await request({action:'admit',operation_id:operation,expected});
+          console.log(JSON.stringify({admitted,held:control.prepared}));
+        }else{
+        const wrong=await request({action:'admit',operation_id:'d'.repeat(32),expected:structuredClone(snapshot)});
+        const cancelled=await request({action:'cancel',operation_id:operation});
+        const heldAfterCancel=control.prepared;
+        const noLease=await request({action:'admit',operation_id:operation,expected:structuredClone(snapshot)});
+        await request({action:'prepare',operation_id:operation,expected:{runtime_id:'runtime',session_id:'session',leaf_id:'leaf'}});
+        const admitted=await request({action:'admit',operation_id:operation,expected:structuredClone(snapshot)});
+        const replay=await request({action:'admit',operation_id:operation,expected:structuredClone(snapshot)});
+        console.log(JSON.stringify({initiallyHeld,wrong,cancelled,heldAfterCancel,noLease,admitted,replay,heldAfterAdmit:control.prepared}));
+        }
+      }else
       if(commitCase){
         const expected=structuredClone(snapshot);
         if(commitCase==='no-lease') await request({action:'cancel',operation_id:operation});
@@ -50,7 +72,7 @@ async function probe(transport, dispatch = false, commitCase = null) {
         if(commitCase==='caller-drift') expected.model='other';
         if(commitCase==='clock-forward') Date.now=()=>9000000000000;
         if(commitCase==='deadline-boundary') commitFresh=true;
-        const committed=await request({action:'commit',operation_id:commitCase==='wrong-operation'?'d'.repeat(32):operation,expected});
+        const committed=await request({action:commitCase==='default-admit'?'admit':'commit',operation_id:commitCase==='wrong-operation'?'d'.repeat(32):operation,expected});
         const replay=commitCase==='commit'?await request({action:'commit',operation_id:operation,expected}):null;
         const cancelled=await request({action:'cancel',operation_id:operation});
         console.log(JSON.stringify({committed,replay,cancelled,held:control.prepared,stopping}));
@@ -104,6 +126,26 @@ test('fresh snapshot crossing the original monotonic deadline cannot enter perma
   const result = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, 'deadline-boundary');
   assert.equal(result.committed.ok, false, 'Lease must remain valid at the irreversible latch, not merely on request entry');
   assert.equal(result.stopping, false);
+});
+
+test('successor input remains bootstrap-held across cancellation until exact prepared admission', async () => {
+  const result = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, 'bootstrap-admit');
+  assert.equal(result.initiallyHeld, true, 'New successor Web mutations must be gated before readiness');
+  assert.equal(result.wrong.ok, false); assert.equal(result.cancelled.ok, true);
+  assert.equal(result.heldAfterCancel, true); assert.equal(result.noLease.ok, false);
+  assert.equal(result.admitted.ok, true); assert.equal(result.admitted.result.admitted, true);
+  assert.equal(result.heldAfterAdmit, false); assert.equal(result.replay.ok, false);
+});
+
+test('successor admission refuses fresh-state drift and original-deadline expiry without releasing bootstrap input', async () => {
+  for (const mode of ['bootstrap-drift', 'bootstrap-expired', 'bootstrap-deadline-boundary']) {
+    const result = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, mode);
+    assert.equal(result.admitted.ok, false, mode);
+    assert.equal(result.held, true, mode);
+  }
+  const standalone = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, 'default-admit');
+  assert.equal(standalone.committed.ok, false, 'A normal process cannot use successor admission');
+  assert.equal(standalone.cancelled.ok, true);
 });
 
 test("private runtime control preserves audited TUI admission and refuses unknown transports", async () => {

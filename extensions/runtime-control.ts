@@ -114,7 +114,10 @@ export function dispatchRuntimeRpcTextPrompt(message: string): boolean {
 /** Private container IPC only. It never signals processes or accepts executable arguments. */
 export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () => RuntimeSnapshot | null) {
   const keys = [env.PI_RUNTIME_RUN_ID, env.PI_RUNTIME_CHILD_TOKEN, env.PI_RUNTIME_EXTENSION_SOCKET];
-  if (keys.every((key) => !key)) return undefined;
+  let pendingAdmission = env.PI_RUNTIME_PENDING_ACTIVATION ?? null;
+  if (pendingAdmission !== null && !hex(pendingAdmission, 32))
+    throw new Error("Invalid managed activation configuration");
+  if (keys.every((key) => !key) && pendingAdmission === null) return undefined;
   const [runId, token, socketPath] = keys;
   if (!hex(runId, 32) || !hex(token, 64) || !socketPath || !path.isAbsolute(socketPath))
     throw new Error("Invalid managed runtime configuration");
@@ -215,6 +218,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
           const expected = request.expected;
           if (
             !hex(request.operation_id, 32) ||
+            (pendingAdmission !== null && pendingAdmission !== request.operation_id) ||
             (prepared && prepared !== request.operation_id) ||
             !expected ||
             Object.keys(expected).sort().join(",") !== "leaf_id,runtime_id,session_id" ||
@@ -238,7 +242,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
           }
           prepared = request.operation_id;
           result = value;
-        } else if (request.action === "commit") {
+        } else if (request.action === "commit" || request.action === "admit") {
           if (
             Object.keys(request).sort().join() !== "action,expected,operation_id,token" ||
             committed ||
@@ -248,6 +252,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
             performance.now() - preparedAt >= 150_000
           )
             throw new Error();
+          if (request.action === "admit" && pendingAdmission !== prepared) throw new Error();
           const value = fresh();
           if (
             !sameSnapshot(request.expected, heldSnapshot) ||
@@ -261,11 +266,21 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
           // No await between complete live-state comparison and the permanent
           // admission latch. A lost acknowledgement must never reopen input.
           if (performance.now() - preparedAt >= 150_000) throw new Error();
-          committed = true;
-          clearTimeout(lease);
-          guard.shutdown(owner);
-          if (guard.safe()) throw new Error();
-          result = { committed: true, operation_id: prepared, snapshot: value };
+          if (request.action === "admit") {
+            if (!guard.release(owner, prepared)) throw new Error();
+            const operation = prepared;
+            prepared = null;
+            heldSnapshot = undefined;
+            pendingAdmission = null;
+            clearTimeout(lease);
+            result = { admitted: true, operation_id: operation, snapshot: value };
+          } else {
+            committed = true;
+            clearTimeout(lease);
+            guard.shutdown(owner);
+            if (guard.safe()) throw new Error();
+            result = { committed: true, operation_id: prepared, snapshot: value };
+          }
         } else if (request.action === "cancel") {
           if (
             committed ||
@@ -298,7 +313,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
   return {
     get prepared() {
       if (prepared && !committed && performance.now() - preparedAt >= 150_000) release();
-      return prepared !== null;
+      return prepared !== null || pendingAdmission !== null;
     },
     async close(shutdown = false) {
       if (closed) return;

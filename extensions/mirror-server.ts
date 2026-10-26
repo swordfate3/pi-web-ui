@@ -392,7 +392,8 @@ export default function (pi: ExtensionAPI) {
   let runtimeControl: Awaited<ReturnType<typeof startRuntimeControl>>;
   let runtimeStopping = false;
   const runtimeInputHeld = () =>
-    runtimeStopping || (runtimeControl ? runtimeControl.prepared : !!process.env.PI_RUNTIME_PENDING_ACTIVATION);
+    runtimeStopping ||
+    (runtimeControl ? runtimeControl.prepared : process.env.PI_RUNTIME_PENDING_ACTIVATION !== undefined);
   const sendUserMessage: ExtensionAPI["sendUserMessage"] = (...args) =>
     dispatchRuntimeUserMessage(() => pi.sendUserMessage(...args));
   // Protocol: replacement acknowledgements mean accepted, never completed.

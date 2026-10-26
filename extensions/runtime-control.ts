@@ -267,7 +267,12 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
           // admission latch. A lost acknowledgement must never reopen input.
           if (performance.now() - preparedAt >= 150_000) throw new Error();
           if (request.action === "admit") {
+            if (env.PI_RUNTIME_PENDING_ACTIVATION !== pendingAdmission) throw new Error();
             if (!guard.release(owner, prepared)) throw new Error();
+            // The real caller supplies process.env. Consume only this exact
+            // successful bootstrap so ordinary reload/session replacement does
+            // not re-arm it in a new controller or mirror fallback. No await.
+            delete env.PI_RUNTIME_PENDING_ACTIVATION;
             const operation = prepared;
             prepared = null;
             heldSnapshot = undefined;

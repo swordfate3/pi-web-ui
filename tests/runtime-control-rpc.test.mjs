@@ -28,11 +28,13 @@ async function probe(transport, dispatch = false, commitCase = null) {
     let commitFresh=false,now=1000;
     if(['deadline-boundary','bootstrap-expired','bootstrap-deadline-boundary'].includes(${JSON.stringify(commitCase)})) globalThis.performance={now:()=>now};
     const bootstrap=!!${JSON.stringify(commitCase)}?.startsWith('bootstrap-');
-    const control=await startRuntimeControl({PI_RUNTIME_RUN_ID:snapshot.run_id,PI_RUNTIME_CHILD_TOKEN:token,PI_RUNTIME_EXTENSION_SOCKET:socket,
-      ...(bootstrap?{PI_RUNTIME_PENDING_ACTIVATION:operation}:{})},()=>{
+    const env={PI_RUNTIME_RUN_ID:snapshot.run_id,PI_RUNTIME_CHILD_TOKEN:token,PI_RUNTIME_EXTENSION_SOCKET:socket,
+      ...(bootstrap?{PI_RUNTIME_PENDING_ACTIVATION:operation}:{})};
+    const getSnapshot=()=>{
       if(commitFresh) now+=150001;
       return snapshot;
-    });
+    };
+    let control=await startRuntimeControl(env,getSnapshot);
     const request=message=>new Promise((resolve,reject)=>{const peer=net.createConnection(socket);let data='';
       peer.setTimeout(2000,()=>peer.destroy(Error('test deadline')));peer.on('error',reject);
       peer.on('connect',()=>peer.end(JSON.stringify({...message,token})+'\\n'));
@@ -52,16 +54,24 @@ async function probe(transport, dispatch = false, commitCase = null) {
           if(commitCase==='bootstrap-expired') now+=150001;
           if(commitCase==='bootstrap-deadline-boundary') commitFresh=true;
           const admitted=await request({action:'admit',operation_id:operation,expected});
-          console.log(JSON.stringify({admitted,held:control.prepared}));
+          await control.close();control=await startRuntimeControl(env,getSnapshot);
+          console.log(JSON.stringify({admitted,held:control.prepared,marker:env.PI_RUNTIME_PENDING_ACTIVATION}));
         }else{
         const wrong=await request({action:'admit',operation_id:'d'.repeat(32),expected:structuredClone(snapshot)});
         const cancelled=await request({action:'cancel',operation_id:operation});
         const heldAfterCancel=control.prepared;
+        const markerAfterCancel=env.PI_RUNTIME_PENDING_ACTIVATION;
+        await control.close();control=await startRuntimeControl(env,getSnapshot);
+        const recreatedAfterCancel=control.prepared;
         const noLease=await request({action:'admit',operation_id:operation,expected:structuredClone(snapshot)});
         await request({action:'prepare',operation_id:operation,expected:{runtime_id:'runtime',session_id:'session',leaf_id:'leaf'}});
         const admitted=await request({action:'admit',operation_id:operation,expected:structuredClone(snapshot)});
         const replay=await request({action:'admit',operation_id:operation,expected:structuredClone(snapshot)});
-        console.log(JSON.stringify({initiallyHeld,wrong,cancelled,heldAfterCancel,noLease,admitted,replay,heldAfterAdmit:control.prepared}));
+        const heldAfterAdmit=control.prepared;
+        await control.close();control=await startRuntimeControl(env,getSnapshot);
+        const recreatedReplay=await request({action:'admit',operation_id:operation,expected:structuredClone(snapshot)});
+        console.log(JSON.stringify({initiallyHeld,wrong,cancelled,heldAfterCancel,markerAfterCancel,recreatedAfterCancel,noLease,admitted,replay,heldAfterAdmit,
+          recreatedHeld:control.prepared,recreatedReplay,markerAfterAdmit:env.PI_RUNTIME_PENDING_ACTIVATION??null}));
         }
       }else
       if(commitCase){
@@ -135,6 +145,11 @@ test('successor input remains bootstrap-held across cancellation until exact pre
   assert.equal(result.heldAfterCancel, true); assert.equal(result.noLease.ok, false);
   assert.equal(result.admitted.ok, true); assert.equal(result.admitted.result.admitted, true);
   assert.equal(result.heldAfterAdmit, false); assert.equal(result.replay.ok, false);
+  assert.equal(result.markerAfterCancel, 'b'.repeat(32));
+  assert.equal(result.recreatedAfterCancel, true);
+  assert.equal(result.markerAfterAdmit, null, 'Only successful admission consumes the process bootstrap marker');
+  assert.equal(result.recreatedHeld, false, 'Ordinary controller recreation must not re-lock an admitted process');
+  assert.equal(result.recreatedReplay.ok, false);
 });
 
 test('successor admission refuses fresh-state drift and original-deadline expiry without releasing bootstrap input', async () => {
@@ -142,10 +157,20 @@ test('successor admission refuses fresh-state drift and original-deadline expiry
     const result = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, mode);
     assert.equal(result.admitted.ok, false, mode);
     assert.equal(result.held, true, mode);
+    assert.equal(result.marker, 'b'.repeat(32), mode);
   }
   const standalone = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, 'default-admit');
   assert.equal(standalone.committed.ok, false, 'A normal process cannot use successor admission');
   assert.equal(standalone.cancelled.ok, true);
+});
+
+test('malformed or incomplete successor bootstrap never creates an ordinary unheld controller', async () => {
+  const { startRuntimeControl } = await import(entry);
+  for (const marker of ['', 'bad', 'b'.repeat(31), 'B'.repeat(32)]) {
+    await assert.rejects(startRuntimeControl({ PI_RUNTIME_PENDING_ACTIVATION: marker }, () => null), /activation/);
+  }
+  await assert.rejects(startRuntimeControl({ PI_RUNTIME_PENDING_ACTIVATION: 'b'.repeat(32) }, () => null), /configuration/);
+  assert.equal(await startRuntimeControl({}, () => null), undefined);
 });
 
 test("private runtime control preserves audited TUI admission and refuses unknown transports", async () => {

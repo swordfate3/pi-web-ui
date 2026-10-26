@@ -52,3 +52,13 @@ The external executor must verify readiness and publish its installation
 selection before requesting admission, and treat a lost acknowledgement as
 unknown rather than replaying it. This optional gate still grants no update,
 approval, executable selection or process-control authority to the extension.
+
+Successful exact admission consumes that operation's bootstrap marker in the
+current process environment, which the extension passes to its controller.
+Ordinary resource reload or session replacement therefore does not recreate an
+already-released gate. Cancellation, expiry and failed admission do not consume
+the marker; controller recreation stays closed in those cases. A present but
+malformed marker (including an empty string) also keeps the mirror fallback
+closed if controller construction fails. This is process/run-local lifecycle
+state, not a persisted selection or authorization for another process. The
+default RPC dispatch/taint rules above still apply after reload.

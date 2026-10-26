@@ -1,5 +1,12 @@
 # Pi Web UI 开发日志
 
+## 2026-10-26 · Successor admission lifecycle review fix
+
+- Exact successful private admission now consumes the matching process-environment bootstrap marker; ordinary extension reload does not relock an admitted process. Cancel, expiry, mismatch and failed admission preserve bootstrap closure. Empty malformed markers now fail closed in the mirror fallback too. No new global registry, persisted authorization, public update API or UI layout changes.
+- Focused IPC/whole-mirror tests: 14/14, zero skips. Controller recreation/cancel/expiry and default refusal covered; a real local WebSocket reaches the entire mirror while the actual Unix-listener completion callback is held. Removing only the fallback makes the pre-publication regression fail. SDK dispatch stays zero and saved identity/leaf/thinking unchanged. Actual Pi provider counts are verified separately, not attributed to this SDK-facade test.
+- Manager integration suite against independently packed current Web: 21/21, zero skips (13 actual Pi runtime tests plus 8 client tests). Before-first-RPC-read Web mutations refuse with zero provider calls; read-only readiness then succeeds. Actual supported `ctx.reload()` after exact admission changes runtime identity, retains session/leaf, and permits one ordinary Web generation without re-admission. Default permanent-taint behavior is retained; reload does not claim renewed update eligibility.
+- Build and dist verification pass; only the manifest changes among generated files. Existing Vite large-chunk warning remains. Web focused strict types and Manager whole/integration-inclusive types pass. These are isolated development Pi1.1/local-loopback tests, not official Pi1.4/current-Web compatibility or full activation/global acceptance. No production/Docker/external network/shared dependencies touched. Independent review pending; see Manager `task-4-successor-admission-report.md` for exact source bindings and RED/GREEN evidence.
+
 ## 2026-10-26 · 干净 Web v1 与独立 Pi Manager（拆分设计）
 
 - 从 `27326a8` 建立字面 `v1` 分支；原 `codex/hub-create-pi` 与 main 保留，复用已有隔离工作区，不再新增 Web 工作树。

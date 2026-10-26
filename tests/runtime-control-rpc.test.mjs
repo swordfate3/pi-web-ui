@@ -25,7 +25,12 @@ async function probe(transport, dispatch = false, commitCase = null) {
     const socket=path.join(root,'rpc.sock'),token='a'.repeat(64),operation='b'.repeat(32);
     const snapshot={run_id:'c'.repeat(32),runtime_id:'runtime',session_id:'session',leaf_id:'leaf',
       session_file:session,cwd:root,version:'1.4.0',idle:true,pending:false,busy:false,provider:'test',model:'fixture',thinking:'off'};
-    const control=await startRuntimeControl({PI_RUNTIME_RUN_ID:snapshot.run_id,PI_RUNTIME_CHILD_TOKEN:token,PI_RUNTIME_EXTENSION_SOCKET:socket},()=>snapshot);
+    let commitFresh=false,now=1000;
+    if(${JSON.stringify(commitCase)}==='deadline-boundary') globalThis.performance={now:()=>now};
+    const control=await startRuntimeControl({PI_RUNTIME_RUN_ID:snapshot.run_id,PI_RUNTIME_CHILD_TOKEN:token,PI_RUNTIME_EXTENSION_SOCKET:socket},()=>{
+      if(commitFresh) now+=150001;
+      return snapshot;
+    });
     const request=message=>new Promise((resolve,reject)=>{const peer=net.createConnection(socket);let data='';
       peer.setTimeout(2000,()=>peer.destroy(Error('test deadline')));peer.on('error',reject);
       peer.on('connect',()=>peer.end(JSON.stringify({...message,token})+'\\n'));
@@ -44,6 +49,7 @@ async function probe(transport, dispatch = false, commitCase = null) {
         if(commitCase==='drift') snapshot.thinking='low';
         if(commitCase==='caller-drift') expected.model='other';
         if(commitCase==='clock-forward') Date.now=()=>9000000000000;
+        if(commitCase==='deadline-boundary') commitFresh=true;
         const committed=await request({action:'commit',operation_id:commitCase==='wrong-operation'?'d'.repeat(32):operation,expected});
         const replay=commitCase==='commit'?await request({action:'commit',operation_id:operation,expected}):null;
         const cancelled=await request({action:'cancel',operation_id:operation});
@@ -92,6 +98,12 @@ test('wall clock jumps cannot expire an otherwise valid original monotonic runti
   assert.equal(result.committed.ok, true);
   assert.equal(result.stopping, true); assert.equal(result.held, true);
   assert.equal(result.cancelled.ok, false);
+});
+
+test('fresh snapshot crossing the original monotonic deadline cannot enter permanent commit', async () => {
+  const result = await probe('pi-rpc-v1:stdin-stdout-jsonl', false, 'deadline-boundary');
+  assert.equal(result.committed.ok, false, 'Lease must remain valid at the irreversible latch, not merely on request entry');
+  assert.equal(result.stopping, false);
 });
 
 test("private runtime control preserves audited TUI admission and refuses unknown transports", async () => {

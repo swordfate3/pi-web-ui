@@ -260,6 +260,7 @@ export async function startRuntimeControl(env: NodeJS.ProcessEnv, snapshot: () =
             throw new Error();
           // No await between complete live-state comparison and the permanent
           // admission latch. A lost acknowledgement must never reopen input.
+          if (performance.now() - preparedAt >= 150_000) throw new Error();
           committed = true;
           clearTimeout(lease);
           guard.shutdown(owner);

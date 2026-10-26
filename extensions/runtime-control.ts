@@ -41,6 +41,8 @@ type StdinGuard = {
   freeze(owner: object, operation: string): boolean;
   release(owner: object, operation: string): boolean;
   shutdown(owner: object): void;
+  webInput?: string;
+  dispatchPrompt?(message: string): boolean;
 };
 function stdinGuard(): StdinGuard | undefined {
   const key = Symbol.for("pi.runtime.stdin-guard.v1");
@@ -69,6 +71,20 @@ export function dispatchRuntimeUserMessage(dispatch: () => void) {
     guard.taint();
   }
   dispatch();
+}
+
+/** Explicit managed RPC profile: idle text only, never a retry/fallback after refusal. */
+export function dispatchRuntimeRpcTextPrompt(message: string): boolean {
+  if (process.env.PI_RUNTIME_RPC_WEB_INPUT !== "correlated-text-v1") return false;
+  const guard = stdinGuard();
+  if (
+    guard?.transport !== "pi-rpc-v1:stdin-stdout-jsonl" ||
+    guard.webInput !== "correlated-text-v1" ||
+    typeof guard.dispatchPrompt !== "function" ||
+    !guard.dispatchPrompt(message)
+  )
+    throw new Error("Managed text input is unavailable or busy; the message was not retried.");
+  return true;
 }
 
 /** Private container IPC only. It never signals processes or accepts executable arguments. */

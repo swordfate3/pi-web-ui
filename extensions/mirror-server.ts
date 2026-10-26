@@ -35,7 +35,12 @@ import { INTERACTION_PROTOCOL } from "./interactions/protocol.ts";
 import { projectLiveEvent } from "./live-transport.ts";
 import { matchesRevisionDispatch, resolveMessageRevision, revisionContent } from "./message-revision.ts";
 import { resolveMessageVersions } from "./message-versions.ts";
-import { dispatchRuntimeUserMessage, startRuntimeControl, taintRuntimeInput } from "./runtime-control.ts";
+import {
+  dispatchRuntimeRpcTextPrompt,
+  dispatchRuntimeUserMessage,
+  startRuntimeControl,
+  taintRuntimeInput,
+} from "./runtime-control.ts";
 import {
   guardHistoryFrame,
   historyRange,
@@ -2211,7 +2216,7 @@ export default function (pi: ExtensionAPI) {
               sendUserMessage(content.some((block) => block.type === "image") ? content : message, {
                 expandPromptTemplates: false,
               });
-            } else {
+            } else if (message.trimStart().startsWith("/") || !dispatchRuntimeRpcTextPrompt(message)) {
               sendUserMessage(message, { expandPromptTemplates: true });
             }
           }

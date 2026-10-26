@@ -11,6 +11,7 @@ Feature: 工作区附件上传
     Examples:
       | route  | viewport |
       | direct | desktop  |
+      | direct | mobile   |
       | hub    | desktop  |
       | hub    | mobile   |
 

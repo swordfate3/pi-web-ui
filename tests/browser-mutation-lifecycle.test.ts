@@ -13,31 +13,37 @@ const file = ts.createSourceFile(
   true,
 );
 const declarations: ts.FunctionDeclaration[] = [];
+let inputHeld: ts.VariableDeclaration | undefined;
 function visit(node: ts.Node) {
   if (ts.isFunctionDeclaration(node) && ["handleRequest", "assertBrowserWritable"].includes(node.name?.text ?? ""))
     declarations.push(node);
+  if (ts.isVariableDeclaration(node) && node.name.getText(file) === "runtimeInputHeld") inputHeld = node;
   ts.forEachChild(node, visit);
 }
 visit(file);
 assert.equal(declarations.length, 2);
-const js = ts.transpileModule(declarations.map((node) => node.getText(file)).join("\n"), {
-  compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  transformers: {
-    before: [
-      (context) => {
-        const transform: ts.Visitor = (node) => {
-          if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword)
-            return ts.factory.createCallExpression(ts.factory.createIdentifier("loadChildProcess"), undefined, []);
-          return ts.visitEachChild(node, transform, context);
-        };
-        return (source) => ts.visitNode(source, transform) as ts.SourceFile;
-      },
-    ],
+assert.ok(inputHeld, "load the real handler's input-gate dependency");
+const js = ts.transpileModule(
+  `const ${inputHeld.getText(file)};\n${declarations.map((node) => node.getText(file)).join("\n")}`,
+  {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    transformers: {
+      before: [
+        (context) => {
+          const transform: ts.Visitor = (node) => {
+            if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword)
+              return ts.factory.createCallExpression(ts.factory.createIdentifier("loadChildProcess"), undefined, []);
+            return ts.visitEachChild(node, transform, context);
+          };
+          return (source) => ts.visitNode(source, transform) as ts.SourceFile;
+        },
+      ],
+    },
   },
-}).outputText;
+).outputText;
 
 for (const action of ["attachment", "open_file"] as const) {
-  for (const transition of ["shutdown", "replacement"] as const) {
+  for (const transition of ["shutdown", "replacement", "none"] as const) {
     test(`${action} cannot dispatch after ${transition} while its asynchronous prerequisite is pending`, async () => {
       let entered!: () => void;
       let release!: () => void;
@@ -64,6 +70,7 @@ for (const action of ["attachment", "open_file"] as const) {
       };
       const context = vm.createContext({
         latestCtx: sdk,
+        process: { env: {} },
         runtimeActive: true,
         runtimeStopping: false,
         runtimeControl: undefined,
@@ -95,6 +102,9 @@ for (const action of ["attachment", "open_file"] as const) {
             dispatches++;
           },
         },
+        sendUserMessage: () => {
+          dispatches++;
+        },
         loadChildProcess: async () => {
           entered();
           await prerequisite;
@@ -117,15 +127,22 @@ for (const action of ["attachment", "open_file"] as const) {
               : { filePath: "/workspace/fixture.pdf" },
         },
       );
-      await started;
+      // An incomplete VM must fail here with its real response, not hang until
+      // the test runner cancels this test and all later tests in the file.
+      await Promise.race([
+        started,
+        request.then(() => {
+          assert.fail(`request ended before its async prerequisite: ${JSON.stringify(responses)}`);
+        }),
+      ]);
       if (transition === "shutdown") context.runtimeStopping = true;
-      else context.lifecycleEpoch = 2;
+      else if (transition === "replacement") context.lifecycleEpoch = 2;
       release();
       await request;
-      assert.equal(dispatches, 0, "an old request must not start a new side effect");
+      assert.equal(dispatches, transition === "none" ? 1 : 0, "only a still-current request may dispatch");
       assert.equal(responses.length, 1);
-      assert.equal(responses[0].ok, false);
-      assert.match(responses[0].error ?? "", /Session changed/);
+      assert.equal(responses[0].ok, transition === "none");
+      if (transition !== "none") assert.match(responses[0].error ?? "", /Session changed/);
       assert.equal(context.activeBrowserMutations, 0);
     });
   }

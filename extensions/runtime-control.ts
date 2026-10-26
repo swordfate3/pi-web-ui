@@ -49,7 +49,7 @@ function stdinGuard(): StdinGuard | undefined {
   return descriptor?.configurable === false &&
     descriptor.writable === false &&
     guard?.version === 1 &&
-    guard.transport === "pi-tui-1.1.0:stdin-data" &&
+    (guard.transport === "pi-tui-1.1.0:stdin-data" || guard.transport === "pi-rpc-v1:stdin-stdout-jsonl") &&
     Object.isFrozen(guard) &&
     guard.intact()
     ? guard

@@ -643,6 +643,13 @@
 - 新增25项auth/真实HTTP/构建CLI/启动失败清理测试，连同原lease共37/37；完整546项（545 pass／1条件skip），两套types、build/dist、Biome262文件0error（30warnings／1info）、diff whitespace通过。没有浏览器UI改动，不将HTTP测试当Browser跨origin或真实终端验收。
 - 无依赖安装、提交、推送、Gate申请、生产配置变更、reload或重启；版本仍1.0.1。真正PTY接入仍缺外部runtime/Gate源码及依赖审核。[设计与测试边界](adr/0018-trusted-terminal-extension-compatibility.md)、[当前入口限制](hub.md#开发中独立终端授权入口不等于终端可用)。
 
+## 2026-10-27 · 干净 Web v1 分支发布说明
+
+- 按用户要求准备将已有干净 Web 提交推送到远程 `v1`，不合并 `main`，不发布 npm；包版本保持 `1.0.1`。
+- README 改为显式 `git:github.com/swordfate3/pi-web-ui@v1` 安装／更新来源，说明默认分支不会自动切换，以及共享包目录只加载一份 Web 扩展的边界。
+- 本次仅更正文档，不改产品源码或构建资源，也不更新已安装扩展、重启会话或部署独立 Manager。
+- 发布前 `verify:dist`、`just check` 和差异空白检查通过（静态检查保留7项既有warning、2项info）。首次默认并发单元测试458通过／1启动测试超时取消／1跳过；不改断言或超时，专项2/2通过，四文件并发完整重跑459通过／1跳过／0失败取消。未将重跑结果用于声称默认并发的超时根因已修复。
+
 ## 聊天 TeX 数学公式
 
 - 用原生 micromark/remark 语法兼容 `\(...\)` 行内和 `\[...\]` 独立公式，替换未通过审查的原文转换方案；CommonMark 继续管理代码、转义、引用和列表，不改已有 dollar math 策略，KaTeX 保留默认不信任设置。

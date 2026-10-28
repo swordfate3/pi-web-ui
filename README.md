@@ -271,4 +271,6 @@ pi -e ./extensions/mirror-server.ts
 
 ## License
 
-[MIT](LICENSE)。保留上游署名，详见[许可来源](docs/license-provenance.md)。
+[MIT](LICENSE)，允许商用与闭源集成。商业及非商业分发均须保留原有版权和许可声明；
+推荐标注项目名称与仓库来源，详见[商用署名指引](docs/commercial-use.md)、[NOTICE](NOTICE)和[许可来源](docs/license-provenance.md)。
+标准 MIT 不强制要求网站页脚署名，依赖与素材另遵其各自许可。

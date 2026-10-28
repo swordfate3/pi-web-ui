@@ -11,6 +11,16 @@ The target `swordfate3/pi-web-ui` repository initially contained only an Apache-
 
 The npm package name remains `@kkkiio/pi-web-ui` for compatibility with the current development snapshot. No npm publish is performed by this GitHub publication. Installing the upstream npm package is not equivalent to installing this fork from GitHub.
 
+## Commercial attribution clarification (2026-10-28)
+
+The standard MIT license and all three existing copyright notices remain unchanged.
+[NOTICE](../NOTICE) records this fork's project source and preserved attribution;
+the [commercial-use guide](commercial-use.md) explains notice retention for both
+commercial and non-commercial distributions and supplies a suggested source credit.
+Visible website/product credits and repository links are encouraged, not additional
+MIT conditions. These documents are included in the package file list. This does
+not change dependency or user-imported artwork licenses.
+
 ## User-imported companion artwork
 
 The Web companion does not bundle the downloaded DeepSeek/whale fan artwork, nor claim that it is covered by this repository's MIT license. Artwork can be selected locally in Settings and stored as browser-local PNG/WebP/GIF Blobs, without uploading it to Pi or fetching an external image host. Original authors and individual artwork licenses remain applicable. The source repository's software license alone is not proof of rights in every character design or collected image; public redistribution requires a separate provenance review. No third-party artwork or extracted upstream application code is included by this feature.

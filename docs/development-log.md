@@ -1,5 +1,11 @@
 # Pi Web UI 开发日志
 
+## 2026-10-28 · 商用署名与发布包说明
+
+- 保留标准MIT及全部原有上游／本分支版权，不增加界面署名限制。
+- 新增NOTICE和商用署名指引，区分分发时必须保留的版权许可与推荐的项目来源链接。
+- README、许可来源及发布文件清单同步；无需改账号、运行配置或重启Pi。
+
 ## 2026-10-26 · Successor admission lifecycle review fix
 
 - Exact successful private admission now consumes the matching process-environment bootstrap marker; ordinary extension reload does not relock an admitted process. Cancel, expiry, mismatch and failed admission preserve bootstrap closure. Empty malformed markers now fail closed in the mirror fallback too. No new global registry, persisted authorization, public update API or UI layout changes.

@@ -110,9 +110,12 @@
     "dist/",
     "public/",
     "docs/remote-access.md",
+    "docs/commercial-use.md",
+    "docs/license-provenance.md",
     "scripts/web-dist.mjs",
     "docs/images/",
     "LICENSE",
+    "NOTICE",
     "README.md"
   ]
 }

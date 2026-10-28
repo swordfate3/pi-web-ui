@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": {
     "count": 164,
-    "sha256": "2533ce8c95565919478abaeccfefb6998a3c0f59554c928c1a623b0be60fc40c",
+    "sha256": "1aade95600cc110e28cc484ed95fb2b065f5b524c824c9ac5b174d985da9ab66",
     "files": [
       {
         "path": "extensions/bounded-json.ts",
@@ -126,7 +126,7 @@
       },
       {
         "path": "package.json",
-        "sha256": "d18500bb18b69c9e6d7c2f33ea00466346b8047e6c8a320bf09f22e53695881a"
+        "sha256": "2af956e35e5bcdf1818c6bb3598a5e35502e65963c8e85cd7e3c8aef6eec95bd"
       },
       {
         "path": "public/icons/pi-web-ui-192.png",

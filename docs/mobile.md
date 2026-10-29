@@ -1,5 +1,7 @@
 # Mobile Optimisations (historical)
 
+Current connection-recovery behavior and verification: [2026-10-29 mobile reconnect](validation/2026-10-29-mobile-reconnect.md).
+
 > Historical upstream layout notes, moved from the repository root. This is not a verified description of the current layout. Current mobile behavior is documented in [minimal chat](prd/minimal-chat.md), [left sidebar](prd/left-sidebar.md) and [validation reports](validation/README.md).
 
 Everything customised for mobile (≤768px) compared to the desktop experience.

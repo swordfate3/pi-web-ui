@@ -461,6 +461,7 @@ export const messages = {
   "Server error": "服务器错误",
   "WebSocket error": "WebSocket 错误",
   "Session link expired. Reopen this Pi from the Hub.": "会话链接已失效，请从总管重新打开这个 Pi。",
+  "Sign in again to reconnect to this session.": "登录已失效，请重新登录后恢复连接。",
   "WebSocket disconnected before the request completed": "请求完成前 WebSocket 已断开",
   "WebSocket disconnected before the request could be sent": "请求发送前 WebSocket 已断开",
   "Reconnect before starting a session action": "请重新连接后再开始会话操作",

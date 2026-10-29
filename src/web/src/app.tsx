@@ -28,6 +28,7 @@ import { TerminalPromptBanner } from "./components/pi-web-ui/terminal-prompt-ban
 import { WhalePet } from "./components/pi-web-ui/whale-pet";
 import { type WhaleMode, WhaleSettings } from "./components/pi-web-ui/whale-settings";
 import { extractText } from "./core/chat-conversion";
+import { watchConnectionLifecycle } from "./core/connection-lifecycle";
 import { downloadExport } from "./core/export-download";
 import { copyText, isEditableTarget } from "./core/format";
 import { recentHistoryRange } from "./core/history-dates";
@@ -440,21 +441,12 @@ export function App() {
   }, [clearConversationTimers, clearWorkspaceTimers, setClient, setConnection, setError]);
 
   useEffect(() => {
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") usePiWebUiStore.getState().client?.ensureConnected();
-    };
-    const onPageShow = (event: PageTransitionEvent) => {
-      if (!event.persisted) return;
-      const store = usePiWebUiStore.getState();
-      store.client?.ensureConnected();
-      if (store.connection === "connected") void store.requestConversationSync();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("pageshow", onPageShow);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("pageshow", onPageShow);
-    };
+    return watchConnectionLifecycle(
+      () => usePiWebUiStore.getState().client,
+      () => {
+        void usePiWebUiStore.getState().requestConversationSync();
+      },
+    );
   }, []);
 
   useEffect(() => {

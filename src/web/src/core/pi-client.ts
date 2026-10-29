@@ -23,9 +23,14 @@ export class PiClient {
   private reconnectTimer: number | null = null;
   private hubRoute: HubRoute | null = null;
   private hubRoutePath: string | null = null;
-  private handoffDeadline = 0;
   private managedRestart: { id: string; timeoutMs: number; deadline?: number } | null = null;
   private handoffController: AbortController | null = null;
+  private handoffStartedAt = 0;
+  private reconnectAttempts = 0;
+  private recoveryBlocked = false;
+  private socketTimer: number | null = null;
+  private openedSocket: WebSocket | null = null;
+  private healthCheck: { ws: WebSocket; promise: Promise<boolean> } | null = null;
   private requestCounter = 0;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly sentRequestIds = new Set<string>();
@@ -37,13 +42,18 @@ export class PiClient {
   }
 
   connect() {
+    if (this.ws || this.handoffController || this.recoveryBlocked) return;
     this.intentionallyClosed = false;
     this.options.onConnectionChange("connecting");
     const ws = new WebSocket(wsUrl());
     this.ws = ws;
+    this.socketTimer = window.setTimeout(() => this.retireSocket(ws), 8000);
 
     ws.onopen = () => {
       if (this.ws !== ws) return;
+      this.clearSocketTimer();
+      this.openedSocket = ws;
+      this.reconnectAttempts = 0;
       this.options.onError(null);
       this.options.onConnectionChange("connected");
       this.flushQueuedRequests();
@@ -88,7 +98,6 @@ export class PiClient {
               } else this.managedRestart = null;
               this.hubRoute = { generation: route.generation, token: route.token };
               this.hubRoutePath = location.pathname;
-              this.handoffDeadline = 0;
             }
           } else this.options.onEvent(data);
         } else if (data.type === "error") {
@@ -104,46 +113,71 @@ export class PiClient {
       if (!this.hubRoute) this.options.onError(uiText("WebSocket error"));
     };
 
-    ws.onclose = () => {
-      if (this.ws !== ws) return;
-      this.ws = null;
-      if (this.managedRestart) this.managedRestart.deadline ??= Date.now() + this.managedRestart.timeoutMs;
-      for (const id of this.sentRequestIds) {
-        const pending = this.pendingRequests.get(id);
-        if (pending) {
-          pending.reject(new UiError(uiText("WebSocket disconnected before the request completed")));
-          this.pendingRequests.delete(id);
-        }
+    ws.onclose = () => this.handleSocketClose(ws);
+  }
+
+  private clearSocketTimer() {
+    if (this.socketTimer !== null) window.clearTimeout(this.socketTimer);
+    this.socketTimer = null;
+  }
+
+  private retireSocket(ws: WebSocket) {
+    if (this.ws !== ws) return;
+    // A suspended network can leave close() waiting indefinitely. Retire the
+    // local transport first; late frames/close events cannot affect its successor.
+    this.handleSocketClose(ws);
+    ws.close();
+  }
+
+  private handleSocketClose(ws: WebSocket) {
+    if (this.ws !== ws) return;
+    const wasOpen = this.openedSocket === ws;
+    this.openedSocket = null;
+    this.clearSocketTimer();
+    this.ws = null;
+    if (this.managedRestart) this.managedRestart.deadline ??= Date.now() + this.managedRestart.timeoutMs;
+    for (const id of this.sentRequestIds) {
+      const pending = this.pendingRequests.get(id);
+      if (pending) {
+        pending.reject(new UiError(uiText("WebSocket disconnected before the request completed")));
+        this.pendingRequests.delete(id);
       }
-      this.sentRequestIds.clear();
-      // Never replay user intent into a different session after reconnect. In
-      // particular, another tab may have queued prompts while a replacement
-      // or reload tore down the previous runtime.
-      for (const request of this.queuedRequests) {
-        const pending = this.pendingRequests.get(request.id);
-        if (pending) {
-          pending.reject(new UiError(uiText("WebSocket disconnected before the request could be sent")));
-          this.pendingRequests.delete(request.id);
-        }
+    }
+    this.sentRequestIds.clear();
+    // Never replay user intent into a different session after reconnect. In
+    // particular, another tab may have queued prompts while a replacement
+    // or reload tore down the previous runtime.
+    for (const request of this.queuedRequests) {
+      const pending = this.pendingRequests.get(request.id);
+      if (pending) {
+        pending.reject(new UiError(uiText("WebSocket disconnected before the request could be sent")));
+        this.pendingRequests.delete(request.id);
       }
-      this.queuedRequests.length = 0;
-      this.options.onConnectionChange("disconnected");
-      if (!this.intentionallyClosed) {
-        const route = this.hubRoute;
-        if (route) void this.recoverHubRoute(route);
-        else this.scheduleReconnect();
-      }
-    };
+    }
+    this.queuedRequests.length = 0;
+    this.options.onConnectionChange("disconnected");
+    if (!this.intentionallyClosed) {
+      const route = this.hubRoute;
+      if (route && wasOpen) void this.recoverHubRoute(route);
+      else this.scheduleReconnect();
+    }
   }
 
   send(method: string, params?: Record<string, unknown>) {
     return new Promise<unknown>((resolve, reject) => {
+      if (this.intentionallyClosed || this.recoveryBlocked) {
+        reject(new UiError(uiText("Pi client is not connected")));
+        return;
+      }
       if (this.handoffController) {
         reject(new UiError(uiText("Wait for the session to finish syncing.")));
         return;
       }
-      // Never queue a session replacement for a later connection/session.
-      if (["fork_session", "switch_session", "reload"].includes(method) && this.ws?.readyState !== WebSocket.OPEN) {
+      // Only read-only requests may wait for a connection. A prompt, approval,
+      // or any other mutation submitted during retry backoff must not cross
+      // into a successor session when the socket eventually opens.
+      const readOnly = method.startsWith("get_") || method === "health" || method === "sync_request";
+      if (!readOnly && this.ws?.readyState !== WebSocket.OPEN) {
         reject(new UiError(uiText("Reconnect before starting a session action")));
         return;
       }
@@ -164,13 +198,46 @@ export class PiClient {
     });
   }
 
-  ensureConnected() {
-    if (this.ws?.readyState === WebSocket.OPEN || this.reconnectTimer || this.handoffController) return;
-    if (this.ws) {
-      this.ws.close();
-      return;
+  async ensureConnected(): Promise<boolean> {
+    if (this.intentionallyClosed || this.recoveryBlocked) return false;
+    if (this.ws?.readyState === WebSocket.OPEN) return this.checkHealth(this.ws);
+    if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    if (this.handoffController) {
+      if (Date.now() - this.handoffStartedAt < 8000) return false;
+      this.handoffController.abort();
+      this.handoffController = null;
     }
-    this.connect();
+    if (this.ws) {
+      // A CONNECTING socket has its own bounded handshake timer.
+      if (this.ws.readyState !== WebSocket.CONNECTING) this.retireSocket(this.ws);
+      return false;
+    }
+    if (this.hubRoute) await this.recoverHubRoute(this.hubRoute);
+    else this.connect();
+    return false;
+  }
+
+  private checkHealth(ws: WebSocket): Promise<boolean> {
+    if (this.healthCheck?.ws === ws) return this.healthCheck.promise;
+    const timeout = window.setTimeout(() => this.retireSocket(ws), 4000);
+    const promise = this.send("health")
+      .then((result) => {
+        if (this.ws !== ws || this.intentionallyClosed) return false;
+        if ((result as { status?: string } | null)?.status === "ok") return true;
+        this.retireSocket(ws);
+        return false;
+      })
+      .catch(() => {
+        this.retireSocket(ws);
+        return false;
+      })
+      .finally(() => {
+        window.clearTimeout(timeout);
+        if (this.healthCheck?.ws === ws) this.healthCheck = null;
+      });
+    this.healthCheck = { ws, promise };
+    return promise;
   }
 
   disconnect() {
@@ -179,8 +246,8 @@ export class PiClient {
     this.handoffController = null;
     this.hubRoute = null;
     this.hubRoutePath = null;
-    this.handoffDeadline = 0;
     this.managedRestart = null;
+    this.clearSocketTimer();
     if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.ws?.close();
@@ -194,10 +261,13 @@ export class PiClient {
   }
 
   private scheduleReconnect() {
+    if (this.intentionallyClosed || this.recoveryBlocked || this.reconnectTimer !== null) return;
+    const delay = Math.min(1200 * 2 ** Math.min(this.reconnectAttempts++, 4), 15000);
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect();
-    }, 1200);
+      if (this.hubRoute) void this.recoverHubRoute(this.hubRoute);
+      else this.connect();
+    }, delay);
   }
 
   private async recoverHubRoute(route: HubRoute) {
@@ -205,60 +275,105 @@ export class PiClient {
     if (location.pathname !== sourcePath) return;
     const controller = new AbortController();
     this.handoffController = controller;
-    this.handoffDeadline ||= this.managedRestart?.deadline ?? Date.now() + 15_000;
-    const timeout = window.setTimeout(() => controller.abort(), Math.max(0, this.handoffDeadline - Date.now()));
+    this.handoffStartedAt = Date.now();
+    const deadline = this.managedRestart?.deadline;
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      Math.max(0, Math.min(8000, (deadline ?? Infinity) - Date.now())),
+    );
+    let retry = true;
+    const isCurrent = () =>
+      this.handoffController === controller && !this.intentionallyClosed && location.pathname === sourcePath;
+    const stopRecovery = (authentication = false) => {
+      retry = false;
+      this.recoveryBlocked = true;
+      this.options.onConnectionChange("disconnected");
+      this.options.onError(
+        uiText(
+          authentication
+            ? "Sign in again to reconnect to this session."
+            : "Session link expired. Reopen this Pi from the Hub.",
+        ),
+      );
+    };
     this.options.onConnectionChange("connecting");
     try {
-      while (!controller.signal.aborted && !this.intentionallyClosed && Date.now() < this.handoffDeadline) {
-        try {
-          const response = await fetch("/api/session-handoff", {
-            method: "POST",
-            headers: { "X-Pi-Web-Handoff": route.token },
-            credentials: "same-origin",
-            cache: "no-store",
-            redirect: "error",
-            signal: controller.signal,
-          });
-          if (response.status === 200) {
-            const result = await response.json();
-            if (!isHubSessionPath(result.path)) break;
-            if (
-              controller.signal.aborted ||
-              this.handoffController !== controller ||
-              this.intentionallyClosed ||
-              location.pathname !== sourcePath
-            )
-              return;
-            // Keep the mounted app, its session-action waiter and unsent draft.
-            // Only replace the address; never replay a lifecycle request.
-            window.history.replaceState(window.history.state, "", result.path);
-            // replaceState does not emit popstate. Notify route-scoped UI before
-            // opening the successor socket, rather than waiting on a polling tick.
-            window.dispatchEvent(new Event("pi-web-route-changed"));
-            // Retain the existing capability until the new socket receives its
-            // own Hub control frame. A failed handshake must still be able to
-            // resolve the first successor, not retry a retired path forever.
-            this.hubRoutePath = result.path;
-            this.handoffController = null;
-            this.connect();
-            return;
-          }
-          if (response.status !== 202) break;
-        } catch {
-          if (controller.signal.aborted) break;
+      if (deadline !== undefined && Date.now() >= deadline) {
+        stopRecovery();
+        return;
+      }
+      const options = {
+        credentials: "same-origin" as const,
+        cache: "no-store" as const,
+        redirect: "manual" as const,
+        signal: controller.signal,
+      };
+      // A mobile tab may sleep longer than the Hub's disconnected handoff
+      // capability lease. Reopen only its exact still-authorized generation;
+      // never select a different session from the Hub's directory.
+      const current = await fetch(sourcePath, { ...options, method: "HEAD" });
+      if (!isCurrent() || controller.signal.aborted) return;
+      if (deadline !== undefined && Date.now() >= deadline) {
+        stopRecovery();
+        return;
+      }
+      if (current.status === 200) {
+        retry = false;
+        this.handoffController = null;
+        this.connect();
+        return;
+      }
+      if (isAuthenticationFailure(current)) {
+        stopRecovery(true);
+        return;
+      }
+      if (![404, 410].includes(current.status)) return;
+      const response = await fetch("/api/session-handoff", {
+        ...options,
+        method: "POST",
+        headers: { "X-Pi-Web-Handoff": route.token },
+      });
+      if (!isCurrent() || controller.signal.aborted) return;
+      if (response.status === 200) {
+        const result = await response.json();
+        if (
+          controller.signal.aborted ||
+          this.handoffController !== controller ||
+          this.intentionallyClosed ||
+          location.pathname !== sourcePath
+        )
+          return;
+        if (!isHubSessionPath(result.path) || (deadline !== undefined && Date.now() >= deadline)) {
+          stopRecovery();
+          return;
         }
-        await new Promise((resolve) => window.setTimeout(resolve, 350));
+        // Keep the mounted app, its session-action waiter and unsent draft.
+        // Only replace the address; never replay a lifecycle request.
+        window.history.replaceState(window.history.state, "", result.path);
+        // replaceState does not emit popstate. Notify route-scoped UI before
+        // opening the successor socket, rather than waiting on a polling tick.
+        window.dispatchEvent(new Event("pi-web-route-changed"));
+        // Retain the existing capability until the new socket receives its
+        // own Hub control frame. A failed handshake must still be able to
+        // resolve the first successor, not retry a retired path forever.
+        this.hubRoutePath = result.path;
+        retry = false;
+        this.handoffController = null;
+        this.connect();
+        return;
       }
-      if (this.handoffController === controller && !this.intentionallyClosed) {
-        this.hubRoute = null;
-        this.hubRoutePath = null;
-        this.handoffDeadline = 0;
-        this.options.onConnectionChange("disconnected");
-        this.options.onError(uiText("Session link expired. Reopen this Pi from the Hub."));
-      }
+      if (isAuthenticationFailure(response)) stopRecovery(true);
+      else if (response.status !== 202 && response.status !== 408 && response.status !== 429 && response.status < 500)
+        stopRecovery();
+    } catch {
+      // Network errors and request timeouts are retryable, not proof that a
+      // session expired. Explicit auth/revocation responses above fail closed.
     } finally {
       window.clearTimeout(timeout);
-      if (this.handoffController === controller) this.handoffController = null;
+      if (isCurrent()) {
+        this.handoffController = null;
+        if (retry) this.scheduleReconnect();
+      }
     }
   }
 
@@ -273,3 +388,12 @@ export class PiClient {
 }
 
 import { isHubGeneration, isHubSessionPath } from "../../../../extensions/hub-generation";
+
+function isAuthenticationFailure(response: Response) {
+  return (
+    response.type === "opaqueredirect" ||
+    response.status === 401 ||
+    response.status === 403 ||
+    (response.status >= 300 && response.status < 400)
+  );
+}

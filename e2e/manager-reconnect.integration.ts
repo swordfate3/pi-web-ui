@@ -9,9 +9,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, expect } from "@playwright/test";
 import { type PiWebUiHarness, startPiWebUi } from "./harness/pi-process.ts";
 
-test("outer Manager recovers session replacement and visible mobile network loss without replay", {
+test("outer Manager recovers session replacement, mobile sleep and a Hub reboot without replay", {
   skip: !process.env.PI_E2E_MANAGER_DIR && "set PI_E2E_MANAGER_DIR to a built independent Manager",
-  timeout: 150_000,
+  timeout: 240_000,
 }, async () => {
   const selectedManager = process.env.PI_E2E_MANAGER_DIR;
   assert.ok(selectedManager);
@@ -28,7 +28,7 @@ test("outer Manager recovers session replacement and visible mobile network loss
   let pi: PiWebUiHarness | undefined;
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
-    service = await startLocalService({
+    const configuration = {
       port: 0,
       chatPort: 0,
       home,
@@ -37,7 +37,8 @@ test("outer Manager recovers session replacement and visible mobile network loss
       stateRoot: path.join(root, "state"),
       launcher: "/usr/bin/false",
       hubCli: path.join(manager, "dist/hub/pi-web-hub.mjs"),
-    });
+    };
+    service = await startLocalService(configuration);
     const hub = readHubConfig(path.join(root, "state/chat.json"));
     const credentialFile = path.join(root, "isolated-pi.json");
     issueSession(hub, credentialFile, { label: "Mobile reconnect regression" });
@@ -141,7 +142,7 @@ test("outer Manager recovers session replacement and visible mobile network loss
     await context.setOffline(true);
     // No synthetic focus/online event: continuously visible periodic probing
     // must notice the dead leg even when browser readyState remains OPEN.
-    await expect(connected).not.toBeVisible({ timeout: 35_000 });
+    await expect(connected).not.toBeVisible({ timeout: 45_000 });
     await context.setOffline(false);
     await expect(connected).toBeVisible({ timeout: 20_000 });
     assert.equal(unavailableRoutes, 2, "temporary same-route failures must be retried automatically");
@@ -150,6 +151,40 @@ test("outer Manager recovers session replacement and visible mobile network loss
     await expect(input).toHaveValue("UNSENT_OUTER_MANAGER_DRAFT");
     await expect(page.getByRole("log")).toContainText("OUTER_MANAGER_FIRST_MARKER");
     assert.equal(mutations.length, sentBeforeLoss, "reconnection must never replay a mutation");
+
+    // Real browser suspension, not just a synthetic focus event. The live Pi
+    // keeps running while its Hub restarts; all old in-memory handoffs disappear.
+    // A runtime-bound ticket must reconnect this mounted page after wake.
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Page.setWebLifecycleState", { state: "frozen" });
+    await context.setOffline(true);
+    const activePort = service.port;
+    const hubState = readHubConfig(path.join(root, "state/chat.json"));
+    await service.close();
+    service = undefined;
+    service = await startLocalService({ ...configuration, port: activePort, chatPort: hubState.port });
+    let newPath = "";
+    await expect
+      .poll(
+        async () => {
+          const registered = await (await fetch(`http://127.0.0.1:${hubState.port}/api/sessions`)).json();
+          newPath = registered.sessions?.[0]?.path ?? "";
+          return newPath && newPath !== recoveredPath;
+        },
+        { timeout: 50_000 },
+      )
+      .toBe(true);
+    // Deliberately outlast the legacy disconnected-browser capability window.
+    await new Promise((resolve) => setTimeout(resolve, 50_000));
+    await context.setOffline(false);
+    await cdp.send("Page.setWebLifecycleState", { state: "active" });
+    await page.bringToFront();
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect.poll(() => new URL(page.url()).pathname, { timeout: 30_000 }).toBe(newPath);
+    await expect(connected).toBeVisible();
+    await expect(input).toHaveValue("UNSENT_OUTER_MANAGER_DRAFT");
+    await expect(page.getByRole("log")).toContainText("OUTER_MANAGER_FIRST_MARKER");
+    assert.equal(mutations.length, sentBeforeLoss, "a sleeping browser never repeats a user command after Hub restart");
     for (const viewport of [
       { width: 390, height: 844 },
       { width: 1440, height: 900 },

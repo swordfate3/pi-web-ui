@@ -101,10 +101,22 @@ test("foreground verifies an OPEN socket and shares a concurrent health check", 
   assert.equal(sockets.length, 1);
 });
 
+test("live server events prove the socket is healthy even while its health reply is delayed", async (t) => {
+  const { client, sockets } = setup(t);
+  const checking = client.ensureConnected();
+  sockets[0].message({ type: "event", event: "agent_start", payload: {} });
+  await setImmediate();
+  t.mock.timers.tick(16_000);
+  await setImmediate();
+  assert.equal(sockets[0].readyState, 1, "a live event stream must not be discarded by a health request timeout");
+  assert.equal(await checking, true);
+  assert.equal(sockets.length, 1);
+});
+
 test("a zombie socket is replaced without waiting for its missing close event", async (t) => {
   const { client, sockets } = setup(t);
   const checking = client.ensureConnected();
-  t.mock.timers.tick(5000);
+  t.mock.timers.tick(16000);
   await setImmediate();
   t.mock.timers.tick(16000);
   await setImmediate();
@@ -113,6 +125,47 @@ test("a zombie socket is replaced without waiting for its missing close event", 
   sockets[0].onclose?.();
   sockets[1].open();
   assert.equal(sockets[1].readyState, 1, "late old close must not close the replacement");
+});
+
+test("waking after a frozen health deadline probes afresh without retiring the socket", async (t) => {
+  const { client, sockets } = setup(t);
+  const oldProbe = client.ensureConnected();
+  t.mock.timers.setTime(Date.now() + 60_000);
+  const freshProbe = client.ensureConnected();
+  assert.equal(sockets[0].sent.length, 2);
+  assert.equal(await oldProbe, false);
+  sockets[0].reply(sockets[0].sent[1], { status: "ok" });
+  assert.equal(await freshProbe, true);
+  assert.equal(sockets[0].readyState, 1);
+});
+
+test("an overdue health timer after freeze does not kill a socket before queued valid traffic", async (t) => {
+  const { client, sockets } = setup(t);
+  const oldProbe = client.ensureConnected();
+  t.mock.timers.setTime(Date.now() + 60_000);
+  t.mock.timers.tick(15_000);
+  assert.equal(await oldProbe, false);
+  assert.equal(sockets[0].readyState, 1);
+  sockets[0].message({ type: "event", event: "agent_start", payload: {} });
+  const checking = client.ensureConnected();
+  const request = sockets[0].sent.at(-1);
+  assert.ok(request);
+  sockets[0].reply(request, { status: "ok" });
+  assert.equal(await checking, true);
+});
+
+test("foreground retires a handshake that expired while its timer queue was frozen", async (t) => {
+  const { client, sockets } = setup(t);
+  sockets[0].drop();
+  t.mock.timers.tick(1200);
+  assert.equal(sockets[1].readyState, 0);
+  t.mock.timers.setTime(Date.now() + 60_000);
+  await client.ensureConnected();
+  assert.equal(sockets[1].readyState, 3);
+  t.mock.timers.tick(2400);
+  assert.equal(sockets.length, 3);
+  sockets[1].onopen?.();
+  assert.equal(sockets[2].readyState, 0, "late handshake callbacks cannot affect the new socket");
 });
 
 test("temporary network failure beyond 15s retries and reconnects the same session", async (t) => {
@@ -215,6 +268,31 @@ test("retired generation resolves only the capability-bound successor", async (t
   assert.equal(sockets.length, 2);
 });
 
+test("screen-lock recovery sends its runtime-bound ticket after the short Hub handoff expires", async (t) => {
+  const { sockets, errors } = setup(t);
+  const reconnect = `${"a".repeat(80)}.${"c".repeat(64)}`;
+  sockets[0].message({
+    type: "event",
+    event: "hub_route",
+    payload: { generation, token: "b".repeat(48), reconnect },
+  });
+  const nextPath = `/s/${"c".repeat(32)}/`;
+  globalThis.fetch = async (url, options) => {
+    if (url === sessionPath) return new Response(null, { status: 410 });
+    return options?.headers && new Headers(options.headers).get("X-Pi-Web-Reconnect") === reconnect
+      ? Response.json({ path: nextPath })
+      : new Response(null, { status: 410 });
+  };
+  t.mock.timers.tick(600_000);
+  sockets[0].drop();
+  await setImmediate();
+  assert.equal(location.pathname, nextPath, "the mounted page recovers without a Hub navigation");
+  assert.equal(sockets.length, 2);
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, [], "only the user may resubmit a mutation after recovery");
+  assert.ok(!errors.some((e) => (e as { key?: string })?.key?.includes("expired")));
+});
+
 test("definitive invalid capability stops retries including foreground wake", async (t) => {
   const { client, sockets, errors } = setup(t);
   sockets[0].route();
@@ -226,6 +304,22 @@ test("definitive invalid capability stops retries including foreground wake", as
   t.mock.timers.tick(60000);
   assert.equal(sockets.length, 1);
 });
+
+for (const status of [404, 405, 409, 425]) {
+  test(`a temporary protocol response ${status} cannot permanently block original-session recovery`, async (t) => {
+    const { client, sockets, errors } = setup(t);
+    sockets[0].route();
+    globalThis.fetch = async (url) => new Response(null, { status: url === sessionPath ? 410 : status });
+    sockets[0].drop();
+    await setImmediate();
+    assert.ok(!errors.some((e) => (e as { key?: string })?.key?.includes("expired")));
+    globalThis.fetch = async () => new Response(null, { status: 200 });
+    await client.ensureConnected();
+    assert.equal(sockets.length, 2);
+    sockets[1].open();
+    assert.deepEqual(sockets[1].sent, []);
+  });
+}
 
 test("authentication refusal does not retry or follow a login redirect", async (t) => {
   const { client, sockets, errors } = setup(t);

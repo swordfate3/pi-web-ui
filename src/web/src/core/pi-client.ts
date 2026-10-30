@@ -29,8 +29,14 @@ export class PiClient {
   private reconnectAttempts = 0;
   private recoveryBlocked = false;
   private socketTimer: number | null = null;
+  private socketStartedAt = 0;
   private openedSocket: WebSocket | null = null;
-  private healthCheck: { ws: WebSocket; promise: Promise<boolean> } | null = null;
+  private healthCheck: {
+    ws: WebSocket;
+    startedAt: number;
+    promise: Promise<boolean>;
+    finish: (healthy: boolean, retire?: boolean) => void;
+  } | null = null;
   private requestCounter = 0;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly sentRequestIds = new Set<string>();
@@ -47,6 +53,7 @@ export class PiClient {
     this.options.onConnectionChange("connecting");
     const ws = new WebSocket(wsUrl());
     this.ws = ws;
+    this.socketStartedAt = Date.now();
     this.socketTimer = window.setTimeout(() => this.retireSocket(ws), 8000);
 
     ws.onopen = () => {
@@ -64,6 +71,15 @@ export class PiClient {
       if (this.ws !== ws) return;
       try {
         const data = JSON.parse(messageEvent.data) as WsResponse | WsEvent | WsError;
+        // Any valid application event/response on this socket proves transport
+        // liveness; a busy Pi can deliver its explicit health reply later.
+        if (
+          (data.type === "event" && typeof data.event === "string") ||
+          (data.type === "res" &&
+            this.pendingRequests.has(data.id) &&
+            this.pendingRequests.get(data.id)?.method !== "health")
+        )
+          this.healthCheck?.finish(true);
         if (data.type === "res") {
           const pending = this.pendingRequests.get(data.id);
           if (!pending) return;
@@ -96,7 +112,15 @@ export class PiClient {
                 if (this.managedRestart?.id !== restart.id)
                   this.managedRestart = { id: restart.id, timeoutMs: 120_000 };
               } else this.managedRestart = null;
-              this.hubRoute = { generation: route.generation, token: route.token };
+              const reconnect =
+                typeof route.reconnect === "string" &&
+                route.reconnect.length <= 1536 &&
+                /^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/.test(route.reconnect)
+                  ? route.reconnect
+                  : this.hubRoute?.generation === route.generation
+                    ? this.hubRoute.reconnect
+                    : undefined;
+              this.hubRoute = { generation: route.generation, token: route.token, ...(reconnect ? { reconnect } : {}) };
               this.hubRoutePath = location.pathname;
             }
           } else this.options.onEvent(data);
@@ -200,6 +224,7 @@ export class PiClient {
 
   async ensureConnected(): Promise<boolean> {
     if (this.intentionallyClosed || this.recoveryBlocked) return false;
+    this.pauseStaleHealthCheck();
     if (this.ws?.readyState === WebSocket.OPEN) return this.checkHealth(this.ws);
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
@@ -209,8 +234,9 @@ export class PiClient {
       this.handoffController = null;
     }
     if (this.ws) {
-      // A CONNECTING socket has its own bounded handshake timer.
-      if (this.ws.readyState !== WebSocket.CONNECTING) this.retireSocket(this.ws);
+      // A frozen renderer can delay the handshake timer past its deadline.
+      if (this.ws.readyState !== WebSocket.CONNECTING || Date.now() - this.socketStartedAt >= 8000)
+        this.retireSocket(this.ws);
       return false;
     }
     if (this.hubRoute) await this.recoverHubRoute(this.hubRoute);
@@ -220,28 +246,64 @@ export class PiClient {
 
   private checkHealth(ws: WebSocket): Promise<boolean> {
     if (this.healthCheck?.ws === ws) return this.healthCheck.promise;
-    const timeout = window.setTimeout(() => this.retireSocket(ws), 4000);
-    const promise = this.send("health")
-      .then((result) => {
-        if (this.ws !== ws || this.intentionallyClosed) return false;
-        if ((result as { status?: string } | null)?.status === "ok") return true;
-        this.retireSocket(ws);
-        return false;
-      })
-      .catch(() => {
-        this.retireSocket(ws);
-        return false;
-      })
-      .finally(() => {
-        window.clearTimeout(timeout);
-        if (this.healthCheck?.ws === ws) this.healthCheck = null;
-      });
-    this.healthCheck = { ws, promise };
+    const id = `health-${Date.now()}-${++this.requestCounter}`;
+    const request: WsRequest = { type: "req", id, method: "health" };
+    const startedAt = Date.now();
+    let resolve!: (healthy: boolean) => void;
+    const promise = new Promise<boolean>((done) => {
+      resolve = done;
+    });
+    let settled = false;
+    const finish = (healthy: boolean, retire = !healthy) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      this.pendingRequests.delete(id);
+      this.sentRequestIds.delete(id);
+      if (this.healthCheck?.ws === ws) this.healthCheck = null;
+      const current = this.ws === ws && !this.intentionallyClosed;
+      if (retire && current) this.retireSocket(ws);
+      resolve(healthy && current);
+    };
+    // Allow a waking mobile network to settle; ongoing valid traffic completes
+    // this probe immediately, so the extra grace costs no healthy-page latency.
+    const timeout = window.setTimeout(() => {
+      // A substantially late callback is evidence of a suspended/busy
+      // renderer, not a dead network. Let the next wake start a fresh probe.
+      const suspended = Date.now() - startedAt > 17_000 || globalThis.document?.visibilityState === "hidden";
+      finish(false, !suspended);
+    }, 15_000);
+    this.healthCheck = { ws, startedAt, promise, finish };
+    this.pendingRequests.set(id, {
+      method: "health",
+      request,
+      resolve: (result) => finish((result as { status?: string } | null)?.status === "ok"),
+      reject: () => finish(false),
+    });
+    this.sentRequestIds.add(id);
+    try {
+      ws.send(JSON.stringify(request));
+    } catch {
+      finish(false);
+    }
     return promise;
+  }
+
+  /** Browser suspension is not a negative health result. Probe anew on wake. */
+  pauseHealthCheck() {
+    this.healthCheck?.finish(false, false);
+  }
+
+  /** Wake events must not join a probe whose deadline passed while frozen. */
+  pauseStaleHealthCheck() {
+    if (!this.healthCheck || Date.now() - this.healthCheck.startedAt < 15_000) return false;
+    this.pauseHealthCheck();
+    return true;
   }
 
   disconnect() {
     this.intentionallyClosed = true;
+    this.pauseHealthCheck();
     this.handoffController?.abort();
     this.handoffController = null;
     this.hubRoute = null;
@@ -331,7 +393,10 @@ export class PiClient {
       const response = await fetch("/api/session-handoff", {
         ...options,
         method: "POST",
-        headers: { "X-Pi-Web-Handoff": route.token },
+        headers: {
+          "X-Pi-Web-Handoff": route.token,
+          ...(route.reconnect ? { "X-Pi-Web-Reconnect": route.reconnect } : {}),
+        },
       });
       if (!isCurrent() || controller.signal.aborted) return;
       if (response.status === 200) {
@@ -363,8 +428,9 @@ export class PiClient {
         return;
       }
       if (isAuthenticationFailure(response)) stopRecovery(true);
-      else if (response.status !== 202 && response.status !== 408 && response.status !== 429 && response.status < 500)
-        stopRecovery();
+      else if (response.status === 410) stopRecovery();
+      // Unknown protocol/deployment responses fail closed for this attempt,
+      // but only an explicit terminal response can permanently block recovery.
     } catch {
       // Network errors and request timeouts are retryable, not proof that a
       // session expired. Explicit auth/revocation responses above fail closed.

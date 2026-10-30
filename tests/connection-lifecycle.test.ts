@@ -5,7 +5,7 @@ import { watchConnectionLifecycle } from "../src/web/src/core/connection-lifecyc
 import { PiClient } from "../src/web/src/core/pi-client.ts";
 
 function setup(t: TestContext) {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 1000 });
   const keys = ["window", "document", "location", "WebSocket"];
   const descriptors = keys.map((key) => Object.getOwnPropertyDescriptor(globalThis, key));
   const windowTarget = new EventTarget();
@@ -146,6 +146,54 @@ test("hidden pages skip periodic checks but visibility resume still syncs", asyn
   assert.equal(synced(), 1, "a periodic check after resume must not inherit its sync request");
 });
 
+test("locking the screen cancels a foreground health deadline instead of disconnecting a sleeping tab", async (t) => {
+  const { socket, sockets, windowTarget, documentTarget, synced } = setup(t);
+  windowTarget.dispatchEvent(new Event("focus"));
+  assert.equal(socket.sent.length, 1);
+  documentTarget.visibilityState = "hidden";
+  documentTarget.dispatchEvent(new Event("visibilitychange"));
+  t.mock.timers.tick(60_000);
+  await setImmediate();
+  assert.equal(socket.readyState, 1, "background suspension is not proof that an OPEN socket died");
+  assert.equal(sockets.length, 1);
+  documentTarget.visibilityState = "visible";
+  documentTarget.dispatchEvent(new Event("visibilitychange"));
+  socket.respond();
+  await setImmediate();
+  assert.equal(synced(), 1, "unlock starts a fresh health probe and resumes read-only state once");
+});
+
+test("rapid hide/show starts a fresh probe before the cancelled probe settles", async (t) => {
+  const { socket, windowTarget, documentTarget, synced } = setup(t);
+  windowTarget.dispatchEvent(new Event("focus"));
+  documentTarget.visibilityState = "hidden";
+  documentTarget.dispatchEvent(new Event("visibilitychange"));
+  documentTarget.visibilityState = "visible";
+  documentTarget.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(socket.sent.length, 2, "unlock must not join a cancelled foreground probe");
+  await setImmediate();
+  windowTarget.dispatchEvent(new Event("focus"));
+  assert.equal(socket.sent.length, 2, "the old finally must not clear the new probe's state");
+  socket.respond();
+  await setImmediate();
+  assert.equal(synced(), 1);
+});
+
+test("foreground replaces a pre-freeze probe even without a hidden event or timer delivery", async (t) => {
+  const { socket, windowTarget, synced } = setup(t);
+  windowTarget.dispatchEvent(new Event("focus"));
+  t.mock.timers.setTime(Date.now() + 60_000);
+  windowTarget.dispatchEvent(new Event("focus"));
+  assert.equal(socket.sent.length, 2);
+  await setImmediate();
+  windowTarget.dispatchEvent(new Event("online"));
+  assert.equal(socket.sent.length, 2);
+  socket.respond();
+  await setImmediate();
+  assert.equal(synced(), 1);
+  assert.equal(socket.readyState, 1);
+});
+
 for (const event of ["visibilitychange", "pageshow", "online", "focus"]) {
   test(`${event} coalesces with an in-flight periodic health check without losing state sync`, async (t) => {
     const { socket, documentTarget, windowTarget, synced } = setup(t);
@@ -185,7 +233,7 @@ test("periodic health timeout recovers a silent socket without replaying user mu
     socket.sent.map((request) => request.method),
     ["prompt", "health"],
   );
-  t.mock.timers.tick(4000);
+  t.mock.timers.tick(15000);
   await prompt;
   await setImmediate();
   assert.equal(socket.readyState, 3, "the existing health timeout retires the silent transport");

@@ -3,30 +3,47 @@ import type { PiClient } from "./pi-client";
 /** Resume read-only state, never replay a user command on a lifecycle event. */
 export function watchConnectionLifecycle(getClient: () => PiClient | null, onHealthy: () => void) {
   let active = true;
-  let resuming: Promise<void> | null = null;
-  let syncRequested = false;
+  let resuming: { sync: boolean } | null = null;
   const checkConnection = (sync: boolean) => {
     if (!active || document.visibilityState !== "visible") return;
     const client = getClient();
     if (!client) return;
+    if (client.pauseStaleHealthCheck()) resuming = null;
     // A resume event joining a periodic probe must still request state sync.
-    syncRequested ||= sync;
-    if (resuming) return;
-    resuming = client
+    if (resuming) {
+      resuming.sync ||= sync;
+      return;
+    }
+    const operation = { sync };
+    resuming = operation;
+    void client
       .ensureConnected()
       .then((healthy) => {
-        if (active && healthy && syncRequested && getClient() === client) onHealthy();
+        if (
+          active &&
+          resuming === operation &&
+          document.visibilityState === "visible" &&
+          healthy &&
+          operation.sync &&
+          getClient() === client
+        )
+          onHealthy();
       })
       .finally(() => {
-        syncRequested = false;
-        resuming = null;
+        if (resuming === operation) resuming = null;
       });
   };
   const resume = () => checkConnection(true);
+  const visibility = () => {
+    if (document.visibilityState !== "visible") {
+      resuming = null;
+      getClient()?.pauseHealthCheck();
+    } else resume();
+  };
   const onPageShow = (event: PageTransitionEvent) => {
     if (event.persisted) resume();
   };
-  document.addEventListener("visibilitychange", resume);
+  document.addEventListener("visibilitychange", visibility);
   window.addEventListener("pageshow", onPageShow);
   window.addEventListener("online", resume);
   window.addEventListener("focus", resume);
@@ -34,7 +51,7 @@ export function watchConnectionLifecycle(getClient: () => PiClient | null, onHea
   return () => {
     active = false;
     window.clearInterval(healthTimer);
-    document.removeEventListener("visibilitychange", resume);
+    document.removeEventListener("visibilitychange", visibility);
     window.removeEventListener("pageshow", onPageShow);
     window.removeEventListener("online", resume);
     window.removeEventListener("focus", resume);

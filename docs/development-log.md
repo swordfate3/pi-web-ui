@@ -1,5 +1,12 @@
 # Pi Web UI 开发日志
 
+## 2026-10-30 · 前台周期检查与完整 Manager 链路恢复
+
+- 页面可见时每20秒复用既有 `ensureConnected()` 只读探测；健康的周期检查不调用会话同步。前台恢复事件与周期检查合并时保留一次同步意图，后台跳过检查，卸载清除计时器和监听器并屏蔽迟到结果。
+- lifecycle 回归先RED（2通过、9失败）后GREEN（11/11）；连同既有PiClient恢复回归28/28通过，未修改PiClient，不重放提问或其他写操作。完整单元测试488项，487通过、1个既有可选skip；类型检查、本次修改的Biome和dist一致性检查通过，预编译资源已同步重建。
+- 新增 `e2e/manager-reconnect.integration.ts`：真实浏览器登录独立Manager，再经Hub进入真实隔离Pi；`/new`、`/resume` 的两次handoff经过外层认证代理成功，连续可见页面无人工focus事件的断网恢复保留草稿和原会话且不重放提问。使用合成模型与临时账号／目录，不访问生产数据。运行命令为 `PI_E2E_MANAGER_DIR=<独立Manager目录> node --import ./tests/register-ts.mjs --test e2e/manager-reconnect.integration.ts`；浏览器路径可用 `PI_E2E_BROWSER_EXECUTABLE` 指定。
+- 完整链路浏览器测试1/1通过；Playwright本机替代验证（非手机实机）已检查390×844和1440×900截图，聊天、连接状态和草稿可见且无溢出，截图在 `.tmp/manager-reconnect/`。部署状态以当次上线回执为准，源码测试不等于公网实机验证。
+
 ## 2026-10-29 · 手机前后台与临时断网恢复
 
 - 前台、窗口聚焦、网络恢复和 BFCache 返回共用只读 health 探测；合并同时发生的唤醒，无响应的 OPEN 连接和超时的握手会被本地退役，不等待迟到的 close。

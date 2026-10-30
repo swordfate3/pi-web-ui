@@ -74,7 +74,11 @@ test("outer Manager recovers session replacement and visible mobile network loss
     await page.goto(`${serviceUrl}login`);
     await page.locator("#auth-username:not([disabled])").fill("isolated-tester");
     await page.locator("#auth-password").fill("isolated-e2e-password");
+    const initialized = page.waitForResponse(
+      (response) => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/auth/setup",
+    );
     await page.locator("#auth-submit").click();
+    assert.equal((await initialized).status(), 200, "isolated account setup must succeed before testing chat recovery");
     await expect(page).toHaveURL(service.url);
     let sessionPath = "";
     await expect
@@ -97,6 +101,11 @@ test("outer Manager recovers session replacement and visible mobile network loss
     await expect(page.getByRole("log")).toContainText("你好，Pi Web UI 已收到消息。");
     await send("/name outer-manager-first");
     await expect(page.getByText("outer-manager-first", { exact: true }).first()).toBeVisible();
+    let unavailableHandoffs = 0;
+    await page.route("**/api/session-handoff", async (route) => {
+      if (unavailableHandoffs++ === 0) await route.fulfill({ status: 503, body: "" });
+      else await route.continue();
+    });
     const firstPath = new URL(page.url()).pathname;
     await send("/new");
     await expect.poll(() => new URL(page.url()).pathname).not.toBe(firstPath);
@@ -117,16 +126,26 @@ test("outer Manager recovers session replacement and visible mobile network loss
       "both handoffs must succeed through outer Manager",
     );
     assert.ok(!handoffStatuses.includes(404), "Manager must not drop the recovery API");
+    assert.ok(handoffStatuses.includes(503), "temporary successor proof failure must recover without Hub navigation");
 
     const recoveredPath = new URL(page.url()).pathname;
     await input.fill("UNSENT_OUTER_MANAGER_DRAFT");
     const sentBeforeLoss = mutations.length;
+    let unavailableRoutes = 0;
+    await page.route("**/s/**/", async (route) => {
+      if (route.request().method() === "HEAD" && unavailableRoutes < 2) {
+        unavailableRoutes++;
+        await route.fulfill({ status: 503, body: "" });
+      } else await route.continue();
+    });
     await context.setOffline(true);
     // No synthetic focus/online event: continuously visible periodic probing
     // must notice the dead leg even when browser readyState remains OPEN.
     await expect(connected).not.toBeVisible({ timeout: 35_000 });
     await context.setOffline(false);
     await expect(connected).toBeVisible({ timeout: 20_000 });
+    assert.equal(unavailableRoutes, 2, "temporary same-route failures must be retried automatically");
+    await expect(page.getByText("会话链接已失效，请从总管重新打开这个 Pi。", { exact: true })).not.toBeVisible();
     assert.equal(new URL(page.url()).pathname, recoveredPath);
     await expect(input).toHaveValue("UNSENT_OUTER_MANAGER_DRAFT");
     await expect(page.getByRole("log")).toContainText("OUTER_MANAGER_FIRST_MARKER");

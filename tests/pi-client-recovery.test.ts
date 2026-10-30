@@ -162,6 +162,47 @@ test("expired handoff token is not used when the exact original route still exis
   assert.deepEqual(requests, [`HEAD ${sessionPath}`]);
 });
 
+test("temporary Hub proof failures retry the same route instead of asking to reopen from Hub", async (t) => {
+  const { client, sockets, errors } = setup(t);
+  sockets[0].route();
+  let unavailable = true;
+  const requests: string[] = [];
+  globalThis.fetch = async (url) => {
+    requests.push(String(url));
+    return new Response(null, { status: unavailable ? 503 : 200 });
+  };
+  sockets[0].drop();
+  await setImmediate();
+  assert.ok(!errors.some((e) => (e as { key?: string })?.key?.includes("expired")));
+  unavailable = false;
+  await client.ensureConnected();
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(requests, [sessionPath, sessionPath]);
+  assert.equal(location.pathname, sessionPath);
+});
+
+test("an unavailable exact successor proof remains retryable without replaying session actions", async (t) => {
+  const { client, sockets, errors } = setup(t);
+  sockets[0].route();
+  let unavailable = true;
+  globalThis.fetch = async (url) =>
+    url === sessionPath
+      ? new Response(null, { status: 410 })
+      : unavailable
+        ? new Response(null, { status: 503 })
+        : Response.json({ path: `/s/${"c".repeat(32)}/` });
+  sockets[0].drop();
+  await setImmediate();
+  assert.ok(!errors.some((e) => (e as { key?: string })?.key?.includes("expired")));
+  await assert.rejects(client.send("prompt", { message: "not queued" }), /Reconnect/);
+  unavailable = false;
+  await client.ensureConnected();
+  assert.equal(sockets.length, 2);
+  sockets[1].open();
+  assert.deepEqual(sockets[1].sent, []);
+  assert.equal(location.pathname, `/s/${"c".repeat(32)}/`);
+});
+
 test("retired generation resolves only the capability-bound successor", async (t) => {
   const { sockets } = setup(t);
   sockets[0].route();

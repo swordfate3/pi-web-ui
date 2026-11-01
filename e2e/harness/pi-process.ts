@@ -4,6 +4,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { toolToggleEntries, toolToggleRange } from "../fixtures/bounded-tool-toggle";
+import { paginationEntries } from "../fixtures/history-pagination";
 
 export type PiWebUiHarness = {
   pageUrl: string;
@@ -26,6 +27,7 @@ export type PiWebUiHarnessOptions = {
   boundedVisualHistory?: boolean;
   /** Compact valid history whose rendered tool rows approach the browser byte limit. */
   boundedToolToggle?: boolean;
+  pagedHistory?: boolean;
   /** Synthetic multi-model, mixed-priced usage across branches and dates. */
   usageHistory?: boolean;
   /** Optional immutable release root; defaults to the working repository. */
@@ -54,15 +56,17 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
   mkdirSync(xdgConfigHome, { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
   if (options.git !== false) prepareGitWorkspace(workspaceDir);
-  const longSessionFile = options.boundedToolToggle
-    ? writeToolToggleFixture(sessionDir, workspaceDir)
-    : options.usageHistory
-      ? writeUsageHistoryFixture(sessionDir, workspaceDir)
-      : options.datedHistory || options.boundedVisualHistory
-        ? writeDatedHistoryFixture(sessionDir, workspaceDir, options.boundedVisualHistory)
-        : options.longSession
-          ? writeLongSessionFixture(sessionDir, workspaceDir)
-          : undefined;
+  const longSessionFile = options.pagedHistory
+    ? writePaginationFixture(sessionDir, workspaceDir)
+    : options.boundedToolToggle
+      ? writeToolToggleFixture(sessionDir, workspaceDir)
+      : options.usageHistory
+        ? writeUsageHistoryFixture(sessionDir, workspaceDir)
+        : options.datedHistory || options.boundedVisualHistory
+          ? writeDatedHistoryFixture(sessionDir, workspaceDir, options.boundedVisualHistory)
+          : options.longSession
+            ? writeLongSessionFixture(sessionDir, workspaceDir)
+            : undefined;
 
   const processOutput: string[] = [];
   const piProcess = spawn(
@@ -196,6 +200,18 @@ export async function startPiWebUi(fixtureName: string, options: PiWebUiHarnessO
       if (existsSync(tempRoot)) rmSync(tempRoot, { recursive: true, force: true });
     },
   };
+}
+
+function writePaginationFixture(sessionDir: string, workspaceDir: string): string {
+  const now = Date.now();
+  const id = "8e91f4c2-3000-4500-8500-000000000099";
+  const file = path.join(sessionDir, `${now}_${id}.jsonl`);
+  const records = [
+    { type: "session", version: 3, id, timestamp: new Date(now).toISOString(), cwd: workspaceDir },
+    ...paginationEntries(now),
+  ];
+  writeFileSync(file, `${records.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+  return file;
 }
 
 function writeUsageHistoryFixture(sessionDir: string, workspaceDir: string): string {

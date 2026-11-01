@@ -1638,6 +1638,7 @@ export default function (pi: ExtensionAPI) {
     const page = selectSessionHistory(ctx.sessionManager.getBranch(), ctx.sessionManager.getTree(), {
       ...historyRange(params),
       ...(params.before === undefined ? {} : { before: params.before as string }),
+      ...(params.through === undefined ? {} : { through: params.through as string }),
     });
     const leafId = ctx.sessionManager.getLeafId();
 

@@ -103,12 +103,137 @@ function* readableEntry(entry: HistoryEntry): Generator<string> {
   yield* readableValue(entry.summary ?? entry.label ?? "[No readable content in this entry]");
 }
 
+type MarkdownBlock = { start: number; end: number; safe: boolean };
+
+// This is deliberately a small, line-oriented boundary finder rather than a
+// Markdown parser. Blank lines and closed fenced blocks are reliable page
+// boundaries for the common chat/result shapes; unknown syntax stays in its
+// surrounding block and therefore falls back to text if it is too large.
+function* markdownBlocks(entry: HistoryEntry): Generator<MarkdownBlock> {
+  let blockStart = 0;
+  let position = 0;
+  let line = "";
+  let lineLength = 0;
+  let nonWhitespace = false;
+  let fence: { marker: "`" | "~"; length: number } | null = null;
+  let math: "$$" | "\\[" | null = null;
+  const resetLine = () => {
+    line = "";
+    lineLength = 0;
+    nonWhitespace = false;
+  };
+  const completeLine = () => lineLength <= 1024;
+  const fenceStart = () => (completeLine() ? /^(?: {0,3})(`{3,}|~{3,})/.exec(line) : null);
+  const fenceEnd = () => {
+    if (!fence || !completeLine()) return false;
+    const rest = line.slice(0, 3).match(/^ {0,3}/)?.[0].length ?? 0;
+    let index = rest;
+    while (line[index] === fence.marker) index++;
+    return index - rest >= fence.length && /^[ \t\r]*$/.test(line.slice(index));
+  };
+  const mathStart = () => {
+    if (!completeLine()) return null;
+    const marker = line.trim();
+    return marker === "$$" || marker === "\\[" ? marker : null;
+  };
+  const mathEnd = () => completeLine() && line.trim() === (math === "$$" ? "$$" : "\\]");
+
+  for (const segment of readableEntry(entry)) {
+    for (let index = 0; index < segment.length; index++) {
+      const char = segment[index];
+      position++;
+      lineLength++;
+      if (char !== "\n" && line.length < 1024) line += char;
+      if (char !== " " && char !== "\t" && char !== "\r" && char !== "\n") nonWhitespace = true;
+      if (char !== "\n") continue;
+
+      let boundary = false;
+      const safe = true;
+      if (fence) {
+        if (fenceEnd()) {
+          fence = null;
+          boundary = true;
+        }
+      } else if (math) {
+        if (mathEnd()) {
+          math = null;
+          boundary = true;
+        }
+      } else {
+        const start = fenceStart();
+        if (start) fence = { marker: start[1][0] as "`" | "~", length: start[1].length };
+        else {
+          const marker = mathStart();
+          if (marker) math = marker;
+          else if (!nonWhitespace) boundary = true;
+        }
+      }
+      if (boundary) {
+        yield { start: blockStart, end: position, safe };
+        blockStart = position;
+      }
+      resetLine();
+    }
+  }
+  if (blockStart < position) yield { start: blockStart, end: position, safe: !fence && !math };
+}
+
+// Copy only a bounded prefix of a selected source range. The returned end is
+// always a UTF-16 boundary that jsonTextPrefix has verified is JSON-safe.
+function rangePrefix(entry: HistoryEntry, offset: number, end: number, budget: number) {
+  let position = 0;
+  const pieces: string[] = [];
+  for (const segment of readableEntry(entry)) {
+    const segmentEnd = position + segment.length;
+    if (segmentEnd <= offset) {
+      position = segmentEnd;
+      continue;
+    }
+    if (position >= end) break;
+    const start = Math.max(0, offset - position);
+    const available = Math.min(segment.length, end - position) - start;
+    const candidate = segment.slice(start, start + Math.min(available, budget + 2));
+    const prefix = jsonTextPrefix(candidate, budget);
+    if (prefix) {
+      pieces.push(prefix);
+      budget -= Buffer.byteLength(JSON.stringify(prefix)) - 2;
+    }
+    const copiedEnd = position + start + prefix.length;
+    if (prefix.length < available) return { text: pieces.join(""), end: copiedEnd, complete: false };
+    position = segmentEnd;
+  }
+  return { text: pieces.join(""), end, complete: true };
+}
+
+function markdownTextEntry(entry: HistoryEntry): boolean {
+  const message = entry.message;
+  if (!message || !["user", "assistant", "toolResult"].includes(message.role ?? "")) return false;
+  if (typeof message.content === "string") return true;
+  return (
+    Array.isArray(message.content) &&
+    message.content.every(
+      (block) =>
+        !!block &&
+        typeof block === "object" &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string",
+    )
+  );
+}
+
 export function readEntryDetail(
   branch: readonly HistoryEntry[],
   scope: Scope,
   params: Record<string, unknown>,
   requestId: string,
-): { sessionId: string; runtimeId: string; entryId: string; text: string; nextCursor: string | null } {
+): {
+  sessionId: string;
+  runtimeId: string;
+  entryId: string;
+  text: string;
+  nextCursor: string | null;
+  format?: "markdown" | "text";
+} {
   if (
     !identity(scope.sessionId, 256) ||
     !identity(scope.runtimeId, 256) ||
@@ -119,6 +244,8 @@ export function readEntryDetail(
     (scope.leafId !== null && !identity(scope.leafId))
   )
     fail();
+  if (params.presentation !== undefined && params.presentation !== "markdown") fail();
+  const markdownRequested = params.presentation === "markdown";
   const entryId = params.entryId as string;
   const entry = branch.find((item) => item.id === entryId);
   if (!entry) return fail();
@@ -152,6 +279,7 @@ export function readEntryDetail(
     entryId,
     text: "",
     nextCursor: null as string | null,
+    ...(markdownRequested ? { format: "text" as "markdown" | "text" } : {}),
   };
   // Reserve a worst-case safe-integer cursor and actual envelope/request ID.
   const overhead = Buffer.byteLength(
@@ -159,11 +287,57 @@ export function readEntryDetail(
       type: "res",
       id: requestId,
       ok: true,
-      result: { ...result, nextCursor: cursorAt(Number.MAX_SAFE_INTEGER) },
+      result: {
+        ...result,
+        ...(markdownRequested ? { format: "markdown" as const } : {}),
+        nextCursor: cursorAt(Number.MAX_SAFE_INTEGER),
+      },
     }),
   );
   let budget = 64 * 1024 - overhead;
   if (budget < 16) return fail();
+
+  if (markdownRequested && markdownTextEntry(entry)) {
+    let pageEnd = offset;
+    let selected = "";
+    let selectedBytes = 0;
+    let found = false;
+    let length: number | undefined;
+    const readableLength = () => {
+      if (length !== undefined) return length;
+      length = 0;
+      for (const segment of readableEntry(entry)) length += segment.length;
+      return length;
+    };
+    for (const block of markdownBlocks(entry)) {
+      if (block.end <= pageEnd) continue;
+      found = true;
+      const prefix = rangePrefix(entry, pageEnd, block.end, budget - selectedBytes);
+      // A cursor inside a block belongs to an earlier oversized fallback. Its
+      // final suffix must remain text even when that suffix itself now fits.
+      if (!prefix.complete || !block.safe || block.start < pageEnd) {
+        if (selected) break;
+        result.text = prefix.text;
+        result.format = "text";
+        result.nextCursor = prefix.end < readableLength() ? cursorAt(prefix.end) : null;
+        if (result.nextCursor && prefix.end <= offset) fail();
+        return result;
+      }
+      selected += prefix.text;
+      selectedBytes += Buffer.byteLength(JSON.stringify(prefix.text)) - 2;
+      pageEnd = block.end;
+    }
+    if (selected) {
+      result.text = selected;
+      result.format = "markdown";
+      result.nextCursor = pageEnd < readableLength() ? cursorAt(pageEnd) : null;
+      return result;
+    }
+    if (offset && !found) fail();
+    result.format = "markdown";
+    return result;
+  }
+
   let position = 0;
   let truncated = false;
   const pieces: string[] = [];

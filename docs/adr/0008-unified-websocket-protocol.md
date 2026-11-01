@@ -144,8 +144,10 @@ interface WsError {
 **Date-bounded history update:** see [ADR 0014](0014-date-bounded-browser-history.md).
 `state_sync` now includes a bounded page rather than every historical message.
 `get_history` and `sync_request` accept inclusive numeric `from`, exclusive numeric
-`to`, optional `before` entry-ID cursor, and `sessionId` fencing. The returned
-`history` metadata includes `from`, `to`, `nextBefore`, `total`, `returned`,
+`to`, optional `before` entry-ID cursor, optional inclusive `through` entry-ID anchor,
+and `sessionId`/`runtimeId` fencing. Both cursor and anchor must belong to the active
+branch and selected date range. The returned
+`history` metadata includes `from`, `to`, `headId`, `nextBefore`, `total`, `returned`,
 `truncatedEntries`, and `treeLimited`. A lightweight partial `treeNodes` is
 declared as such. `get_saved_sessions` accepts the same date range and returns
 only compact matching session metadata. Raw Pi events retain their source
@@ -158,8 +160,8 @@ Complete `state_sync`, `get_history` and `sync_request` envelopes are limited to
 identities/progress. Unrepresentable non-history metadata yields a small explicit
 error. These ceilings do not apply to initial assets or explicit HTTP file transfers.
 
-`get_entry_detail` accepts `{entryId,sessionId,runtimeId,cursor?}` and returns
-`{sessionId,runtimeId,entryId,text,nextCursor}` in the ordinary response envelope,
+`get_entry_detail` accepts `{entryId,sessionId,runtimeId,cursor?,presentation?}` and returns
+`{sessionId,runtimeId,entryId,text,nextCursor,format?}` in the ordinary response envelope,
 at most 65,536 bytes including request ID and framing. `nextCursor:null` marks the
 end. A cursor is authenticated and fenced to current session/runtime/branch leaf,
 entry revision and offset. Unknown/off-branch IDs, cross-scope requests, malformed
@@ -167,7 +169,11 @@ offsets/signatures and stale cursors fail closed. The endpoint is not a filesyst
 reader and omits binary/base64 carriers. The browser never automatically requests
 or concatenates all chunks; it retains one chunk and clears it on scope/date/page
 changes and disconnect. Individual system previews preserve detail access when
-tool-row eviction would otherwise hide a result. Retained browser content is capped
+tool-row eviction would otherwise hide a result. Optional `presentation:"markdown"`
+selects conservative block-safe paging for textual entries; responses declare
+`format:"markdown"` or explicit `format:"text"` fallback. Omitting presentation
+preserves the prior raw-chunk response shape. The browser stores backward/forward
+cursor metadata, never a growing collection of full page bodies. Retained browser content is capped
 at 200 items / 524,288 bytes, 65,536 bytes per item, plus that one detail chunk.
 
 Hub generations are either legacy 32 lowercase hex or

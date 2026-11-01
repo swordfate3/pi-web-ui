@@ -88,11 +88,14 @@ test("an unknown old-branch cursor after reconnect reloads the current branch", 
     },
     entries: [{ id: "new-leaf", type: "message", message: { role: "assistant", content: "reconnect snapshot" } }],
   });
+  assert.equal(reads.length, 0, "reconnect preserves the reading page until an explicit sync");
+  const syncing = state.requestConversationSync();
   assert.deepEqual(reads[0], {
-    method: "get_history",
+    method: "sync_request",
     params: { from: 1, to: 10, before: "old-branch-cursor", sessionId: "s", runtimeId: "r" },
   });
   replies[0].reject(new Error("Unknown history cursor for this date range"));
+  await syncing;
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(reads[1], {
     method: "get_history",
@@ -159,8 +162,11 @@ test("a valid old-page cursor survives a reconnect snapshot on a growing branch"
     },
     entries: [{ id: "appended-leaf", type: "message", message: { role: "assistant", content: "new append" } }],
   });
+  const previousRows = state.items;
+  assert.equal(reads.length, 0, "reconnect must not compete with the reader's page");
+  const syncing = state.requestConversationSync();
   assert.deepEqual(reads[0], {
-    method: "get_history",
+    method: "sync_request",
     params: { from: 1, to: 10, before: "valid-old-page-cursor", sessionId: "s", runtimeId: "r" },
   });
   resolveRead({
@@ -179,12 +185,14 @@ test("a valid old-page cursor survives a reconnect snapshot on a growing branch"
       truncatedEntries: 0,
     },
   });
+  await syncing;
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(reads.length, 1, "valid append cursors do not trigger a latest-page reload");
   assert.equal(state.historyBefore, "valid-old-page-cursor");
   assert.equal(state.historyError, null);
   assert.equal(state.items[0]?.kind === "message" && state.items[0].text, "selected old page");
+  assert.equal(state.items, previousRows, "background synchronization preserves row identity");
 
   state.send = (method, params) => {
     reads.push({ method, params });

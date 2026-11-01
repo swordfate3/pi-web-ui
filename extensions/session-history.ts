@@ -5,7 +5,7 @@ export { readEntryDetail } from "./entry-detail.ts";
 export { serializeHistoryEnvelope } from "./history-envelope.ts";
 
 export type HistoryRange = { from: number; to: number };
-export type HistoryQuery = HistoryRange & { before?: string };
+export type HistoryQuery = HistoryRange & { before?: string; through?: string };
 export type HistoryEntry = {
   id?: string;
   type?: string;
@@ -188,6 +188,15 @@ export function selectSessionHistory(branch: readonly HistoryEntry[], tree: unkn
   const range = historyRange(query);
   if (query.before !== undefined && (typeof query.before !== "string" || !query.before))
     throw new Error("Invalid history cursor");
+  let headIndex = branch.length - 1;
+  if (query.through !== undefined) {
+    if (typeof query.through !== "string" || !query.through || query.through.length > 512)
+      throw new Error("Invalid history anchor");
+    headIndex = branch.findIndex((entry) => entry.id === query.through);
+    const headTime = Date.parse(branch[headIndex]?.timestamp ?? "");
+    if (headIndex < 0 || !(headTime >= range.from && headTime < range.to))
+      throw new Error("Unknown history anchor for this date range");
+  }
   let cursorIndex = -1;
   let cursorTime = Infinity;
   if (query.before !== undefined) {
@@ -201,10 +210,12 @@ export function selectSessionHistory(branch: readonly HistoryEntry[], tree: unkn
   const candidates: Array<{ entry: HistoryEntry; time: number; index: number }> = [];
   let total = 0;
   let eligible = 0;
-  for (let index = 0; index < branch.length; index++) {
+  let headId: string | null = null;
+  for (let index = 0; index <= headIndex; index++) {
     const entry = branch[index];
     const time = Date.parse(entry.timestamp ?? "");
     if (!(time >= range.from && time < range.to)) continue;
+    headId = typeof entry.id === "string" && entry.id.length <= 512 ? entry.id : headId;
     total++;
     if (query.before !== undefined && (time > cursorTime || (time === cursorTime && index >= cursorIndex))) continue;
     eligible++;
@@ -236,6 +247,7 @@ export function selectSessionHistory(branch: readonly HistoryEntry[], tree: unkn
     treeNodes,
     history: {
       ...range,
+      headId,
       nextBefore: eligible > entries.length ? (entries[0]?.id ?? null) : null,
       total,
       returned: entries.length,

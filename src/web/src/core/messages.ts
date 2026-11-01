@@ -1,5 +1,21 @@
 // English source strings are typed keys. Only explicitly owned UI text belongs here.
 export const messages = {
+  "History pages": "历史翻页",
+  "Page {page}": "第 {page} 页",
+  "Newer page": "更新一页",
+  "Return to latest": "回到最新",
+  "New replies available": "有新回复",
+  "Read full result": "分页阅读全文",
+  "Previous result page": "上一页结果",
+  "Next result page": "下一页结果",
+  "Result page {page}": "结果第 {page} 页",
+  "Read the complete result page by page. Only the current page is kept in memory.":
+    "逐页读取完整结果，网页只保留当前页内容。",
+  "This block is shown as source to preserve content across page boundaries.":
+    "此内容块较大或不适合独立排版，已按源码分页显示，内容不会被省略。",
+  "Loading result page…": "正在加载结果页…",
+  Source: "源码",
+  Rendered: "排版",
   "Conversation window limited. Older content remains in the original session.":
     "会话窗口已限制大小，较早内容仍保留在原始会话中。",
   "Could not load entry detail": "无法加载条目详情",

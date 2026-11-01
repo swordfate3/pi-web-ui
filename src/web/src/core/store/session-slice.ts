@@ -12,7 +12,7 @@ import { parseMessageRevision, revisionDeadline } from "../message-revision";
 import { decodeSessionTreeOrKeep } from "../session-tree-wire";
 import { parseTerminalPrompt } from "../terminal-prompt";
 import { isToolExpandable } from "../tool-summary";
-import type { ChatItem, EntryDetailResult } from "../types";
+import type { ChatItem, EntryDetailResult, HistoryRange, SessionEntry, StateSyncPayload } from "../types";
 import { errorUiText, UiError, uiText } from "../ui-text";
 import { parseUsageStats } from "../usage-stats";
 import { artifactsFromEntries } from "../workspace-artifacts";
@@ -24,6 +24,35 @@ let itemCounter = 0;
 function nextId(prefix: string) {
   itemCounter += 1;
   return `${prefix}-${Date.now()}-${itemCounter}`;
+}
+
+/** A known ancestry excluding the previous leaf proves a branch replacement.
+ * Missing parents in a bounded tree are unknown, not proof of a replacement. */
+function replacedBranch(sync: StateSyncPayload, state: PiWebUiStore): boolean {
+  if (!state.leafId || !Object.hasOwn(sync, "leafId") || sync.leafId === state.leafId) return false;
+  if (!sync.leafId) return true;
+  const entries = new Map<string, SessionEntry>();
+  const decoded = decodeSessionTreeOrKeep(sync, state.tree);
+  if (!decoded.ok) return false;
+  const stack = [...decoded.tree];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+    if (node.entry.id) entries.set(node.entry.id, node.entry);
+    for (const child of node.children) stack.push(child);
+  }
+  for (const entry of sync.entries ?? []) if (entry.id) entries.set(entry.id, entry);
+  const seen = new Set<string>();
+  let id: string | null = sync.leafId;
+  while (id) {
+    if (id === state.leafId) return false;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const entry = entries.get(id);
+    if (!entry || entry.parentId === undefined) return false;
+    id = entry.parentId;
+  }
+  return true;
 }
 
 export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) => {
@@ -43,8 +72,11 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
         next.entryDetail = null;
         next.entryDetailLoading = false;
         next.entryDetailError = null;
+        next.entryDetailTrail = [null];
+        next.entryDetailPageIndex = 0;
+        next.entryDetailPresentation = undefined;
       }
-      if (next.items) {
+      if (next.items && next.items !== state.items) {
         const window = boundConversationWindow(next.items);
         next.items = window.items;
         next.artifacts = retainWindowArtifacts(next.artifacts ?? state.artifacts ?? [], window.items);
@@ -66,15 +98,96 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
   const identity = () => ({ sessionId: get().sessionId, runtimeId: get().runtimeId });
   const sameIdentity = (source: ReturnType<typeof identity>) =>
     source.sessionId === get().sessionId && source.runtimeId === get().runtimeId;
+  type PageNavigation = { trail: (string | null)[]; index: number; anchor: string | null };
+  const fetchHistory = async (range: HistoryRange, before?: string, navigation?: PageNavigation) => {
+    const source = identity();
+    if (!source.sessionId) return;
+    const generation = ++historyGeneration;
+    historySelected = true;
+    get().closeEntryDetail();
+    streamingId = null;
+    streamingHasToolCall = false;
+    set({
+      historyLoading: true,
+      historyError: null,
+      conversationSyncError: null,
+      conversationSyncing: false,
+      // A page turn keeps the successfully rendered page until its replacement
+      // arrives. Explicit date changes clear it rather than mislabel old rows.
+      ...(!navigation
+        ? {
+            historyRange: range,
+            historyBefore: before ?? null,
+            historyTrail: before ? [null, before] : [null],
+            historyPageIndex: before ? 1 : 0,
+            historyAnchor: null,
+            historyHasUpdates: false,
+            items: [],
+            tree: [],
+            artifacts: [],
+            history: null,
+            selectedTreeEntryId: null,
+          }
+        : {}),
+    });
+    try {
+      const sync = (await get().send("get_history", {
+        ...range,
+        ...(before ? { before } : {}),
+        ...(navigation?.anchor ? { through: navigation.anchor } : {}),
+        sessionId: source.sessionId,
+        ...(source.runtimeId ? { runtimeId: source.runtimeId } : {}),
+      })) as Parameters<SessionSlice["applyStateSync"]>[0];
+      if (generation !== historyGeneration || !sameIdentity(source)) return;
+      if (sync.sessionId !== source.sessionId || (source.runtimeId && sync.runtimeId !== source.runtimeId)) return;
+      if (navigation)
+        set({
+          historyRange: range,
+          historyBefore: before ?? null,
+          historyTrail: navigation.trail,
+          historyPageIndex: navigation.index,
+          historyAnchor: navigation.anchor,
+        });
+      get().applyStateSync(sync, { requested: true });
+      if (!before && !navigation?.anchor) set({ historyHasUpdates: false });
+    } catch (error) {
+      if (generation === historyGeneration && sameIdentity(source)) {
+        if (
+          error instanceof Error &&
+          ((before && error.message === "Unknown history cursor for this date range") ||
+            (navigation?.anchor && error.message === "Unknown history anchor for this date range"))
+        )
+          void fetchHistory(range, undefined, { trail: [null], index: 0, anchor: null });
+        else set({ historyError: errorUiText(error, uiText("Could not load history")) });
+      }
+    } finally {
+      if (generation === historyGeneration && sameIdentity(source)) set({ historyLoading: false });
+    }
+  };
+  const noteHistoricalUpdate = () => {
+    if (get().isHistoryLive()) return false;
+    set({ historyHasUpdates: true });
+    return true;
+  };
   return {
     entryDetail: null,
     entryDetailLoading: false,
     entryDetailError: null,
+    entryDetailTrail: [null],
+    entryDetailPageIndex: 0,
+    entryDetailPresentation: undefined,
     closeEntryDetail: () => {
       detailGeneration++;
-      set({ entryDetail: null, entryDetailLoading: false, entryDetailError: null });
+      set({
+        entryDetail: null,
+        entryDetailLoading: false,
+        entryDetailError: null,
+        entryDetailTrail: [null],
+        entryDetailPageIndex: 0,
+        entryDetailPresentation: undefined,
+      });
     },
-    loadEntryDetail: async (entryId, cursor) => {
+    loadEntryDetail: async (entryId, cursor, presentation) => {
       const source = identity();
       if (!source.sessionId || !source.runtimeId || get().connection !== "connected" || get().sessionActionPending)
         return;
@@ -86,9 +199,34 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
         get().leafId === leafId &&
         get().connection === "connected" &&
         !get().sessionActionPending;
-      // Replace, never append: even while loading only one chunk is retained.
+      const previous = get().entryDetail;
+      const sameEntry = previous?.entryId === entryId && get().entryDetailPresentation === presentation;
+      let trail = sameEntry ? get().entryDetailTrail : [null];
+      let index = trail.indexOf(cursor ?? null);
+      if (index < 0) {
+        trail =
+          sameEntry && cursor === previous?.nextCursor
+            ? [...trail.slice(0, get().entryDetailPageIndex + 1), cursor ?? null]
+            : [cursor ?? null];
+        index = trail.length - 1;
+      }
+      // Keep one successfully displayed body during a page request; cursor
+      // metadata, not old text, provides backward navigation.
       set({
-        entryDetail: { sessionId: source.sessionId, runtimeId: source.runtimeId, entryId, text: "", nextCursor: null },
+        ...(!sameEntry
+          ? {
+              entryDetail: {
+                sessionId: source.sessionId,
+                runtimeId: source.runtimeId,
+                entryId,
+                text: "",
+                nextCursor: null,
+              },
+              entryDetailTrail: [null],
+              entryDetailPageIndex: 0,
+              entryDetailPresentation: presentation,
+            }
+          : {}),
         entryDetailLoading: true,
         entryDetailError: null,
       });
@@ -98,6 +236,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
           runtimeId: source.runtimeId,
           entryId,
           ...(cursor === undefined ? {} : { cursor }),
+          ...(presentation ? { presentation } : {}),
         });
         if (!current()) return;
         const safe = boundedJson(result, 64 * 1024)?.value as EntryDetailResult | undefined;
@@ -107,6 +246,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
           safe.runtimeId !== source.runtimeId ||
           safe.entryId !== entryId ||
           typeof safe.text !== "string" ||
+          (safe.format !== undefined && safe.format !== "text" && safe.format !== "markdown") ||
           !(
             safe.nextCursor === null ||
             (typeof safe.nextCursor === "string" && safe.nextCursor.length > 0 && safe.nextCursor.length <= 1024)
@@ -120,13 +260,26 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
             entryId: safe.entryId,
             text: safe.text,
             nextCursor: safe.nextCursor,
+            ...(safe.format ? { format: safe.format } : {}),
           },
+          entryDetailTrail: trail,
+          entryDetailPageIndex: index,
+          entryDetailPresentation: presentation,
         });
       } catch (error) {
         if (current()) set({ entryDetailError: errorUiText(error, uiText("Could not load entry detail")) });
       } finally {
         if (current()) set({ entryDetailLoading: false });
       }
+    },
+    loadPreviousEntryDetail: async () => {
+      const state = get();
+      if (!state.entryDetail || state.entryDetailLoading || state.entryDetailPageIndex < 1) return;
+      await state.loadEntryDetail(
+        state.entryDetail.entryId,
+        state.entryDetailTrail[state.entryDetailPageIndex - 1] ?? undefined,
+        state.entryDetailPresentation,
+      );
     },
     getUsageStats: async () => {
       const source = identity();
@@ -140,56 +293,46 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
     historyRange: recentHistoryRange(),
     history: null,
     historyBefore: null,
+    historyTrail: [null],
+    historyPageIndex: 0,
+    historyAnchor: null,
+    historyHasUpdates: false,
     historyLoading: false,
     historyError: null,
     isHistoryLive: () =>
       !get().historyBefore &&
+      !get().historyAnchor &&
       !get().historyLoading &&
       Date.now() >= get().historyRange.from &&
       Date.now() < get().historyRange.to,
-    loadHistory: async (range, before) => {
-      const source = identity();
-      if (!source.sessionId) return;
-      const generation = ++historyGeneration;
-      historySelected = true;
-      get().closeEntryDetail();
-      streamingId = null;
-      streamingHasToolCall = false;
-      set({
-        historyRange: range,
-        historyBefore: before ?? null,
-        historyLoading: true,
-        historyError: null,
-        conversationSyncError: null,
-        conversationSyncing: false,
-        items: [],
-        tree: [],
-        artifacts: [],
-        history: null,
-        selectedTreeEntryId: null,
+    loadHistory: (range, before) => fetchHistory(range, before),
+    loadOlderHistory: async () => {
+      const state = get();
+      const before = state.history?.nextBefore;
+      if (!before || state.historyLoading || state.connection !== "connected" || state.sessionActionPending) return;
+      await fetchHistory(state.historyRange, before, {
+        trail: [...state.historyTrail.slice(0, state.historyPageIndex + 1), before],
+        index: state.historyPageIndex + 1,
+        anchor: state.historyAnchor ?? state.history?.headId ?? null,
       });
-      try {
-        const sync = (await get().send("get_history", {
-          ...range,
-          ...(before ? { before } : {}),
-          sessionId: source.sessionId,
-          ...(source.runtimeId ? { runtimeId: source.runtimeId } : {}),
-        })) as Parameters<SessionSlice["applyStateSync"]>[0];
-        if (generation !== historyGeneration || !sameIdentity(source)) return;
-        if (sync.sessionId !== source.sessionId || (source.runtimeId && sync.runtimeId !== source.runtimeId)) return;
-        get().applyStateSync(sync, { requested: true });
-      } catch (error) {
-        if (generation === historyGeneration && sameIdentity(source)) {
-          if (before && error instanceof Error && error.message === "Unknown history cursor for this date range") {
-            // A branch switch may retire this page cursor, but an ordinary append
-            // leaves it valid. Fall back only when the server proves it is unknown.
-            void get().loadHistory(range);
-          } else set({ historyError: errorUiText(error, uiText("Could not load history")) });
-        }
-      } finally {
-        if (generation === historyGeneration && sameIdentity(source)) set({ historyLoading: false });
-      }
     },
+    loadNewerHistory: async () => {
+      const state = get();
+      if (
+        state.historyPageIndex < 1 ||
+        state.historyLoading ||
+        state.connection !== "connected" ||
+        state.sessionActionPending
+      )
+        return;
+      const index = state.historyPageIndex - 1;
+      await fetchHistory(state.historyRange, state.historyTrail[index] ?? undefined, {
+        trail: state.historyTrail,
+        index,
+        anchor: state.historyAnchor,
+      });
+    },
+    returnToLatestHistory: () => fetchHistory(recentHistoryRange()),
     items: [],
     chatStatus: "ready",
     tree: [],
@@ -255,6 +398,19 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
       const runtimeChanged = Boolean(
         sync.sessionId && sync.runtimeId && get().runtimeId && sync.runtimeId !== get().runtimeId,
       );
+      const branchChanged = !sessionChanged && !runtimeChanged && replacedBranch(sync, get());
+      if (branchChanged) {
+        historyGeneration++;
+        set({
+          historyBefore: null,
+          historyAnchor: null,
+          historyTrail: [null],
+          historyPageIndex: 0,
+          historyHasUpdates: false,
+          historyLoading: false,
+          historyError: null,
+        });
+      }
       if (sessionChanged || runtimeChanged) {
         get().clearInteractions?.();
         if (revisionInFlight) {
@@ -275,6 +431,10 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
             ? {
                 historyRange: recentHistoryRange(),
                 historyBefore: null,
+                historyTrail: [null],
+                historyPageIndex: 0,
+                historyAnchor: null,
+                historyHasUpdates: false,
                 history: null,
                 items: [],
                 tree: [],
@@ -286,13 +446,21 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
         });
       }
       const range = get().historyRange;
+      const mismatchedBranchRange =
+        branchChanged && (sync.history?.from !== range.from || sync.history?.to !== range.to);
+      const frozen = Boolean(
+        get().historyBefore || get().historyAnchor || Date.now() < range.from || Date.now() >= range.to,
+      );
       const keepPage =
         !options?.requested &&
-        ((!sync.history && historySelected) ||
+        !branchChanged &&
+        (frozen ||
+          (!sync.history && historySelected) ||
           (Boolean(sync.history) &&
             (sync.history?.from !== range.from ||
               sync.history?.to !== range.to ||
               get().historyBefore ||
+              get().historyAnchor ||
               get().historyLoading)));
       const entries = sync.entries ?? [];
       const items = syncToItems(entries, nextId);
@@ -367,12 +535,33 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
               history: get().history,
               selectedTreeEntryId: get().selectedTreeEntryId,
               leafId: get().leafId,
+              historyHasUpdates: get().historyHasUpdates || Boolean(sync.leafId && sync.leafId !== get().leafId),
             }
+          : {}),
+        ...(mismatchedBranchRange
+          ? { items: [], tree: [], artifacts: [], history: null, selectedTreeEntryId: null }
           : {}),
       });
       if (sync.extensionInteractions) get().applyInteractions?.(sync.extensionInteractions);
       get().requestGitStatusRefresh({ debounce: true });
-      if (keepPage && !get().historyLoading) void get().loadHistory(range, get().historyBefore ?? undefined);
+      if (mismatchedBranchRange) {
+        void fetchHistory(range, undefined, { trail: [null], index: 0, anchor: null });
+        return;
+      }
+      // Same-runtime pushes/reconnects must not re-key rows or steal the reader's
+      // scroll position. Bootstrap a new session, or rebind a replaced runtime.
+      if (keepPage && !get().historyLoading && (sessionChanged || runtimeChanged || !previousSessionId || !frozen))
+        void fetchHistory(
+          range,
+          get().historyBefore ?? undefined,
+          sessionChanged
+            ? undefined
+            : {
+                trail: get().historyTrail,
+                index: get().historyPageIndex,
+                anchor: get().historyAnchor,
+              },
+        );
     },
 
     requestConversationSync: async (options) => {
@@ -395,11 +584,14 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
       const source = identity();
       const range = get().historyRange;
       const before = get().historyBefore;
+      const anchor = get().historyAnchor;
+      const historical = !get().isHistoryLive();
       set({ conversationSyncError: null, conversationSyncing: true });
       try {
         const sync = (await get().send("sync_request", {
           ...range,
           ...(before ? { before } : {}),
+          ...(anchor ? { through: anchor } : {}),
           ...(source.sessionId ? { sessionId: source.sessionId } : {}),
           ...(source.runtimeId ? { runtimeId: source.runtimeId } : {}),
         })) as Parameters<SessionSlice["applyStateSync"]>[0];
@@ -409,10 +601,17 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
           (!sync.sessionId || sync.sessionId === source.sessionId) &&
           (!sync.runtimeId || sync.runtimeId === source.runtimeId)
         )
-          get().applyStateSync(sync, { requested: true });
+          get().applyStateSync(sync, { requested: !historical });
       } catch (error) {
-        if (generation === historyGeneration && sameIdentity(source))
-          set({ conversationSyncError: errorUiText(error, uiText("Sync failed")) });
+        if (generation === historyGeneration && sameIdentity(source)) {
+          if (
+            error instanceof Error &&
+            ((anchor && error.message === "Unknown history anchor for this date range") ||
+              (before && error.message === "Unknown history cursor for this date range"))
+          )
+            void fetchHistory(range, undefined, { trail: [null], index: 0, anchor: null });
+          else set({ conversationSyncError: errorUiText(error, uiText("Sync failed")) });
+        }
       } finally {
         conversationSyncInFlight = false;
         set({ conversationSyncing: false });
@@ -605,16 +804,18 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
       const hadToolCall = streamingHasToolCall;
       set((state) => ({
         chatStatus: "ready",
-        items: state.items.map((item) =>
-          item.kind === "message" && item.streaming
-            ? {
-                ...item,
-                copyable: !hadToolCall,
-                presentation: hadToolCall ? "activity" : "normal",
-                streaming: false,
-              }
-            : item,
-        ),
+        items: !get().isHistoryLive()
+          ? state.items
+          : state.items.map((item) =>
+              item.kind === "message" && item.streaming
+                ? {
+                    ...item,
+                    copyable: !hadToolCall,
+                    presentation: hadToolCall ? "activity" : "normal",
+                    streaming: false,
+                  }
+                : item,
+            ),
       }));
       streamingId = null;
       streamingHasToolCall = false;
@@ -623,7 +824,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
     },
 
     applyMessageStart: (event) => {
-      if (!get().isHistoryLive()) return;
+      if (noteHistoricalUpdate()) return;
       if (event.message?.role === "assistant") {
         const id = event.message.id || nextId("assistant");
         const hasInitialToolCall = extractToolCalls(event.message.content).length > 0;
@@ -657,7 +858,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
     },
 
     applyMessageUpdate: (event) => {
-      if (!get().isHistoryLive()) return;
+      if (noteHistoricalUpdate()) return;
       const messageEvent = event.assistantMessageEvent;
       const delta = messageEvent?.delta || "";
       if (
@@ -722,7 +923,7 @@ export const createSessionSlice: StoreSlice<SessionSlice> = (rawSet, get, api) =
     },
 
     applyToolExecutionStart: (event) => {
-      if (!get().isHistoryLive()) return;
+      if (noteHistoricalUpdate()) return;
       if (!event.toolCallId) return;
       streamingHasToolCall = true;
       set((state) => ({

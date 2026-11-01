@@ -19,6 +19,7 @@ import {
 } from "./components/pi-web-ui";
 import { ChatList } from "./components/pi-web-ui/chat-list";
 import { HistoryControls } from "./components/pi-web-ui/history-controls";
+import { HistoryScrollPosition } from "./components/pi-web-ui/history-scroll-position";
 import { InteractionCenter } from "./components/pi-web-ui/interaction-panel";
 import { MessageRevisionDialog } from "./components/pi-web-ui/message-revision-dialog";
 import { RemoteAccessPanel } from "./components/pi-web-ui/remote-access-panel";
@@ -1688,7 +1689,7 @@ export function App() {
           onCycleThinking={cycleThinking}
           onOpenCommandPalette={() => setCommandOpen(true)}
           onOpenModelPicker={openModelPicker}
-          onReturnToLive={() => void requestConversationSync()}
+          onReturnToLive={() => void usePiWebUiStore.getState().returnToLatestHistory()}
           onToggleContext={() => setStatusOverlay((current) => (current === "context" ? null : "context"))}
           onToggleWorkspace={() => setStatusOverlay((current) => (current === "workspace" ? null : "workspace"))}
           onOpenSettings={openSettings}
@@ -1734,6 +1735,7 @@ export function App() {
             )}
             <div className="relative min-h-0 flex-1">
               <Conversation className="h-full">
+                <HistoryScrollPosition />
                 <ConversationContent className="mx-auto w-full max-w-3xl gap-5 px-4 py-8 sm:px-6">
                   {(messageVersions.unavailable || messageVersions.limited) && (
                     <p role="status" className="text-center text-muted-foreground text-xs">

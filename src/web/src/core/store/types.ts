@@ -50,7 +50,11 @@ export type SessionSlice = {
   entryDetail: EntryDetailResult | null;
   entryDetailLoading: boolean;
   entryDetailError: UiText | null;
-  loadEntryDetail: (entryId: string, cursor?: string) => Promise<void>;
+  entryDetailTrail: (string | null)[];
+  entryDetailPageIndex: number;
+  entryDetailPresentation: "markdown" | undefined;
+  loadEntryDetail: (entryId: string, cursor?: string, presentation?: "markdown") => Promise<void>;
+  loadPreviousEntryDetail: () => Promise<void>;
   closeEntryDetail: () => void;
   getUsageStats: () => Promise<UsageStatsResult>;
   getMessageRevision: (entryId: string, mode: MessageRevisionMode) => Promise<MessageRevisionPreview>;
@@ -58,9 +62,17 @@ export type SessionSlice = {
   historyRange: HistoryRange;
   history: HistoryMetadata | null;
   historyBefore: string | null;
+  /** Cursor identities only; old page bodies are never retained. */
+  historyTrail: (string | null)[];
+  historyPageIndex: number;
+  historyAnchor: string | null;
+  historyHasUpdates: boolean;
   historyLoading: boolean;
   historyError: UiText | null;
   loadHistory: (range: HistoryRange, before?: string) => Promise<void>;
+  loadOlderHistory: () => Promise<void>;
+  loadNewerHistory: () => Promise<void>;
+  returnToLatestHistory: () => Promise<void>;
   isHistoryLive: () => boolean;
   items: ChatItem[];
   chatStatus: ChatSubmitStatus;

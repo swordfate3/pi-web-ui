@@ -1,4 +1,4 @@
-import { CalendarDaysIcon, ChevronDownIcon } from "lucide-react";
+import { CalendarDaysIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -104,6 +104,12 @@ export function HistoryControls() {
   const range = usePiWebUiStore((s) => s.historyRange);
   const history = usePiWebUiStore((s) => s.history);
   const before = usePiWebUiStore((s) => s.historyBefore);
+  const anchor = usePiWebUiStore((s) => s.historyAnchor);
+  const pageIndex = usePiWebUiStore((s) => s.historyPageIndex);
+  const hasUpdates = usePiWebUiStore((s) => s.historyHasUpdates);
+  const older = usePiWebUiStore((s) => s.loadOlderHistory);
+  const newer = usePiWebUiStore((s) => s.loadNewerHistory);
+  const latest = usePiWebUiStore((s) => s.returnToLatestHistory);
   const loading = usePiWebUiStore((s) => s.historyLoading);
   const error = usePiWebUiStore((s) => s.historyError);
   const loadHistory = usePiWebUiStore((s) => s.loadHistory);
@@ -111,7 +117,7 @@ export function HistoryControls() {
   const connection = usePiWebUiStore((s) => s.connection);
   const count = usePiWebUiStore((s) => s.items.length);
   const disabled = loading || !sessionId || connection !== "connected";
-  const historical = Boolean(before) || Date.now() < range.from || Date.now() >= range.to;
+  const historical = Boolean(before || anchor) || Date.now() < range.from || Date.now() >= range.to;
   return (
     <section aria-label={t("Conversation history")} className="shrink-0 border-b px-4 py-2 sm:px-6">
       <div className="mx-auto min-w-0 max-w-3xl space-y-2">
@@ -160,31 +166,42 @@ export function HistoryControls() {
           )}
           {historical && <p>{t("Live messages are hidden while viewing past dates or an older page.")}</p>}
         </div>
-        {(history?.nextBefore || before) && (
-          <div className="flex flex-wrap gap-2">
-            {history?.nextBefore && (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={disabled}
-                onClick={() => void loadHistory(range, history.nextBefore ?? undefined)}
-              >
-                {t("Older page")}
+        {history && (
+          <nav aria-label={t("History pages")} className="flex min-w-0 flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={disabled || !history.nextBefore}
+              onClick={() => void older()}
+            >
+              <ChevronLeftIcon className="size-3.5" />
+              {t("Older page")}
+            </Button>
+            <span className="text-muted-foreground text-xs" aria-live="polite">
+              {t("Page {page}", { page: pageIndex + 1 })}
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={disabled || pageIndex === 0}
+              onClick={() => void newer()}
+            >
+              {t("Newer page")}
+              <ChevronRightIcon className="size-3.5" />
+            </Button>
+            {(historical || hasUpdates) && (
+              <Button type="button" size="sm" variant="ghost" disabled={disabled} onClick={() => void latest()}>
+                {t("Return to latest")}
               </Button>
             )}
-            {before && (
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={disabled}
-                onClick={() => void loadHistory(range)}
-              >
-                {t("Newest page")}
-              </Button>
+            {hasUpdates && (
+              <span role="status" className="text-primary text-xs">
+                {t("New replies available")}
+              </span>
             )}
-          </div>
+          </nav>
         )}
       </div>
     </section>

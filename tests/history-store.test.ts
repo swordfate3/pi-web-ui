@@ -668,9 +668,10 @@ test("legacy snapshots without history remain renderable and live streaming work
   assert.equal(state.items.length, 2);
 });
 
-test("reconnect bootstrap cannot replace a selected old range and reloads selected dates", async () => {
+test("same-runtime reconnect preserves selected old rows without a competing page reload", async () => {
   const state = store();
   await state.loadHistory(range);
+  const rows = state.items;
   const calls: unknown[] = [];
   state.send = async (method, params) => {
     calls.push({ method, params });
@@ -680,7 +681,8 @@ test("reconnect bootstrap cannot replace a selected old range and reloads select
   await Promise.resolve();
   assert.ok(!state.items.some((item) => item.kind === "message" && item.text === "bootstrap"));
   assert.deepEqual(state.historyRange, range);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 0);
+  assert.equal(state.items, rows);
 });
 
 test("an old sync in flight cannot replace a newer selected range", async () => {

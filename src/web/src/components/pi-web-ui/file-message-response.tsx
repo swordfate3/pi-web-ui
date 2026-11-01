@@ -18,10 +18,18 @@ const remarkPlugins = [...Object.values(defaultRemarkPlugins), remarkFileLinks];
 const linkSafety = { enabled: false };
 type Selection = { path: string; sessionId: string; runtimeId: string };
 
-export function FileMessageResponse({ children, className }: { children: string; className?: string }) {
+export function FileMessageResponse({
+  children,
+  className,
+  mode,
+}: {
+  children: string;
+  className?: string;
+  mode?: "static" | "streaming";
+}) {
   return (
     <div data-file-message>
-      <MessageResponse className={className} remarkPlugins={remarkPlugins} linkSafety={linkSafety}>
+      <MessageResponse className={className} mode={mode} remarkPlugins={remarkPlugins} linkSafety={linkSafety}>
         {children}
       </MessageResponse>
     </div>

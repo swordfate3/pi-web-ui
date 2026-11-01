@@ -1,5 +1,34 @@
 # ADR 0010: Real Pi Agent Web UI E2E Tests
 
+## Bidirectional history and complete-result reading
+
+`e2e/features/history-pagination.feature` runs real Pi RPC with a synthetic saved
+conversation and faux provider, at 1440×1000 and 390×844. It verifies older/newer
+round trips, restoration of a nonzero first-page reading position, full-result
+previous/next Markdown pages with tables/math and a source toggle, append-only
+notifications without replacing historical rows, and explicit return to live.
+Read-only navigation must leave the owned JSONL hash unchanged. Screenshots in
+`.tmp/history-pagination/` are inspected separately for visible layout. No
+production session, credential, Hub, or Docker volume is used.
+
+## Session persistence isolation
+
+`pi --print` still saves conversations: moving the working directory to `/tmp`
+does not isolate `~/.pi/agent/sessions`. One-shot model probes must explicitly
+use `--no-session`. Tests that need saved history must instead use dedicated
+temporary HOME, agent and session directories, synthetic provider responses,
+and no production Hub registration or credentials. Only resources created by
+the test may be cleaned up; a temporary cwd or repeated title is not permission
+to remove user session files.
+
+`e2e/session-persistence.integration.ts` characterizes both CLI modes using real
+Pi and a faux provider in disposable homes, then connects repeatedly to a real
+isolated mirror, performs health/sync/list operations and resumes two seeded
+saved sessions three times. The saved file names and bytes must stay unchanged.
+This is backend integration coverage, not a claim of phone/browser validation.
+Run `node --import ./tests/register-ts.mjs e2e/session-persistence.integration.ts`;
+it is also included in `npm run test:integration:web`.
+
 ## Per-message revision coverage
 
 The `message-revision` feature runs desktop and mobile examples with a real Pi process and a faux provider that inspects the actual transcript. Edited early ALPHA must not contain the original ALPHA answer or later BETA context; regenerated BETA must retain prior ALPHA but exclude its old BETA answer and the edited sibling. Exact edited whitespace is checked. The browser exercises explicit confirmation/cancellation, unsent draft protection, busy controls, Tree version switches and reload persistence. JSONL inspection is limited to this synthetic harness's temporary session, never real user conversations. Saved action buttons, not streamed answer text alone, signal that entries are actionable.

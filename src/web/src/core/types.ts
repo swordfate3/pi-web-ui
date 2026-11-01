@@ -220,15 +220,23 @@ export type WsError = {
 };
 
 export type HistoryRange = { from: number; to: number };
-export type EntryDetailRequest = { sessionId: string; runtimeId: string; entryId: string; cursor?: string };
+export type EntryDetailRequest = {
+  sessionId: string;
+  runtimeId: string;
+  entryId: string;
+  cursor?: string;
+  presentation?: "markdown";
+};
 export type EntryDetailResult = {
   sessionId: string;
   runtimeId: string;
   entryId: string;
   text: string;
   nextCursor: string | null;
+  format?: "markdown" | "text";
 };
 export type HistoryMetadata = HistoryRange & {
+  headId?: string | null;
   nextBefore: string | null;
   total: number;
   returned: number;

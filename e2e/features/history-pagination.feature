@@ -7,6 +7,7 @@ Feature: Read complete results and return through conversation pages
     And incoming replies leave the historical page and scroll position unchanged
     When I explicitly return to the newest replies
     Then the newest generated answer is visible and pagination fits the viewport
+    And a real Markdown file result renders headings tables math and its final code fence
 
     Examples:
       | viewport |

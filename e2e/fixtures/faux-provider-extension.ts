@@ -7,6 +7,7 @@ import duplicateArtifactResponses from "./responses/duplicate-artifact.ts";
 import externalArtifactResponses from "./responses/external-artifact.ts";
 import fileDownloadResponses from "./responses/file-download.ts";
 import fileUploadResponses from "./responses/file-upload.ts";
+import historyPaginationResponses from "./responses/history-pagination.ts";
 import languageMarkdownResponses from "./responses/language-markdown.ts";
 import largeToolOutputResponses from "./responses/large-tool-output.ts";
 import mathFormattingResponses from "./responses/math-formatting.ts";
@@ -30,6 +31,7 @@ const responsesByName = {
   "external-artifact": externalArtifactResponses,
   "file-download": fileDownloadResponses,
   "file-upload": fileUploadResponses,
+  "history-pagination": historyPaginationResponses,
   "tool-failure": toolFailureResponses,
   "workspace-artifact": workspaceArtifactResponses,
 };

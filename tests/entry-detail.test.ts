@@ -7,6 +7,58 @@ const scope = { sessionId: "s", runtimeId: "r", leafId: "entry" };
 const request = { sessionId: "s", runtimeId: "r", entryId: "entry" };
 const read = historyApi.readEntryDetail;
 
+test("markdown detail renders assistant text alongside native thinking without losing either", () => {
+  const thinking = "Check the document before answering.";
+  const text = "# Rendered answer\n\n| Name | Value |\n| --- | --- |\n| complete | yes |";
+  const branch = [
+    {
+      id: "entry",
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking },
+          { type: "text", text },
+        ],
+      },
+    },
+  ];
+  const result = read(branch, scope, { ...request, presentation: "markdown" }, "1");
+  assert.equal(result.format, "markdown");
+  assert.equal(result.text, `Thinking:\n${thinking}\n\n${text}`);
+  assert.equal(result.nextCursor, null);
+});
+
+test("markdown detail accepts closing fences and display math at EOF without a final newline", () => {
+  for (const ending of [
+    "```ts\nconst answer = 42;\n```",
+    "~~~md\n# Literal heading\n~~~",
+    "$$\nx^2\n$$",
+    "\\[\nx^2\n\\]",
+  ]) {
+    const branch = [
+      { id: "entry", type: "message", message: { role: "toolResult", content: [{ type: "text", text: ending }] } },
+    ];
+    const result = read(branch, scope, { ...request, presentation: "markdown" }, "1");
+    assert.equal(result.format, "markdown", ending);
+    assert.equal(result.text, ending);
+    assert.equal(result.nextCursor, null);
+  }
+});
+
+test("markdown detail still treats unfinished fences and structured tool calls as source", () => {
+  for (const content of [
+    [{ type: "text", text: "```ts\nconst unfinished = true;" }],
+    [{ type: "text", text: "$$\nx^2" }],
+    [{ type: "text", text: "```ts" }],
+    [{ type: "text", text: "$$" }],
+    [{ type: "toolCall", name: "write", arguments: { path: "document.md", content: "# Document" } }],
+  ]) {
+    const branch = [{ id: "entry", type: "message", message: { role: "assistant", content } }];
+    assert.equal(read(branch, scope, { ...request, presentation: "markdown" }, "1").format, "text");
+  }
+});
+
 test("detail chunks traverse Unicode and escapes stably within the complete envelope without changing source", () => {
   const text = '秘密😀\n"\\\u0001'.repeat(30_000);
   const branch = [{ id: "entry", type: "message", message: { role: "assistant", content: text } }];

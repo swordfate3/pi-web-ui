@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { expect, type Page } from "@playwright/test";
 import { createBdd } from "playwright-bdd";
+import { readMarkdownDocument } from "../fixtures/history-pagination";
 import { type PiWebUiHarness, startPiWebUi } from "../harness/pi-process";
 
 const { Given, When, Then, After } = createBdd();
@@ -27,7 +28,7 @@ Given("an isolated paginated conversation is running at {string} size", async ({
   errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.setViewportSize(viewport === "mobile" ? { width: 390, height: 844 } : { width: 1440, height: 1000 });
-  agent = await startPiWebUi("chat-lifecycle", { pagedHistory: true, git: false });
+  agent = await startPiWebUi("history-pagination", { pagedHistory: true, git: false });
   const filename = readdirSync(agent.sessionDir).find((name) => name.endsWith(".jsonl"));
   if (!filename) throw new Error("Missing synthetic pagination session");
   savedFile = path.join(agent.sessionDir, filename);
@@ -81,6 +82,10 @@ Then("long results can be read as Markdown pages in both directions", async ({ p
   await expect.poll(() => dialog.getByTestId("entry-detail-body").innerText()).toBe(first);
   await dialog.getByRole("button", { name: "Source", exact: true }).click();
   await expect(dialog.getByTestId("entry-detail-body")).toContainText("## Result section 0");
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Read full result", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Result section 0", exact: true })).toBeVisible();
+  await capture(page, "reopened-markdown");
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   expect(hash()).toBe(initialHash);
 });
@@ -138,6 +143,46 @@ Then("the newest generated answer is visible and pagination fits the viewport", 
     .toBe(2);
   await expect.poll(() => scroll.evaluate((element) => element.scrollTop)).toBeCloseTo(top, 0);
   await capture(page, "live-reading");
+});
+
+Then("a real Markdown file result renders headings tables math and its final code fence", async ({ page }) => {
+  if (!agent) throw new Error("Missing isolated Pi");
+  await agent.rpc({ type: "prompt", message: "E2E_READ_MARKDOWN" });
+  await expect(page.getByRole("log")).toContainText("MARKDOWN_FILE_READ_COMPLETE");
+  expect(readFileSync(path.join(agent.workspaceDir, "paged-document.md"), "utf8")).toBe(readMarkdownDocument);
+  // The reader is a bounded saved-history control. Live tool output is still
+  // complete here; reload to exercise the actual saved .md result projection.
+  await page.reload();
+  await expect(page.getByRole("log")).toContainText("MARKDOWN_FILE_READ_COMPLETE");
+  const before = hash();
+  const readCard = page
+    .locator("[data-chat-item-id]")
+    .filter({ hasText: "paged-document.md" })
+    .filter({
+      has: page.getByRole("button", { name: "Read full result", exact: true }),
+    })
+    .last();
+  await expect(readCard.getByRole("button", { name: "Read full result", exact: true })).toBeVisible();
+  await readCard.getByRole("button", { name: "Read full result", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "File section 0", exact: true })).toBeVisible();
+  await expect(dialog.locator("table").first()).toContainText("complete");
+  await expect(dialog.locator(".katex").first()).toBeVisible();
+  await capture(page, "read-file-markdown");
+  const body = dialog.getByTestId("entry-detail-body");
+  await body.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(body.locator("pre").last()).toContainText("FILE_EOF_CODE");
+  await expect(dialog.getByRole("button", { name: "Next result page", exact: true })).toBeDisabled();
+  await capture(page, "read-file-eof");
+  await dialog.getByRole("button", { name: "Source", exact: true }).click();
+  await expect(body.locator("pre")).toHaveText(readMarkdownDocument);
+  await dialog.getByRole("button", { name: "Rendered", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "File section 0", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  expect(hash()).toBe(before);
+  expect(errors).toEqual([]);
 });
 
 After(async () => {

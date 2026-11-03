@@ -137,6 +137,26 @@ function* markdownBlocks(entry: HistoryEntry): Generator<MarkdownBlock> {
     return marker === "$$" || marker === "\\[" ? marker : null;
   };
   const mathEnd = () => completeLine() && line.trim() === (math === "$$" ? "$$" : "\\]");
+  const finishLine = () => {
+    if (fence) {
+      if (!fenceEnd()) return false;
+      fence = null;
+      return true;
+    }
+    if (math) {
+      if (!mathEnd()) return false;
+      math = null;
+      return true;
+    }
+    const start = fenceStart();
+    if (start) fence = { marker: start[1][0] as "`" | "~", length: start[1].length };
+    else {
+      const marker = mathStart();
+      if (marker) math = marker;
+      else if (!nonWhitespace) return true;
+    }
+    return false;
+  };
 
   for (const segment of readableEntry(entry)) {
     for (let index = 0; index < segment.length; index++) {
@@ -147,34 +167,16 @@ function* markdownBlocks(entry: HistoryEntry): Generator<MarkdownBlock> {
       if (char !== " " && char !== "\t" && char !== "\r" && char !== "\n") nonWhitespace = true;
       if (char !== "\n") continue;
 
-      let boundary = false;
-      const safe = true;
-      if (fence) {
-        if (fenceEnd()) {
-          fence = null;
-          boundary = true;
-        }
-      } else if (math) {
-        if (mathEnd()) {
-          math = null;
-          boundary = true;
-        }
-      } else {
-        const start = fenceStart();
-        if (start) fence = { marker: start[1][0] as "`" | "~", length: start[1].length };
-        else {
-          const marker = mathStart();
-          if (marker) math = marker;
-          else if (!nonWhitespace) boundary = true;
-        }
-      }
-      if (boundary) {
-        yield { start: blockStart, end: position, safe };
+      if (finishLine()) {
+        yield { start: blockStart, end: position, safe: true };
         blockStart = position;
       }
       resetLine();
     }
   }
+  // EOF terminates a line too. Process its opening/closing markers without
+  // inserting a newline or changing the cursor's original source offsets.
+  if (lineLength) finishLine();
   if (blockStart < position) yield { start: blockStart, end: position, safe: !fence && !math };
 }
 
@@ -215,8 +217,9 @@ function markdownTextEntry(entry: HistoryEntry): boolean {
       (block) =>
         !!block &&
         typeof block === "object" &&
-        (block as { type?: unknown }).type === "text" &&
-        typeof (block as { text?: unknown }).text === "string",
+        (((block as { type?: unknown }).type === "text" && typeof (block as { text?: unknown }).text === "string") ||
+          ((block as { type?: unknown }).type === "thinking" &&
+            typeof (block as { thinking?: unknown }).thinking === "string")),
     )
   );
 }

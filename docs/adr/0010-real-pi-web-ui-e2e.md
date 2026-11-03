@@ -410,6 +410,16 @@ Desktop/mobile screenshots are inspected separately, not counted as E2E proof.
 
 The real Hub scenarios cover desktop/mobile return-home links, unsent text and attachment cancellation, immediate rename acknowledgement followed by Hub return without waiting for the 15s lease renewal, stable cards/focus across polls, native browser back and immediate text submission after lifecycle handoff. `pageshow(persisted)` is also dispatched deterministically for the refresh handler; this does not certify that every browser used BFCache. New proof-gap/deadline tests use real HTTP and Unix IPC; a limited browser trace diagnosis does not claim visibility of the registry IPC timeline. See [navigation validation](../validation/hub-navigation.md).
 
+## Paginated result Markdown regression
+
+The result-reader regression in `history-pagination.feature` also covers native
+thinking alongside long Markdown, closing/reopening after source view, and an
+actual Markdown file created/read through Pi's write/read tools. It reloads saved
+history before opening the bounded tool-result detail; the fixture exceeds the
+entry-preview threshold but stays below the read tool's output limit. Source
+view is compared with the original file, and read-only navigation must preserve
+the synthetic session hash. Desktop/mobile screenshots are reviewed separately.
+
 ## References
 
 - `AGENTS.md`

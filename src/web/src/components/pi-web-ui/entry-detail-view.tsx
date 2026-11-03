@@ -40,6 +40,15 @@ export function EntryPreviewControl({ item }: { item: ChatItem }) {
 
 /** One viewer for the conversation, not one retained text buffer per row. */
 export function EntryDetailViewer() {
+  const detail = usePiWebUiStore((state) => state.entryDetail);
+  // Source view belongs to this opening of this scoped entry, not the app's
+  // lifetime. Unmount on close so every reopening defaults to rendered text.
+  return detail ? (
+    <OpenEntryDetailViewer key={JSON.stringify([detail.sessionId, detail.runtimeId, detail.entryId])} />
+  ) : null;
+}
+
+function OpenEntryDetailViewer() {
   useLanguage();
   const detail = usePiWebUiStore((state) => state.entryDetail);
   const loading = usePiWebUiStore((state) => state.entryDetailLoading);

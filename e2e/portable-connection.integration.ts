@@ -78,6 +78,14 @@ async function fixture(t: test.TestContext, registration: RegistrationFixture, r
       data += chunk;
       if (!data.includes("\n")) return;
       const request = JSON.parse(data.split("\n")[0]);
+      // This legacy lifecycle fixture models a negotiation-backported registry.
+      // Authenticate unsupported bounded protocol before allowing legacy enrollment.
+      if (request.action === "registry_negotiate") {
+        socket.end(
+          `${JSON.stringify({ ok: false, code: "UNSUPPORTED_PROTOCOL", protocol: request.protocol, nonce: request.nonce, legacy: "legacy-v1", proof: proof(`${request.nonce}:${request.protocol}:UNSUPPORTED_PROTOCOL:legacy-v1`) })}\n`,
+        );
+        return;
+      }
       requests.push(request);
       socket.end(
         `${JSON.stringify({ ok: true, result: { url: `https://gateway.example/s/${request.generation}/` } })}\n`,

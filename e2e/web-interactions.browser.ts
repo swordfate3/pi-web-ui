@@ -5,17 +5,22 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium, devices, expect } from "@playwright/test";
-import { startPiWebUi } from "./harness/pi-process.ts";
 import { initializeHub, issueSession, readHubConfig } from "../hub/config.ts";
 import { issueManagementCode } from "../hub/management.ts";
 import { startHub } from "../hub/server.ts";
+import { startPiWebUi } from "./harness/pi-process.ts";
 
-test("real Pi browser opens explicit panels and trusted top-level review on desktop and phone", { timeout: 90000 }, async () => {
+test("real Pi browser opens explicit panels and trusted top-level review on desktop and phone", {
+  timeout: 90000,
+}, async () => {
   const root = fileURLToPath(new URL("..", import.meta.url));
   const dir = mkdtempSync(path.join(tmpdir(), "interaction-browser-"));
   const screenshots = process.env.PI_INTERACTION_SCREENSHOTS;
   if (screenshots) mkdirSync(screenshots, { recursive: true });
-  const browser = await chromium.launch({ headless: true, ...(process.env.PI_E2E_BROWSER_EXECUTABLE ? { executablePath: process.env.PI_E2E_BROWSER_EXECUTABLE } : {}) });
+  const browser = await chromium.launch({
+    headless: true,
+    ...(process.env.PI_E2E_BROWSER_EXECUTABLE ? { executablePath: process.env.PI_E2E_BROWSER_EXECUTABLE } : {}),
+  });
   let hub: Awaited<ReturnType<typeof startHub>> | undefined;
   let pi: Awaited<ReturnType<typeof startPiWebUi>> | undefined;
   try {
@@ -27,7 +32,13 @@ test("real Pi browser opens explicit panels and trusted top-level review on desk
     config.management!.publicUrl = new URL(hub.managementUrl!).origin;
     issueSession(config, credentialFile, { label: "isolated browser" });
     const events: Record<string, unknown>[] = [];
-    pi = await startPiWebUi("basic", { repositoryRoot: root, git: false, registration: { socketPath: config.socketPath, credentialFile }, extraExtensions: [path.join(root, "e2e/fixtures/web-interaction-extension.ts")], onRpcEvent: (event) => events.push(event) });
+    pi = await startPiWebUi("basic", {
+      repositoryRoot: root,
+      git: false,
+      registration: { socketPath: config.socketPath, credentialFile },
+      extraExtensions: [path.join(root, "e2e/fixtures/web-interaction-extension.ts")],
+      onRpcEvent: (event) => events.push(event),
+    });
     const context = await browser.newContext({ viewport: { width: 1365, height: 960 }, locale: "zh-CN" });
     const page = await context.newPage();
     const errors: string[] = [];
@@ -58,7 +69,8 @@ test("real Pi browser opens explicit panels and trusted top-level review on desk
     await expect(review.locator("#review-status")).toContainText("授权已送达");
     await expect.poll(() => events.filter((event) => event.message === "FIXTURE_MCP_RECONNECTED_ONCE").length).toBe(1);
     await dialog.getByRole("button", { name: "关闭面板", exact: true }).click();
-    await input.fill("/agents"); await input.press("Enter");
+    await input.fill("/agents");
+    await input.press("Enter");
     await expect(page.getByRole("dialog", { name: "子代理管理" })).toBeVisible();
     await expect(page.getByRole("spinbutton", { name: "最大并发数" })).toHaveValue("2");
     await page.getByRole("spinbutton", { name: "最大并发数" }).fill("3");
@@ -77,9 +89,16 @@ test("real Pi browser opens explicit panels and trusted top-level review on desk
     assert.ok(box && box.x >= 0 && box.x + box.width <= 391);
     await mobile.goto(new URL(reviewPath, hub.managementUrl).href);
     await expect(mobile.locator("#management-code")).toBeVisible();
-    if (screenshots) await mobile.screenshot({ path: path.join(screenshots, "phone-review-locked.png"), fullPage: true });
+    if (screenshots)
+      await mobile.screenshot({ path: path.join(screenshots, "phone-review-locked.png"), fullPage: true });
     assert.deepEqual(errors, []);
     assert.equal(events.filter((event) => event.message === "FIXTURE_UNEXPECTED_TUI_PANEL").length, 0);
-    await phone.close(); await context.close();
-  } finally { await browser.close(); await pi?.stop(); await hub?.close(); rmSync(dir, { recursive: true, force: true }); }
+    await phone.close();
+    await context.close();
+  } finally {
+    await browser.close();
+    await pi?.stop();
+    await hub?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
